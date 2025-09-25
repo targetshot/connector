@@ -16,7 +16,7 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
-CONNECT_VERSION = os.getenv("TS_CONNECT_VERSION", "0.9.0")
+CONNECT_VERSION = os.getenv("TS_CONNECT_VERSION", "0.2.5")
 CONNECT_RELEASE = os.getenv("TS_CONNECT_RELEASE", "Beta")
 SESSION_SECRET = os.getenv("UI_SESSION_SECRET", "targetshot-connect-ui-secret")
 CONFLUENT_CLUSTER_URL = os.getenv(
@@ -28,7 +28,7 @@ CONFLUENT_BOOTSTRAP_DEFAULT = os.getenv(
     "TS_CONNECT_BOOTSTRAP_DEFAULT",
     "pkc-w7d6j.germanywestcentral.azure.confluent.cloud:9092",
 )
-DOCS_URL = os.getenv("TS_CONNECT_DOCS_URL", "https://docs.targetshot.app/connect/")
+DOCS_URL = os.getenv("TS_CONNECT_DOCS_URL", "https://docs.targetshot.app/")
 
 DATA_DIR = Path("/app/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
