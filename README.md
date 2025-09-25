@@ -5,7 +5,7 @@ This package bundles TargetShot Connect (Kafka Connect + MariaDB Debezium connec
 ## Quick Start
 
 ```bash
-git clone git@github.com:targetshot/connector.git
+git clone https://github.com/targetshot/connector.git
 cd connector
 cp .env.example .env  # adjust secrets
 cp ui/.env.example ui/.env  # optional: UI-specific overrides
@@ -30,5 +30,7 @@ ui/
 connect/
 README.md
 ```
+
+Ausführliche Dokumentation: <https://docs.targetshot.app/connect/docker-compose/>
 
 Publish versioned releases by tagging branches (e.g., `connector-compose-v0.1`).
