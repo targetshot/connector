@@ -31,6 +31,6 @@ connect/
 README.md
 ```
 
-Ausführliche Dokumentation: <https://docs.targetshot.app/connect/docker-compose/>
+Ausführliche Dokumentation: <https://docs.targetshot.app/install/docker-compose/>
 
 Publish versioned releases by tagging branches (e.g., `connector-compose-v0.1`).
