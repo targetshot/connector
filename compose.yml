@@ -1,0 +1,79 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.1.10
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=256M
+      - --reserve-memory=0M
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    restart: unless-stopped
+    ports:
+      - "9092:9092"  # optional für Debug von außen
+
+  kafka-connect:
+    build:
+      context: ./connect
+    container_name: ts-kafka-connect
+    restart: unless-stopped
+    ports:
+      - "8083:8083"             # Connect REST (nur intern nutzen)
+    environment:
+      # Worker nutzt NUR den lokalen Broker (damit immer startbar)
+      CONNECT_BOOTSTRAP_SERVERS: redpanda:9092
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_GROUP_ID: targetshot-connect
+      CONNECT_CONFIG_STORAGE_TOPIC: _ts_connect_configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _ts_connect_offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _ts_connect_status
+      # Single-Node => RF=1 (wichtig!)
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+
+      # Config Provider (Secrets aus Datei)
+      CONNECT_CONFIG_PROVIDERS: file
+      CONNECT_CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
+      SECRETS_FILE: /app/data/secrets.properties
+
+      CONNECT_REST_PORT: 8083
+      CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
+    volumes:
+      - ./ui/data:/app/data   # Connect liest hier die secrets.properties
+    depends_on:
+      - redpanda
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/connectors"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  ui:
+    build:
+      context: ./ui
+    container_name: ts-connect-ui
+    restart: unless-stopped
+    # Nur im Vereinsnetz freigeben: UI_BIND_IP z.B. 192.168.11.5
+    ports:
+      - "${UI_BIND_IP:-127.0.0.1}:8080:8080"
+    environment:
+      UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD:-change-me}
+      CONNECT_BASE_URL: http://kafka-connect:8083
+      DEFAULT_CONNECTOR_NAME: targetshot-debezium
+      UI_TRUSTED_CIDRS: ${UI_TRUSTED_CIDRS:-192.168.0.0/16,10.0.0.0/8,172.16.0.0/12}
+    depends_on:
+      - kafka-connect
+    volumes:
+      - ./ui/data:/app/data
+
+volumes: {}

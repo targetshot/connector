@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TargetShot Connect · Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700&family=Sora:wght@600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'media',
+      theme: {
+        extend: {
+          colors: {
+            ink: { 900: '#0a0a0a', 800: '#111113', 700: '#1a1b1e' },
+            accent: { DEFAULT: '#0aa5ff', dark: '#0071e3' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial; min-width: 320px; }
+    .brand-heading { font-family: 'Sora', ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial; letter-spacing: -0.02em; }
+    .brand-sub { font-family: 'Plus Jakarta Sans', ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial; letter-spacing: -0.01em; }
+  </style>
+</head>
+<body class="antialiased bg-gradient-to-br from-white via-white to-slate-100 text-zinc-900 dark:from-ink-900 dark:via-ink-900 dark:to-black dark:text-white">
+  <div class="relative min-h-screen overflow-hidden">
+    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(80%_80%_at_50%_-10%,rgba(34,211,238,0.25),rgba(124,58,237,0)_70%)] opacity-90 dark:opacity-60"></div>
+    <div class="relative z-10 flex min-h-screen flex-col items-center justify-center px-4 py-12">
+      <div class="w-full max-w-md rounded-[28px] border border-white/60 bg-white/80 p-10 shadow-2xl shadow-cyan-500/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/80 dark:shadow-black/40">
+        <div class="flex items-center gap-4">
+          <span class="flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-lg shadow-cyan-500/30 ring-1 ring-white/60 backdrop-blur dark:bg-white/10 dark:ring-white/10">
+            <img src="{{ request.url_for('static', path='logo.svg') }}" alt="TargetShot Logo" class="h-9 w-9" />
+          </span>
+          <div>
+            <h1 class="brand-heading text-3xl font-bold">TargetShot Connect</h1>
+            <p class="brand-sub text-sm text-zinc-500 dark:text-zinc-300">Admin UI · Zugang nur für befugte Personen</p>
+          </div>
+        </div>
+
+        <form method="post" action="/login" class="mt-10 space-y-6">
+          {% if error %}
+          <div class="rounded-2xl border border-red-200 bg-red-50/80 px-4 py-3 text-sm font-medium text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-200">
+            {{ error }}
+          </div>
+          {% endif %}
+
+          <div class="space-y-2">
+            <label for="pw" class="text-sm font-semibold text-zinc-700 dark:text-zinc-200">Admin-Passwort</label>
+            <input id="pw" name="pw" type="password" required autocomplete="current-password" class="w-full rounded-2xl border border-zinc-200/70 bg-white/90 px-4 py-3 text-base text-zinc-900 shadow-inner shadow-zinc-900/5 transition focus:border-accent focus:outline-none focus:ring-4 focus:ring-accent/20 dark:border-white/15 dark:bg-ink-900/70 dark:text-white" />
+          </div>
+
+          <button type="submit" class="w-full rounded-full bg-gradient-to-r from-cyan-400 via-indigo-500 to-purple-500 px-6 py-3 text-base font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:shadow-indigo-500/40 focus:outline-none focus:ring-4 focus:ring-indigo-500/30">
+            Anmelden
+          </button>
+        </form>
+
+        <p class="mt-8 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+          Standard-Passwort: <code>change-me</code> – bitte in der Docker-Compose-Umgebung über <code>UI_ADMIN_PASSWORD</code> ändern.
+        </p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

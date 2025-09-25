@@ -1,0 +1,7 @@
+ui/data/
+ui/__pycache__/
+connect/__pycache__/
+*.pyc
+.env
+compose.env
+ui/.env
