@@ -36,6 +36,10 @@ DB_CONNECTION_TZ = os.getenv("TS_CONNECT_DB_CONNECTION_TZ", "Europe/Berlin")
 SNAPSHOT_MODE = os.getenv("TS_CONNECT_SNAPSHOT_MODE", "initial")
 HISTORY_BOOTSTRAP = os.getenv("TS_CONNECT_HISTORY_BOOTSTRAP", "redpanda:9092")
 HISTORY_TOPIC = os.getenv("TS_CONNECT_HISTORY_TOPIC", "_ts_db_history")
+SINGLE_TOPIC_MODE = os.getenv("TS_CONNECT_SINGLE_TOPIC", "false").strip().lower() in {"1", "true", "yes", "on"}
+SINGLE_TOPIC_REGEX = os.getenv("TS_CONNECT_SINGLE_TOPIC_REGEX", ".*")
+TOPIC_REPLICATION_FACTOR = os.getenv("TS_CONNECT_TOPIC_REPLICATION_FACTOR", "1")
+TOPIC_PARTITIONS = os.getenv("TS_CONNECT_TOPIC_PARTITIONS", "3")
 
 
 def build_connector_config(settings: dict) -> dict:
@@ -48,7 +52,8 @@ def build_connector_config(settings: dict) -> dict:
         db_host, db_port, db_user, server_id, server_name, topic_prefix,
         confluent_bootstrap, confluent_sasl_username.
     """
-    return {
+    transforms = ["unwrap"]
+    cfg: dict[str, str] = {
         "connector.class": "io.debezium.connector.mysql.MySqlConnector",
         "database.hostname": settings["db_host"],
         "database.port": str(settings["db_port"]),
@@ -61,7 +66,6 @@ def build_connector_config(settings: dict) -> dict:
         "database.allowPublicKeyRetrieval": "true",
         "decimal.handling.mode": "string",
         "time.precision.mode": "connect",
-        "transforms": "unwrap",
         "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
         "transforms.unwrap.drop.tombstones": "false",
         "transforms.unwrap.delete.handling.mode": "rewrite",
@@ -84,7 +88,20 @@ def build_connector_config(settings: dict) -> dict:
         "column.include.list": COLUMN_INCLUDE_LIST,
         "database.connectionTimeZone": DB_CONNECTION_TZ,
         "snapshot.mode": SNAPSHOT_MODE,
-        "topic.creation.default.replication.factor": "3",
-        "topic.creation.default.partitions": "3",
+        "topic.creation.default.replication.factor": TOPIC_REPLICATION_FACTOR,
+        "topic.creation.default.partitions": TOPIC_PARTITIONS,
         "topic.creation.default.cleanup.policy": "delete",
     }
+
+    if SINGLE_TOPIC_MODE:
+        transforms.append("route")
+        cfg.update(
+            {
+                "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+                "transforms.route.regex": SINGLE_TOPIC_REGEX,
+                "transforms.route.replacement": settings["topic_prefix"],
+            }
+        )
+
+    cfg["transforms"] = ",".join(transforms)
+    return cfg
