@@ -12,6 +12,7 @@ APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
 DEFAULT_CONNECTOR_NAME = os.getenv("DEFAULT_CONNECTOR_NAME", "targetshot-debezium")
 ADMIN_PASSWORD = os.getenv("UI_ADMIN_PASSWORD", "change-me")
+PASSWORD_PLACEHOLDER = "********"
 TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
@@ -235,6 +236,7 @@ def require_session(request: Request):
 
 def build_index_context(request: Request) -> dict:
     data = fetch_settings().copy()
+    secrets_data = read_secrets_file()
     placeholders = {
         "YOUR-BOOTSTRAP:9092",
         "YOUR-BOOTSTRAP",
@@ -244,6 +246,7 @@ def build_index_context(request: Request) -> dict:
         data["confluent_bootstrap"] = CONFLUENT_BOOTSTRAP_DEFAULT
 
     has_secrets = SECRETS_PATH.exists()
+    db_password_saved = bool(secrets_data.get("db_password"))
     flash_message = request.session.pop("flash_message", None)
     error_message = request.session.pop("error_message", None)
 
@@ -258,6 +261,8 @@ def build_index_context(request: Request) -> dict:
         "flash_message": flash_message,
         "error_message": error_message,
         "docs_url": DOCS_URL,
+        "db_password_placeholder": PASSWORD_PLACEHOLDER if db_password_saved else "",
+        "db_password_saved": db_password_saved,
     }
 
 
@@ -292,6 +297,9 @@ async def logout(request: Request):
 @app.get("/api/test/db", dependencies=[Depends(require_session)])
 async def test_db(host: str, port: int, user: str, password: str):
     import pymysql
+    secrets_data = read_secrets_file()
+    if password == PASSWORD_PLACEHOLDER and secrets_data.get("db_password"):
+        password = secrets_data["db_password"]
     try:
         conn = pymysql.connect(host=host, port=port, user=user, password=password,
                                connect_timeout=3, read_timeout=3, write_timeout=3)
@@ -369,12 +377,21 @@ async def save(
         return RedirectResponse("/", status_code=303)
 
     if section_key == "db":
-        if not all([db_host, db_port is not None, db_user, db_password]):
+        if not all([db_host, db_port is not None, db_user]):
             request.session["error_message"] = "Bitte alle MariaDB-Felder ausfüllen."
             return RedirectResponse("/", status_code=303)
 
         db_host = db_host.strip()
         db_user = db_user.strip()
+        submitted_password = (db_password or "").strip() if db_password is not None else ""
+        existing_password = secrets_data.get("db_password", "")
+        if submitted_password == PASSWORD_PLACEHOLDER and existing_password:
+            db_password_value = existing_password
+        else:
+            db_password_value = submitted_password
+        if not db_password_value:
+            request.session["error_message"] = "Bitte das MariaDB-Passwort angeben."
+            return RedirectResponse("/", status_code=303)
 
         conn = get_db()
         conn.execute(
@@ -389,7 +406,7 @@ async def save(
         confluent_user_val = settings["confluent_sasl_username"] or secrets_data.get("confluent_sasl_username", "")
         confluent_pass_val = secrets_data.get("confluent_sasl_password", "")
 
-        write_secrets_file(db_password, confluent_bootstrap_val, confluent_user_val, confluent_pass_val)
+        write_secrets_file(db_password_value, confluent_bootstrap_val, confluent_user_val, confluent_pass_val)
 
         try:
             await apply_connector_config()
@@ -434,7 +451,13 @@ async def save(
         conn.close()
 
         settings = fetch_settings()
-        db_password_val = db_password if db_password else secrets_data.get("db_password")
+        submitted_password = (db_password or "").strip()
+        if submitted_password == PASSWORD_PLACEHOLDER and secrets_data.get("db_password"):
+            db_password_val = secrets_data.get("db_password")
+        elif submitted_password:
+            db_password_val = submitted_password
+        else:
+            db_password_val = secrets_data.get("db_password")
         if not db_password_val:
             request.session["error_message"] = "Bitte zuerst die MariaDB-Zugangsdaten speichern (DB-Passwort fehlt)."
             return RedirectResponse("/", status_code=303)

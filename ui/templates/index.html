@@ -298,7 +298,10 @@
                 </div>
                 <div>
                   <label class="input-label" for="db_password">DB Passwort</label>
-                  <input id="db_password" name="db_password" type="password" class="ts-input" placeholder="••••••••" autocomplete="current-password" required />
+                  <input id="db_password" name="db_password" type="password" class="ts-input" placeholder="••••••••" value="{{ db_password_placeholder }}" autocomplete="current-password" required />
+                  {% if db_password_saved %}
+                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Gespeichertes Passwort wird aus Sicherheitsgründen nur als Platzhalter angezeigt.</p>
+                  {% endif %}
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-3 pt-1">

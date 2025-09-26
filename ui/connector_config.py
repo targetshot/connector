@@ -34,6 +34,8 @@ COLUMN_INCLUDE_LIST = os.getenv(
 )
 DB_CONNECTION_TZ = os.getenv("TS_CONNECT_DB_CONNECTION_TZ", "Europe/Berlin")
 SNAPSHOT_MODE = os.getenv("TS_CONNECT_SNAPSHOT_MODE", "initial")
+HISTORY_BOOTSTRAP = os.getenv("TS_CONNECT_HISTORY_BOOTSTRAP", "redpanda:9092")
+HISTORY_TOPIC = os.getenv("TS_CONNECT_HISTORY_TOPIC", "_ts_db_history")
 
 
 def build_connector_config(settings: dict) -> dict:
@@ -63,8 +65,10 @@ def build_connector_config(settings: dict) -> dict:
         "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
         "transforms.unwrap.drop.tombstones": "false",
         "transforms.unwrap.delete.handling.mode": "rewrite",
-        "database.history.kafka.bootstrap.servers": "redpanda:9092",
-        "database.history.kafka.topic": "_ts_db_history",
+        "database.history.kafka.bootstrap.servers": HISTORY_BOOTSTRAP,
+        "database.history.kafka.topic": HISTORY_TOPIC,
+        "schema.history.internal.kafka.bootstrap.servers": HISTORY_BOOTSTRAP,
+        "schema.history.internal.kafka.topic": HISTORY_TOPIC,
         "producer.override.bootstrap.servers": f"${{file:{CONNECT_SECRETS_PATH}:confluent_bootstrap}}",
         "producer.override.security.protocol": "SASL_SSL",
         "producer.override.sasl.mechanism": "PLAIN",
