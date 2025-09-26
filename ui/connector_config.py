@@ -81,8 +81,8 @@ def build_connector_config(settings: dict) -> dict:
             f"username='${{file:{CONNECT_SECRETS_PATH}:confluent_sasl_username}}' "
             f"password='${{file:{CONNECT_SECRETS_PATH}:confluent_sasl_password}}';"
         ),
-        "producer.override.key.serializer": "org.apache.kafka.common.serialization.StringSerializer",
-        "producer.override.value.serializer": "org.apache.kafka.common.serialization.StringSerializer",
+        "producer.override.key.serializer": "org.apache.kafka.common.serialization.ByteArraySerializer",
+        "producer.override.value.serializer": "org.apache.kafka.common.serialization.ByteArraySerializer",
         "database.include.list": DB_INCLUDE_LIST,
         "table.include.list": TABLE_INCLUDE_LIST,
         "column.include.list": COLUMN_INCLUDE_LIST,
