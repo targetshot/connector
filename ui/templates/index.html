@@ -405,6 +405,7 @@
                 <button type="button" id="btnResume" class="btn-secondary">Resume</button>
                 <button type="button" id="btnRestart" class="btn-secondary">Restart</button>
                 <button type="button" id="btnShowConfig" class="btn-secondary">Konfiguration anzeigen</button>
+                <button type="button" id="btnResnapshot" class="btn-secondary">Reset &amp; Re-Snapshot</button>
               </div>
               <div id="connectorConfigPanel" class="hidden rounded-2xl border border-zinc-200/60 bg-white/80 px-4 py-4 text-xs text-zinc-700 shadow-inner shadow-zinc-900/5 dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
                 <div id="connectorConfigInfo" class="mb-3 text-[0.72rem] uppercase tracking-wide text-zinc-500 dark:text-zinc-400"></div>
@@ -416,6 +417,10 @@
                   <span class="inline-flex h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if has_secrets else 'bg-amber-400' }}"></span>
                   <span>{{ 'secrets.properties vorhanden' if has_secrets else 'secrets.properties wird nach dem ersten Speichern erstellt' }}</span>
                 </div>
+                <p class="rounded-2xl border border-amber-200/70 bg-amber-100/70 px-3 py-2 text-amber-800 shadow-inner dark:border-amber-300/40 dark:bg-amber-500/10 dark:text-amber-200">
+                  <strong>Reset &amp; Re-Snapshot:</strong> Löscht den bestehenden Connector und erstellt ihn neu. Dadurch startet Debezium eine Vollaufnahme der Vereinsdatenbank.
+                  Benutzer sollten dies nur durchführen, wenn Postgres leer ist oder eine komplette Aktualisierung benötigt wird.
+                </p>
               </div>
             </section>
           </div>
@@ -466,6 +471,20 @@
     document.getElementById('btnPause').onclick = () => connectorAction('pause');
     document.getElementById('btnResume').onclick = () => connectorAction('resume');
     document.getElementById('btnRestart').onclick = () => connectorAction('restart');
+    document.getElementById('btnResnapshot').onclick = async () => {
+      if (!confirm('Connector zurücksetzen und komplette Datenaufnahme neu starten? Dieser Vorgang löscht den aktuellen Debezium-Status.')) return;
+      const pw = prompt('Admin-Passwort?');
+      if (!pw) return;
+      const fd = new FormData();
+      fd.append('pw', pw);
+      const r = await fetch('/api/connector/resnapshot', { method: 'POST', body: fd });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        alert('Connector wurde neu erstellt. Debezium startet jetzt eine Vollaufnahme.');
+      } else {
+        alert('Fehler beim Reset: ' + (j.detail || j.error || r.status));
+      }
+    };
     const configPanel = document.getElementById('connectorConfigPanel');
     const configContent = document.getElementById('connectorConfigContent');
     const configInfo = document.getElementById('connectorConfigInfo');

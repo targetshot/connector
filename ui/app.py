@@ -491,6 +491,23 @@ async def connector_control(action: str, pw: str = Form(...)):
         r = await client.post(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/{action}")
         return {"ok": r.status_code in (200, 202), "status": r.status_code}
 
+
+@app.post("/api/connector/resnapshot", dependencies=[Depends(require_session)])
+async def connector_resnapshot(pw: str = Form(...)):
+    require_admin(pw)
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            resp = await client.delete(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}")
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Connector REST nicht erreichbar: {exc}")
+        if resp.status_code not in (200, 202, 204, 404):
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    try:
+        await apply_connector_config()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Connector-Neuanlage fehlgeschlagen: {exc}")
+    return {"ok": True}
+
 # --------- Status ----------
 @app.get("/api/status", dependencies=[Depends(require_session)])
 async def status():
