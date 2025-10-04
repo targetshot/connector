@@ -484,7 +484,7 @@
       if (!pw) return;
       const fd = new FormData();
       fd.append('pw', pw);
-      const r = await fetch('/api/connector/' + action, { method: 'POST', body: fd });
+      const r = await fetch('/api/connector/control/' + action, { method: 'POST', body: fd });
       const j = await r.json();
       alert(action + ': ' + (j.ok ? 'OK' : ('Fehler (' + j.status + ')')));
     }

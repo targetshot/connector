@@ -720,7 +720,8 @@ async def save(
     return RedirectResponse("/", status_code=303)
 
 # --------- Connector Control ----------
-@app.post("/api/connector/{action}", dependencies=[Depends(require_session)])
+# --------- Connector Control ----------
+@app.post("/api/connector/control/{action}", dependencies=[Depends(require_session)])
 async def connector_control(action: str, pw: str = Form(...)):
     require_admin(pw)
     valid = {"pause", "resume", "restart"}
@@ -730,6 +731,7 @@ async def connector_control(action: str, pw: str = Form(...)):
         return {"ok": r.status_code in (200, 202), "status": r.status_code}
 
 
+# --------- Secrets ----------
 @app.post("/api/secrets/view", dependencies=[Depends(require_session)])
 async def secrets_view(pw: str = Form(...)):
     require_admin(pw)
