@@ -1,4 +1,15 @@
-import os, socket, ssl, ipaddress, stat, sqlite3, hashlib, secrets
+import asyncio
+import json
+import logging
+import os
+import socket
+import ssl
+import ipaddress
+import stat
+import sqlite3
+import hashlib
+import secrets
+from datetime import datetime, timedelta
 from pathlib import Path
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -36,6 +47,147 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "config.db"
 SECRETS_PATH = Path(CONNECT_SECRETS_PATH)
 ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
+APPLY_STATE_PATH = DATA_DIR / "connector_apply_state.json"
+APPLY_RETRY_SECONDS = int(os.getenv("TS_CONNECT_APPLY_RETRY_SECONDS", "60"))
+
+logger = logging.getLogger("ts-connect-ui")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
+_apply_state_lock = asyncio.Lock()
+
+
+class DeferredApplyError(RuntimeError):
+    """Raised when connector apply is deferred for a retry."""
+
+
+def _now_utc_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _default_apply_state() -> dict:
+    return {
+        "pending": False,
+        "last_error": None,
+        "last_attempt": None,
+        "last_success": None,
+        "next_retry": None,
+    }
+
+
+def _read_apply_state_unlocked() -> dict:
+    if APPLY_STATE_PATH.exists():
+        try:
+            data = json.loads(APPLY_STATE_PATH.read_text(encoding="utf-8"))
+            state = _default_apply_state()
+            state.update({k: data.get(k) for k in state.keys()})
+            return state
+        except Exception:
+            return _default_apply_state()
+    return _default_apply_state()
+
+
+async def get_apply_state() -> dict:
+    async with _apply_state_lock:
+        return _read_apply_state_unlocked()
+
+
+async def merge_apply_state(**updates) -> dict:
+    async with _apply_state_lock:
+        state = _read_apply_state_unlocked()
+        state.update(updates)
+        APPLY_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8")
+        return state
+
+
+def _next_retry_iso() -> str | None:
+    if APPLY_RETRY_SECONDS <= 0:
+        return None
+    return (datetime.utcnow() + timedelta(seconds=APPLY_RETRY_SECONDS)).replace(microsecond=0).isoformat() + "Z"
+
+
+def _short_error_message(raw: str, max_len: int = 180) -> str:
+    if not raw:
+        return ""
+    text = raw.strip().splitlines()[0]
+    if len(text) > max_len:
+        return text[: max_len - 1] + "…"
+    return text
+
+
+TRANSIENT_HTTP_CODES = {500, 502, 503, 504}
+TRANSIENT_ERROR_MARKERS = (
+    "communications link failure",
+    "connection refused",
+    "connect timed out",
+    "connection timed out",
+    "could not connect",
+    "no route to host",
+    "unknown host",
+    "temporarily unavailable",
+    "service unavailable",
+    "timeout after",
+)
+
+
+def _is_transient_status(status_code: int, message: str | None) -> bool:
+    if status_code in TRANSIENT_HTTP_CODES:
+        return True
+    if status_code == 400 and message:
+        lowered = message.lower()
+        return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
+    if status_code == 409:
+        return True  # connector already in desired state - treat as non-fatal
+    return False
+
+
+def _is_transient_request_error(exc: httpx.RequestError) -> bool:
+    lowered = str(exc).lower()
+    return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
+
+
+async def _schedule_retry(err_msg: str) -> None:
+    message = _short_error_message(err_msg, 300)
+    await merge_apply_state(
+        pending=True,
+        last_error=message,
+        last_attempt=_now_utc_iso(),
+        next_retry=_next_retry_iso(),
+    )
+    logger.warning("Connector apply deferred: %s", message)
+
+
+async def _mark_apply_success() -> None:
+    await merge_apply_state(
+        pending=False,
+        last_error=None,
+        last_attempt=_now_utc_iso(),
+        last_success=_now_utc_iso(),
+        next_retry=None,
+    )
+
+
+async def _connector_retry_worker() -> None:
+    if APPLY_RETRY_SECONDS <= 0:
+        logger.info("Connector retry worker disabled (APPLY_RETRY_SECONDS=%s)", APPLY_RETRY_SECONDS)
+        return
+    await asyncio.sleep(APPLY_RETRY_SECONDS)
+    while True:
+        state = await get_apply_state()
+        if state.get("pending"):
+            try:
+                await apply_connector_config(allow_defer=False)
+            except Exception as exc:  # noqa: BLE001
+                await merge_apply_state(
+                    pending=True,
+                    last_error=_short_error_message(str(exc), 300),
+                    last_attempt=_now_utc_iso(),
+                    next_retry=_next_retry_iso(),
+                )
+                logger.warning("Retrying connector apply failed: %s", exc)
+            else:
+                logger.info("Deferred connector apply succeeded on retry")
+        await asyncio.sleep(APPLY_RETRY_SECONDS)
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -181,9 +333,51 @@ def verify_admin_password(candidate: str) -> bool:
 @app.on_event("startup")
 async def init_admin_password() -> None:
     ensure_admin_password_file()
+    asyncio.create_task(_connector_retry_worker())
 
 
-async def apply_connector_config() -> None:
+def _extract_error_message(resp: httpx.Response) -> str:
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return resp.text
+    if isinstance(payload, dict):
+        for key in ("message", "error", "detail", "trace"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+    return resp.text
+
+
+async def _connect_request(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    json_payload: dict | None = None,
+    allow_defer: bool,
+    ok_statuses: tuple[int, ...] = (200, 201, 202, 204),
+) -> httpx.Response:
+    try:
+        resp = await client.request(method, url, json=json_payload)
+    except httpx.RequestError as exc:
+        if allow_defer and _is_transient_request_error(exc):
+            await _schedule_retry(str(exc))
+            raise DeferredApplyError(_short_error_message(str(exc))) from exc
+        raise RuntimeError(f"{method} {url} fehlgeschlagen: {exc}") from exc
+
+    if resp.status_code not in ok_statuses:
+        message = _extract_error_message(resp)
+        if allow_defer and _is_transient_status(resp.status_code, message):
+            await _schedule_retry(message)
+            raise DeferredApplyError(_short_error_message(message))
+        raise RuntimeError(
+            f"{method} {url} -> {resp.status_code}: {message.strip() or 'Unbekannter Fehler'}"
+        )
+    return resp
+
+
+async def apply_connector_config(*, allow_defer: bool = True) -> None:
     settings = fetch_settings()
     secrets = read_secrets_file()
 
@@ -203,16 +397,47 @@ async def apply_connector_config() -> None:
     }
 
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}")
-        if r.status_code == 200:
-            await client.put(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/pause")
-            await client.put(
-                f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/config",
-                json=connector_cfg["config"],
+        url_base = f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}"
+        resp = await _connect_request(
+            client,
+            "GET",
+            url_base,
+            allow_defer=allow_defer,
+            ok_statuses=(200, 404),
+        )
+        if resp.status_code == 200:
+            await _connect_request(
+                client,
+                "PUT",
+                f"{url_base}/pause",
+                allow_defer=allow_defer,
+                ok_statuses=(200, 202, 204, 409),
             )
-            await client.put(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/resume")
+            await _connect_request(
+                client,
+                "PUT",
+                f"{url_base}/config",
+                json_payload=connector_cfg["config"],
+                allow_defer=allow_defer,
+            )
+            await _connect_request(
+                client,
+                "PUT",
+                f"{url_base}/resume",
+                allow_defer=allow_defer,
+                ok_statuses=(200, 202, 204, 409),
+            )
         else:
-            await client.post(f"{CONNECT_BASE_URL}/connectors", json=connector_cfg)
+            await _connect_request(
+                client,
+                "POST",
+                f"{CONNECT_BASE_URL}/connectors",
+                json_payload=connector_cfg,
+                allow_defer=allow_defer,
+                ok_statuses=(200, 201, 202),
+            )
+
+    await _mark_apply_success()
 
 # --------- Views ----------
 @app.get("/", response_class=HTMLResponse)
@@ -411,6 +636,12 @@ async def save(
         try:
             await apply_connector_config()
             request.session["flash_message"] = "MariaDB-Einstellungen gespeichert & Connector aktualisiert."
+        except DeferredApplyError as exc:
+            request.session["flash_message"] = (
+                "MariaDB-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
+                "sobald die Vereinsdatenbank erreichbar ist. "
+                f"Letzter Fehler: {exc}"
+            )
         except ValueError as exc:
             request.session["flash_message"] = (
                 "MariaDB-Einstellungen gespeichert. Connector-Update übersprungen: "
@@ -471,6 +702,13 @@ async def save(
 
         try:
             await apply_connector_config()
+        except DeferredApplyError as exc:
+            request.session["flash_message"] = (
+                "Confluent-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
+                "sobald die Vereinsdatenbank erreichbar ist. "
+                f"Letzter Fehler: {exc}"
+            )
+            return RedirectResponse("/", status_code=303)
         except Exception as exc:
             request.session["error_message"] = f"Connector-Update fehlgeschlagen: {exc}"
             return RedirectResponse("/", status_code=303)
@@ -504,22 +742,45 @@ async def connector_resnapshot(pw: str = Form(...)):
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
     try:
         await apply_connector_config()
+    except DeferredApplyError as exc:
+        return {
+            "ok": True,
+            "pending": True,
+            "message": (
+                "Connector-Neuanlage wurde geplant. Sobald die Vereinsdatenbank erreichbar ist, "
+                "startet Debezium automatisch. "
+                f"Letzter Fehler: {exc}"
+            ),
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Connector-Neuanlage fehlgeschlagen: {exc}")
-    return {"ok": True}
+    return {"ok": True, "pending": False}
 
 # --------- Status ----------
 @app.get("/api/status", dependencies=[Depends(require_session)])
 async def status():
+    apply_state = await get_apply_state()
+    result: dict[str, object] = {"applyState": apply_state}
+    preset_worker = "pending" if apply_state.get("pending") else None
     async with httpx.AsyncClient(timeout=5) as client:
         try:
             w = await client.get(f"{CONNECT_BASE_URL}/connectors")
             if w.status_code != 200:
-                return {"worker": "unavailable"}
+                result["worker"] = preset_worker or "unavailable"
+                result["error"] = _extract_error_message(w)
+                return result
             s = await client.get(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/status")
-            return {"worker": "ok", "connectorStatus": s.json() if s.status_code == 200 else None}
+            result["connectorStatus"] = s.json() if s.status_code == 200 else None
+            result["worker"] = preset_worker or "ok"
+            if preset_worker and apply_state.get("last_error"):
+                result.setdefault("error", apply_state.get("last_error"))
+            return result
         except Exception as e:
-            return {"worker": "unavailable", "error": str(e)}
+            result["worker"] = preset_worker or "unavailable"
+            result["error"] = str(e)
+            if preset_worker and apply_state.get("last_error"):
+                result.setdefault("error", apply_state.get("last_error"))
+            return result
 
 
 @app.get("/api/connector/config", dependencies=[Depends(require_session)])

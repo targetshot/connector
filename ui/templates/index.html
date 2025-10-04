@@ -430,15 +430,30 @@
   </div>
 
   <script>
-    function setBadge(el, ok, msg) {
-      el.className = 'badge ' + (ok ? 'ok' : 'warn');
-      el.textContent = (ok ? 'OK' : 'Fehler') + (msg ? (' – ' + msg) : '');
+    function setBadge(el, state, msg) {
+      let label;
+      if (state === 'pending') {
+        el.className = 'badge warn';
+        label = 'Wartet';
+      } else {
+        const ok = !!state;
+        el.className = 'badge ' + (ok ? 'ok' : 'warn');
+        label = ok ? 'OK' : 'Fehler';
+      }
+      el.textContent = label + (msg ? (' – ' + msg) : '');
     }
     document.getElementById('btnWorker').onclick = async () => {
       const r = await fetch('/api/status');
       const j = await r.json();
-      const ok = j.worker === 'ok';
-      setBadge(document.getElementById('statusBadge'), ok, ok ? '' : (j.error || 'Worker down'));
+      const badge = document.getElementById('statusBadge');
+      if (j.worker === 'pending') {
+        const baseMsg = j.error || j.applyState?.last_error || 'Connector wartet auf Datenbank';
+        const retryInfo = j.applyState?.next_retry ? (' Nächster Versuch: ' + j.applyState.next_retry) : '';
+        setBadge(badge, 'pending', baseMsg + retryInfo);
+      } else {
+        const ok = j.worker === 'ok';
+        setBadge(badge, ok, ok ? '' : (j.error || 'Worker down'));
+      }
     };
     document.getElementById('btnTestDb').onclick = async () => {
       const qs = new URLSearchParams({
@@ -480,7 +495,11 @@
       const r = await fetch('/api/connector/resnapshot', { method: 'POST', body: fd });
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.ok) {
-        alert('Connector wurde neu erstellt. Debezium startet jetzt eine Vollaufnahme.');
+        if (j.pending) {
+          alert(j.message || 'Connector-Neuanlage wartet auf die Vereinsdatenbank und wird automatisch fortgesetzt.');
+        } else {
+          alert('Connector wurde neu erstellt. Debezium startet jetzt eine Vollaufnahme.');
+        }
       } else {
         alert('Fehler beim Reset: ' + (j.detail || j.error || r.status));
       }
