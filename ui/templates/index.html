@@ -405,11 +405,16 @@
                 <button type="button" id="btnResume" class="btn-secondary">Resume</button>
                 <button type="button" id="btnRestart" class="btn-secondary">Restart</button>
                 <button type="button" id="btnShowConfig" class="btn-secondary">Konfiguration anzeigen</button>
+                <button type="button" id="btnViewSecrets" class="btn-secondary">Secrets anzeigen</button>
                 <button type="button" id="btnResnapshot" class="btn-secondary">Reset &amp; Re-Snapshot</button>
               </div>
               <div id="connectorConfigPanel" class="hidden rounded-2xl border border-zinc-200/60 bg-white/80 px-4 py-4 text-xs text-zinc-700 shadow-inner shadow-zinc-900/5 dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
                 <div id="connectorConfigInfo" class="mb-3 text-[0.72rem] uppercase tracking-wide text-zinc-500 dark:text-zinc-400"></div>
                 <pre id="connectorConfigContent" class="max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-emerald-300 dark:bg-black/60"></pre>
+              </div>
+              <div id="secretsPanel" class="hidden rounded-2xl border border-zinc-200/60 bg-white/80 px-4 py-4 text-xs text-zinc-700 shadow-inner shadow-zinc-900/5 dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
+                <div id="secretsInfo" class="mb-3 text-[0.72rem] uppercase tracking-wide text-zinc-500 dark:text-zinc-400"></div>
+                <pre id="secretsContent" class="max-h-60 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-sky-300 dark:bg-black/60"></pre>
               </div>
               <div class="space-y-2 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
                 <p>Geheimnisse werden sicher in <code>/app/data/secrets.properties</code> mit Dateirecht 0600 gespeichert und bleiben nur im Vereinsnetz zugänglich.</p>
@@ -507,6 +512,9 @@
     const configPanel = document.getElementById('connectorConfigPanel');
     const configContent = document.getElementById('connectorConfigContent');
     const configInfo = document.getElementById('connectorConfigInfo');
+    const secretsPanel = document.getElementById('secretsPanel');
+    const secretsContent = document.getElementById('secretsContent');
+    const secretsInfo = document.getElementById('secretsInfo');
     document.getElementById('btnShowConfig').onclick = async () => {
       if (!configPanel.classList.contains('hidden')) {
         configPanel.classList.add('hidden');
@@ -534,6 +542,34 @@
       } catch (error) {
         configInfo.textContent = 'Fehler beim Abrufen der Konfiguration';
         configContent.textContent = error instanceof Error ? error.message : String(error);
+      }
+    };
+    document.getElementById('btnViewSecrets').onclick = async () => {
+      if (!secretsPanel.classList.contains('hidden')) {
+        secretsPanel.classList.add('hidden');
+        return;
+      }
+      const pw = prompt('Admin-Passwort?');
+      if (!pw) return;
+      const fd = new FormData();
+      fd.append('pw', pw);
+      secretsPanel.classList.remove('hidden');
+      secretsInfo.textContent = 'Lade secrets.properties…';
+      secretsContent.textContent = '';
+      try {
+        const response = await fetch('/api/secrets/view', { method: 'POST', body: fd });
+        const json = await response.json().catch(() => ({}));
+        if (!response.ok || !json.ok) {
+          const detail = json.detail || json.error || response.statusText || response.status;
+          secretsInfo.textContent = 'Fehler beim Laden von secrets.properties';
+          secretsContent.textContent = detail ? String(detail) : 'Unbekannter Fehler';
+          return;
+        }
+        secretsInfo.textContent = json.modified ? ('secrets.properties – zuletzt geändert: ' + json.modified) : 'secrets.properties Inhalt';
+        secretsContent.textContent = json.content || '(Datei ist leer)';
+      } catch (error) {
+        secretsInfo.textContent = 'Fehler beim Laden von secrets.properties';
+        secretsContent.textContent = error instanceof Error ? error.message : String(error);
       }
     };
   </script>

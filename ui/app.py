@@ -28,7 +28,7 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
-CONNECT_VERSION = os.getenv("TS_CONNECT_VERSION", "0.2.5")
+CONNECT_VERSION = os.getenv("TS_CONNECT_VERSION", "v0.2.17-beta")
 CONNECT_RELEASE = os.getenv("TS_CONNECT_RELEASE", "Beta")
 SESSION_SECRET = os.getenv("UI_SESSION_SECRET", "targetshot-connect-ui-secret")
 CONFLUENT_CLUSTER_URL = os.getenv(
@@ -728,6 +728,16 @@ async def connector_control(action: str, pw: str = Form(...)):
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/{action}")
         return {"ok": r.status_code in (200, 202), "status": r.status_code}
+
+
+@app.post("/api/secrets/view", dependencies=[Depends(require_session)])
+async def secrets_view(pw: str = Form(...)):
+    require_admin(pw)
+    if not SECRETS_PATH.exists():
+        return {"ok": False, "exists": False, "content": ""}
+    text = SECRETS_PATH.read_text(encoding="utf-8")
+    modified = datetime.utcfromtimestamp(SECRETS_PATH.stat().st_mtime).replace(microsecond=0).isoformat() + "Z"
+    return {"ok": True, "exists": True, "content": text, "modified": modified}
 
 
 @app.post("/api/connector/resnapshot", dependencies=[Depends(require_session)])
