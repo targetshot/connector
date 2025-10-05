@@ -77,6 +77,7 @@ DOCKER_SOCKET_PATH = Path(os.getenv("TS_CONNECT_DOCKER_SOCKET", "/var/run/docker
 AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
+PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
 
 PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
 
@@ -1079,6 +1080,84 @@ async def test_confluent(bootstrap: str):
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
+
+async def _check_database_health() -> dict[str, str]:
+    settings = fetch_settings()
+    host = settings.get("db_host")
+    port = settings.get("db_port")
+    user = settings.get("db_user")
+    if not host or not user or not port:
+        return {"status": "unknown", "message": "Nicht konfiguriert"}
+    secrets = read_secrets_file()
+    password = secrets.get("db_password")
+    if not password:
+        return {"status": "warn", "message": "Kein Passwort gespeichert"}
+
+    def _connect() -> None:
+        import pymysql  # local import to avoid global dependency at import time
+
+        conn = pymysql.connect(
+            host=host,
+            port=int(port),
+            user=user,
+            password=password,
+            connect_timeout=3,
+            read_timeout=3,
+            write_timeout=3,
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        conn.close()
+
+    try:
+        await asyncio.to_thread(_connect)
+        return {"status": "ok", "message": "Verbindung aktiv"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "message": _short_error_message(str(exc), 140)}
+
+
+async def _check_confluent_health() -> dict[str, str]:
+    settings = fetch_settings()
+    bootstrap = settings.get("confluent_bootstrap") or CONFLUENT_BOOTSTRAP_DEFAULT
+    if not bootstrap:
+        return {"status": "unknown", "message": "Nicht konfiguriert"}
+    result = await test_confluent(bootstrap)
+    if result.get("ok"):
+        return {"status": "ok", "message": result.get("msg", "Erreichbar")}
+    return {"status": "error", "message": _short_error_message(str(result.get("msg", "Fehler")), 140)}
+
+
+async def _check_connector_health() -> dict[str, str]:
+    async with httpx.AsyncClient(timeout=5) as client:
+        try:
+            overview = await client.get(f"{CONNECT_BASE_URL}/connectors")
+            if overview.status_code != 200:
+                return {
+                    "status": "error",
+                    "message": _extract_error_message(overview),
+                }
+            status_resp = await client.get(
+                f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/status"
+            )
+            if status_resp.status_code == 200:
+                data = status_resp.json()
+                state = (data.get("connector") or {}).get("state")
+                if state in {"RUNNING", "UP"}:
+                    return {"status": "ok", "message": "Connector läuft"}
+                if state:
+                    return {"status": "warn", "message": f"Zustand: {state}"}
+                return {"status": "warn", "message": "Status unbekannt"}
+            if status_resp.status_code == 404:
+                return {"status": "warn", "message": "Connector nicht angelegt"}
+            return {
+                "status": "error",
+                "message": _extract_error_message(status_resp),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "message": _short_error_message(str(exc), 140)}
+
+
 # --------- Save & Apply ----------
 @app.post("/save", dependencies=[Depends(require_session)])
 async def save(
@@ -1338,6 +1417,20 @@ async def update_status(force: bool = False):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 180))
     return status
+
+
+@app.get("/api/health/summary", dependencies=[Depends(require_session)])
+async def health_summary():
+    database, confluent, connector = await asyncio.gather(
+        _check_database_health(),
+        _check_confluent_health(),
+        _check_connector_health(),
+    )
+    return {
+        "database": database,
+        "confluent": confluent,
+        "connector": connector,
+    }
 
 
 @app.post("/api/update/config", dependencies=[Depends(require_session)])

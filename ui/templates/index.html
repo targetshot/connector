@@ -257,6 +257,20 @@
               <span id="statusBadge" class="badge">…</span>
               <span class="text-xs text-zinc-500 dark:text-zinc-400">Live-Abfrage des aktuellen Debezium Connectors</span>
             </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-3">
+              <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
+                <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">MariaDB</p>
+                <div class="mt-2"><span id="dbStatusBadge" class="badge">…</span></div>
+              </div>
+              <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
+                <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Confluent</p>
+                <div class="mt-2"><span id="confluentStatusBadge" class="badge">…</span></div>
+              </div>
+              <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
+                <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Debezium Connector</p>
+                <div class="mt-2"><span id="connectorStatusBadge" class="badge">…</span></div>
+              </div>
+            </div>
           </section>
 
           {% if flash_message or error_message %}
@@ -481,6 +495,20 @@
     </div>
   </div>
 
+  <div id="infoModal" class="fixed inset-0 z-50 hidden bg-black/50 backdrop-blur-sm">
+    <div class="absolute inset-0 flex items-center justify-center p-4">
+      <div id="infoModalCard" class="w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white">
+        <div class="space-y-2">
+          <h3 id="infoModalTitle" class="brand-sub text-lg font-semibold text-zinc-900 dark:text-white">Hinweis</h3>
+          <p id="infoModalMessage" class="text-sm text-zinc-600 dark:text-zinc-300"></p>
+        </div>
+        <div class="mt-6 flex justify-end">
+          <button type="button" id="infoModalClose" class="btn-secondary !bg-white/70 !text-zinc-700 hover:!bg-white dark:!bg-white/20 dark:!text-white">Schließen</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="passwordModal" class="fixed inset-0 z-50 hidden bg-black/50 backdrop-blur-sm">
     <div class="absolute inset-0 flex items-center justify-center p-4">
       <div id="passwordModalCard" class="w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white">
@@ -507,6 +535,17 @@
     const passwordModalForm = document.getElementById('passwordModalForm');
     const passwordModalInput = document.getElementById('passwordModalInput');
     const passwordModalCancel = document.getElementById('passwordModalCancel');
+    const infoModal = document.getElementById('infoModal');
+    const infoModalCard = document.getElementById('infoModalCard');
+    const infoModalTitle = document.getElementById('infoModalTitle');
+    const infoModalMessage = document.getElementById('infoModalMessage');
+    const infoModalClose = document.getElementById('infoModalClose');
+    const INFO_MODAL_BASE = 'w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white';
+    const INFO_MODAL_ERROR = 'border-rose-300 bg-rose-100 dark:border-rose-400/40 dark:bg-rose-900/40 dark:text-rose-100';
+    const INFO_MODAL_TITLE_BASE = 'brand-sub text-lg font-semibold text-zinc-900 dark:text-white';
+    const INFO_MODAL_TITLE_ERROR = 'brand-sub text-lg font-semibold text-rose-700 dark:text-rose-200';
+    const INFO_MODAL_MESSAGE_BASE = 'text-sm text-zinc-600 dark:text-zinc-300';
+    const INFO_MODAL_MESSAGE_ERROR = 'text-sm text-rose-600 dark:text-rose-200';
     let passwordResolver = null;
 
     function closePasswordModal() {
@@ -558,6 +597,36 @@
       if (event.key === 'Escape' && passwordResolver) {
         resolvePasswordModal(null);
       }
+      if (event.key === 'Escape' && !infoModal.classList.contains('hidden')) {
+        closeInfoModal();
+      }
+    });
+
+    function closeInfoModal() {
+      if (infoModal.classList.contains('hidden')) return;
+      infoModal.classList.add('hidden');
+      document.body.classList.remove('overflow-hidden');
+      infoModalTitle.textContent = '';
+      infoModalMessage.textContent = '';
+    }
+
+    function showInfoModal(title, message, variant = 'info') {
+      infoModalTitle.textContent = title;
+      infoModalMessage.textContent = message;
+      const isError = variant === 'error';
+      infoModalCard.className = isError ? `${INFO_MODAL_BASE} ${INFO_MODAL_ERROR}` : INFO_MODAL_BASE;
+      infoModalTitle.className = isError ? INFO_MODAL_TITLE_ERROR : INFO_MODAL_TITLE_BASE;
+      infoModalMessage.className = isError ? INFO_MODAL_MESSAGE_ERROR : INFO_MODAL_MESSAGE_BASE;
+      infoModal.classList.remove('hidden');
+      document.body.classList.add('overflow-hidden');
+      infoModalClose.focus();
+    }
+
+    infoModalClose.addEventListener('click', () => closeInfoModal());
+    infoModal.addEventListener('click', (event) => {
+      if (event.target === infoModal) {
+        closeInfoModal();
+      }
     });
 
     function setBadge(el, state, msg) {
@@ -575,6 +644,7 @@
     document.getElementById('btnWorker').onclick = async () => {
       const r = await fetch('/api/status');
       const j = await r.json();
+      loadHealthSummary(false).catch(() => {});
       const badge = document.getElementById('statusBadge');
       if (j.worker === 'pending') {
         const baseMsg = j.error || j.applyState?.last_error || 'Connector wartet auf Datenbank';
@@ -706,6 +776,9 @@
     const btnCheckUpdate = document.getElementById('btnCheckUpdate');
     const btnRunUpdate = document.getElementById('btnRunUpdate');
     const updateStatusHint = document.getElementById('updateStatusHint');
+    const dbStatusBadge = document.getElementById('dbStatusBadge');
+    const confluentStatusBadge = document.getElementById('confluentStatusBadge');
+    const connectorStatusBadge = document.getElementById('connectorStatusBadge');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     const autoUpdateHour = document.getElementById('autoUpdateHour');
@@ -778,6 +851,41 @@
       if (!prereq.workspace) missing.push('Workspace-Mount');
       updatePrereqHint.className = 'text-xs text-amber-600 dark:text-amber-300';
       updatePrereqHint.textContent = 'Voraussetzungen fehlen: ' + missing.join(', ');
+    }
+
+    function setHealthBadge(el, summary) {
+      if (!el || !summary) return;
+      const status = summary.status || 'unknown';
+      const message = summary.message || '';
+      if (status === 'ok') {
+        setBadge(el, true, message);
+      } else if (status === 'error') {
+        setBadge(el, false, message);
+      } else {
+        setBadge(el, 'pending', message || 'Unbekannt');
+      }
+    }
+
+    async function loadHealthSummary(showError) {
+      try {
+        const response = await fetch('/api/health/summary');
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = data.detail || response.statusText || response.status;
+          throw new Error(String(detail));
+        }
+        setHealthBadge(dbStatusBadge, data.database);
+        setHealthBadge(confluentStatusBadge, data.confluent);
+        setHealthBadge(connectorStatusBadge, data.connector);
+      } catch (error) {
+        if (showError) {
+          const message = error instanceof Error ? error.message : String(error);
+          showInfoModal('Statusfehler', message, 'error');
+        }
+        setHealthBadge(dbStatusBadge, { status: 'error', message: '' });
+        setHealthBadge(confluentStatusBadge, { status: 'error', message: '' });
+        setHealthBadge(connectorStatusBadge, { status: 'error', message: '' });
+      }
     }
 
     async function loadUpdateStatus(force) {
@@ -864,6 +972,7 @@
             updateLog.textContent = 'Noch keine Update-Logs.';
           }
         }
+        loadHealthSummary(false).catch(() => {});
         if (data.status === 'running') {
           updatePollTimer = setTimeout(() => {
             loadUpdateStatus(false).catch(() => {});
@@ -905,15 +1014,16 @@
           const data = await response.json().catch(() => ({}));
           if (!response.ok || !data.ok) {
             const detail = data.detail || data.error || response.statusText || response.status;
-            alert('Update konnte nicht gestartet werden: ' + detail);
+            showInfoModal('Update fehlgeschlagen', detail ? String(detail) : 'Update konnte nicht gestartet werden.', 'error');
             return;
           }
-          alert('Update gestartet. Die UI wird kurz neu gestartet, sobald docker compose neu gebaut wurde.');
+          showInfoModal('Update gestartet', 'Die UI wird kurz neu gestartet, sobald docker compose neu gebaut wurde.');
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          alert('Fehler beim Starten des Updates: ' + message);
+          showInfoModal('Update fehlgeschlagen', message, 'error');
         } finally {
           loadUpdateStatus(true).catch(() => {});
+          loadHealthSummary(false).catch(() => {});
         }
       };
     }
@@ -946,6 +1056,7 @@
     }
 
     loadUpdateStatus(false).catch(() => {});
+    loadHealthSummary(false).catch(() => {});
   </script>
 </body>
 </html>
