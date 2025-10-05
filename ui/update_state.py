@@ -19,6 +19,9 @@ def _default_state() -> dict[str, Any]:
         "update_target": None,
         "log": [],
         "job_started": None,
+        "auto_update_enabled": False,
+        "auto_update_hour": 1,
+        "auto_update_last_run": None,
     }
 
 

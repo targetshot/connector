@@ -62,12 +62,16 @@ GITHUB_TOKEN = os.getenv("TS_CONNECT_GITHUB_TOKEN", "").strip()
 UPDATE_RUNNER_IMAGE = os.getenv("TS_CONNECT_UPDATE_IMAGE", "").strip()
 UPDATE_CONTAINER_PREFIX = os.getenv("TS_CONNECT_UPDATE_CONTAINER_PREFIX", "ts-connect-update")
 DOCKER_SOCKET_PATH = Path(os.getenv("TS_CONNECT_DOCKER_SOCKET", "/var/run/docker.sock"))
+AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
+AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
+AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
 
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
 
 _update_state_lock = asyncio.Lock()
 _update_job_lock = asyncio.Lock()
 _cached_repo_slug: str | None = None
+_auto_update_task: asyncio.Task | None = None
 
 logger = logging.getLogger("ts-connect-ui")
 if not logger.handlers:
@@ -195,6 +199,45 @@ async def _run_command_text(cmd: list[str], *, cwd: Path | None = None, timeout:
     code, stdout, stderr = await _run_command_capture(cmd, cwd=cwd, timeout=timeout)
     output = stdout if stdout.strip() else stderr
     return code, output.strip()
+
+
+def _sanitize_hour(value: Any, default: int = AUTO_UPDATE_DEFAULT_HOUR) -> int:
+    try:
+        hour = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(23, hour))
+
+
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if val in {"1", "true", "yes", "on"}:
+            return True
+        if val in {"0", "false", "no", "off"}:
+            return False
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _calculate_next_auto_run(hour: int, last_run_iso: str | None) -> datetime:
+    hour = _sanitize_hour(hour)
+    now = datetime.utcnow()
+    base = now
+    if last_run_iso:
+        last_dt = _parse_iso8601(last_run_iso)
+        if last_dt and last_dt > base:
+            base = last_dt
+    candidate = base.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if candidate <= base:
+        candidate += timedelta(days=1)
+    return candidate
 
 
 async def _determine_repo_slug(force: bool = False) -> str | None:
@@ -356,6 +399,12 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
     current_marker = CONNECT_VERSION or workspace_info.get("current_ref") or workspace_info.get("current_commit")
     latest_tag = release.get("tag_name") if isinstance(release, dict) else None
     update_available = bool(latest_tag and current_marker and latest_tag != current_marker)
+    auto_enabled = bool(state.get("auto_update_enabled"))
+    auto_hour = _sanitize_hour(state.get("auto_update_hour"))
+    auto_last_run = state.get("auto_update_last_run")
+    next_auto_run_iso = None
+    if auto_enabled:
+        next_auto_run_iso = _calculate_next_auto_run(auto_hour, auto_last_run).isoformat() + "Z"
     status: dict[str, Any] = {
         "ok": True,
         "status": state.get("status", "idle"),
@@ -375,6 +424,12 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         "repo_slug": repo_slug,
         "compose_env": compose_env_exists,
         "job_started": state.get("job_started"),
+        "auto_update": {
+            "enabled": auto_enabled,
+            "hour": auto_hour,
+            "last_run": auto_last_run,
+            "next_run": next_auto_run_iso,
+        },
     }
     return status
 
@@ -422,6 +477,102 @@ async def _start_update_runner(target_ref: str | None, repo_slug: str | None, co
         message = stderr.strip() or stdout.strip() or "docker run Fehler"
         raise RuntimeError(message)
     return stdout.strip()
+
+
+async def _launch_update_job(
+    *,
+    target_ref: str | None,
+    initiated_by: str,
+    force_release_refresh: bool,
+    reset_log: bool,
+) -> dict[str, Any]:
+    label = "Automatisches" if initiated_by == "auto" else "Manuelles"
+    async with _update_job_lock:
+        state = await get_update_state_snapshot()
+        if state.get("status") == "running":
+            return {"ok": False, "error": "Ein Update läuft bereits", "code": 409}
+        workspace_info = await _collect_workspace_info()
+        prereq = _detect_prerequisites(workspace_info)
+        if not prereq.get("ok"):
+            missing = [name for name, available in prereq.items() if name != "ok" and not available]
+            detail = "Voraussetzungen fehlen: " + ", ".join(missing)
+            return {"ok": False, "error": detail, "code": 400}
+        release = await _ensure_latest_release(force=force_release_refresh)
+        repo_slug = await _determine_repo_slug()
+        compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
+        selected_target = target_ref or (release.get("tag_name") if isinstance(release, dict) else None)
+        job_started = _now_utc_iso()
+        log_lines = [f"{label} Update ausgelöst um {job_started}", f"Initiator: {initiated_by}"]
+        await append_update_log(log_lines, reset=reset_log)
+        updates: dict[str, Any] = {
+            "status": "running",
+            "update_in_progress": True,
+            "current_action": "Starte Update Runner",
+            "last_error": None,
+            "job_started": job_started,
+            "update_target": selected_target,
+        }
+        if initiated_by == "auto":
+            updates["auto_update_last_run"] = job_started
+        await merge_update_state_async(**updates)
+        try:
+            container_id = await _start_update_runner(selected_target, repo_slug, compose_env_exists)
+        except Exception as exc:  # noqa: BLE001
+            message = _short_error_message(str(exc), 200)
+            result_updates: dict[str, Any] = {
+                "status": "error",
+                "update_in_progress": False,
+                "current_action": None,
+                "last_error": message,
+                "log_append": [f"FEHLER: {message}"],
+            }
+            if initiated_by == "auto":
+                result_updates.setdefault("auto_update_last_run", job_started)
+            await merge_update_state_async(**result_updates)
+            return {"ok": False, "error": message, "code": 500}
+        await merge_update_state_async(
+            current_action="Update-Runner läuft",
+            log_append=[f"Runner Container: {container_id}"],
+        )
+        return {"ok": True, "container": container_id, "target": selected_target}
+
+
+async def _auto_update_worker() -> None:
+    await asyncio.sleep(15)
+    while True:
+        try:
+            state = await get_update_state_snapshot()
+            if state.get("auto_update_enabled"):
+                auto_hour = _sanitize_hour(state.get("auto_update_hour"))
+                last_run_iso = state.get("auto_update_last_run")
+                now = datetime.utcnow()
+                today_run = now.replace(hour=auto_hour, minute=0, second=0, microsecond=0)
+                last_run_dt = _parse_iso8601(last_run_iso)
+                already_today = last_run_dt and last_run_dt.date() == now.date()
+                if now >= today_run and not already_today:
+                    logger.info("Auto-Update: Starte geplanten Lauf für %s", today_run.isoformat())
+                    result = await _launch_update_job(
+                        target_ref=None,
+                        initiated_by="auto",
+                        force_release_refresh=AUTO_UPDATE_FORCE_RELEASE,
+                        reset_log=False,
+                    )
+                    if not result.get("ok"):
+                        await merge_update_state_async(
+                            log_append=[
+                                "Automatisches Update fehlgeschlagen: "
+                                + str(result.get("error")),
+                            ],
+                            auto_update_last_run=_now_utc_iso(),
+                        )
+                    await asyncio.sleep(60)
+                    continue
+            await asyncio.sleep(AUTO_UPDATE_CHECK_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Auto-Update Worker Fehler: %s", exc)
+            await asyncio.sleep(max(120, AUTO_UPDATE_CHECK_SECONDS))
 
 
 TRANSIENT_HTTP_CODES = {500, 502, 503, 504}
@@ -643,7 +794,16 @@ def verify_admin_password(candidate: str) -> bool:
 async def init_admin_password() -> None:
     ensure_admin_password_file()
     await ensure_update_state()
+    state = await get_update_state_snapshot()
+    updates: dict[str, Any] = {}
+    if state.get("auto_update_hour") is None:
+        updates["auto_update_hour"] = AUTO_UPDATE_DEFAULT_HOUR
+    if updates:
+        await merge_update_state_async(**updates)
     asyncio.create_task(_connector_retry_worker())
+    global _auto_update_task
+    if _auto_update_task is None:
+        _auto_update_task = asyncio.create_task(_auto_update_worker())
 
 
 def _extract_error_message(resp: httpx.Response) -> str:
@@ -1130,50 +1290,37 @@ async def update_status(force: bool = False):
     return status
 
 
+@app.post("/api/update/config", dependencies=[Depends(require_session)])
+async def update_config(pw: str = Form(...), auto_enabled: str = Form("0"), auto_hour: str = Form("1")):
+    require_admin(pw)
+    enabled = _parse_bool(auto_enabled, default=False)
+    hour = _sanitize_hour(auto_hour)
+    await merge_update_state_async(
+        auto_update_enabled=enabled,
+        auto_update_hour=hour,
+    )
+    return {
+        "ok": True,
+        "auto_update": {
+            "enabled": enabled,
+            "hour": hour,
+        },
+    }
+
+
 @app.post("/api/update/run", dependencies=[Depends(require_session)])
 async def trigger_update(pw: str = Form(...), target: str | None = Form(None)):
     require_admin(pw)
-    async with _update_job_lock:
-        state = await get_update_state_snapshot()
-        if state.get("status") == "running":
-            raise HTTPException(status_code=409, detail="Ein Update läuft bereits")
-        workspace_info = await _collect_workspace_info()
-        prereq = _detect_prerequisites(workspace_info)
-        if not prereq.get("ok"):
-            missing = [name for name, enabled in prereq.items() if name != "ok" and not enabled]
-            detail = "Voraussetzungen fehlen: " + ", ".join(missing)
-            raise HTTPException(status_code=400, detail=detail)
-        release = await _ensure_latest_release(force=not target)
-        repo_slug = await _determine_repo_slug()
-        compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
-        target_ref = target or (release.get("tag_name") if isinstance(release, dict) else None)
-        job_started = _now_utc_iso()
-        await append_update_log([f"Update ausgelöst um {job_started}"], reset=True)
-        await merge_update_state_async(
-            status="running",
-            update_in_progress=True,
-            current_action="Starte Update Runner",
-            last_error=None,
-            job_started=job_started,
-            update_target=target_ref,
-        )
-        try:
-            container_id = await _start_update_runner(target_ref, repo_slug, compose_env_exists)
-        except Exception as exc:  # noqa: BLE001
-            message = _short_error_message(str(exc), 200)
-            await merge_update_state_async(
-                status="error",
-                update_in_progress=False,
-                current_action=None,
-                last_error=message,
-                log_append=[f"FEHLER: {message}"],
-            )
-            raise HTTPException(status_code=500, detail=message)
-        await merge_update_state_async(
-            current_action="Update-Runner läuft",
-            log_append=[f"Runner Container: {container_id}"],
-        )
-        return {"ok": True, "container": container_id, "target": target_ref}
+    target_ref = (target or "").strip() or None
+    result = await _launch_update_job(
+        target_ref=target_ref,
+        initiated_by="manual",
+        force_release_refresh=not target_ref,
+        reset_log=True,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=result.get("code", 500), detail=result.get("error"))
+    return result
 
 if __name__ == "__main__":
     import uvicorn
