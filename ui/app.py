@@ -65,6 +65,7 @@ DOCKER_SOCKET_PATH = Path(os.getenv("TS_CONNECT_DOCKER_SOCKET", "/var/run/docker
 AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
+WORKSPACE_HOST_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE_HOST", "/workspace-host-resolve"))
 
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
 
@@ -365,7 +366,7 @@ async def _ensure_latest_release(force: bool = False) -> dict[str, Any] | None:
     latest_release = state.get("latest_release") if isinstance(state.get("latest_release"), dict) else None
     last_check = _parse_iso8601(state.get("last_check"))
     if latest_release and last_check and not force:
-        age = datetime.utcnow() - last_check
+        age = datetime.now(timezone.utc) - last_check
         if age.total_seconds() < UPDATE_CACHE_SECONDS:
             return latest_release
     repo_slug = await _determine_repo_slug(force=force)

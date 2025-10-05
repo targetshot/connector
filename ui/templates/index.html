@@ -792,6 +792,9 @@
           throw new Error(String(detail));
         }
         setUpdateBadge(data.status, data.current_action, data.last_error);
+        if (btnCheckUpdate) {
+          btnCheckUpdate.textContent = data.update_available ? 'Neues Update gefunden' : 'Auf aktuellem Stand';
+        }
         if (updateVersionInfo) {
           const parts = [];
           if (data.current_version) {
@@ -865,7 +868,13 @@
     }
 
     if (btnCheckUpdate) {
-      btnCheckUpdate.onclick = () => loadUpdateStatus(true);
+      btnCheckUpdate.onclick = () => {
+        btnCheckUpdate.disabled = true;
+        btnCheckUpdate.textContent = 'Suche nach Updates…';
+        loadUpdateStatus(true).finally(() => {
+          btnCheckUpdate.disabled = false;
+        });
+      };
     }
     if (btnRunUpdate) {
       btnRunUpdate.onclick = async () => {
