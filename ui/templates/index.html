@@ -454,12 +454,13 @@
     </div>
   </div>
 
-  <div id="passwordModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-    <div id="passwordModalCard" class="w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white">
-      <form id="passwordModalForm" class="space-y-4">
-        <div>
-          <h3 class="brand-sub text-lg font-semibold text-zinc-900 dark:text-white">Admin-Passwort erforderlich</h3>
-          <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">Bitte gib das aktuelle Admin-Passwort ein, um mit der Aktion fortzufahren.</p>
+  <div id="passwordModal" class="fixed inset-0 z-50 hidden bg-black/50 backdrop-blur-sm">
+    <div class="absolute inset-0 flex items-center justify-center p-4">
+      <div id="passwordModalCard" class="w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white">
+        <form id="passwordModalForm" class="space-y-4">
+          <div>
+            <h3 class="brand-sub text-lg font-semibold text-zinc-900 dark:text-white">Admin-Passwort erforderlich</h3>
+            <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">Bitte gib das aktuelle Admin-Passwort ein, um mit der Aktion fortzufahren.</p>
         </div>
         <div>
           <label class="input-label" for="passwordModalInput">Admin-Passwort</label>
@@ -469,7 +470,8 @@
           <button type="button" id="passwordModalCancel" class="btn-secondary !bg-white/50 !text-zinc-700 hover:!bg-white dark:!bg-white/20 dark:!text-white">Abbrechen</button>
           <button type="submit" class="primary-button">Bestätigen</button>
         </div>
-      </form>
+        </form>
+      </div>
     </div>
   </div>
 
