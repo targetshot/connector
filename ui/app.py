@@ -33,8 +33,19 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
-CONNECT_VERSION = os.getenv("TS_CONNECT_VERSION", "v0.2.17-beta")
-CONNECT_RELEASE = os.getenv("TS_CONNECT_RELEASE", "Beta")
+def _load_version_defaults() -> tuple[str, str]:
+    version = os.getenv("TS_CONNECT_VERSION")
+    release = os.getenv("TS_CONNECT_RELEASE")
+    version_file = WORKSPACE_PATH / "VERSION"
+    release_file = WORKSPACE_PATH / "RELEASE"
+    if (not version or not version.strip()) and version_file.exists():
+        version = version_file.read_text(encoding="utf-8").strip()
+    if (not release or not release.strip()) and release_file.exists():
+        release = release_file.read_text(encoding="utf-8").strip()
+    return (version or "dev"), (release or "Unbekannt")
+
+
+CONNECT_VERSION, CONNECT_RELEASE = _load_version_defaults()
 SESSION_SECRET = os.getenv("UI_SESSION_SECRET", "targetshot-connect-ui-secret")
 CONFLUENT_CLUSTER_URL = os.getenv(
     "TS_CONNECT_CLUSTER_URL",
@@ -65,7 +76,6 @@ DOCKER_SOCKET_PATH = Path(os.getenv("TS_CONNECT_DOCKER_SOCKET", "/var/run/docker
 AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
-WORKSPACE_HOST_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE_HOST", "/workspace-host-resolve"))
 
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
 

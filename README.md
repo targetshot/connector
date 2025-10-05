@@ -13,6 +13,12 @@ cp compose.env.example compose.env  # optional: compose overrides (e.g. UI_BIND_
 docker compose up -d
 ```
 
+### Versioning & Releases
+- Update the version defaults once per release. Run `./scripts/bump_version.sh vX.Y.Z [ReleaseName]` from the repo root. This updates `ts-connect/VERSION` (and optionally `ts-connect/RELEASE`).
+- Commit the change, create an annotated tag (`git tag -a vX.Y.Z -m "Release vX.Y.Z"`), and push it (`git push origin vX.Y.Z`).
+- The UI reads these files automatically when no explicit `TS_CONNECT_VERSION/TS_CONNECT_RELEASE` environment variables are set.
+- GitHub releases should be created from the pushed tag so the auto-update job can discover the new version.
+
 ### Services
 - `redpanda`: local Kafka (single node) for offsets/history
 - `kafka-connect`: Confluent Kafka Connect with Debezium MySQL plugin
