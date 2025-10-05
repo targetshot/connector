@@ -428,6 +428,26 @@
                 </p>
               </div>
             </section>
+
+            <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
+              <div>
+                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">System-Update</h2>
+                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Prüft neue Git-Releases und aktualisiert das Docker-Compose Deployment inklusive Neuaufbau der Services.</p>
+              </div>
+              <div class="space-y-2 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                <div class="flex flex-wrap items-center gap-3 text-sm">
+                  <span id="updateStatusBadge" class="badge">…</span>
+                  <span id="updateStatusText" class="text-zinc-700 dark:text-zinc-200">Status wird ermittelt…</span>
+                </div>
+                <div id="updateVersionInfo">Version wird geladen…</div>
+                <div id="updatePrereqHint"></div>
+              </div>
+              <div class="flex flex-wrap gap-3">
+                <button type="button" id="btnCheckUpdate" class="btn-secondary">Nach Updates suchen</button>
+                <button type="button" id="btnRunUpdate" class="btn-secondary">Auto-Update starten</button>
+              </div>
+              <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
+            </section>
           </div>
         </div>
       </main>
@@ -572,6 +592,166 @@
         secretsContent.textContent = error instanceof Error ? error.message : String(error);
       }
     };
+
+    const updateStatusBadge = document.getElementById('updateStatusBadge');
+    const updateStatusText = document.getElementById('updateStatusText');
+    const updateVersionInfo = document.getElementById('updateVersionInfo');
+    const updatePrereqHint = document.getElementById('updatePrereqHint');
+    const updateLog = document.getElementById('updateLog');
+    const btnCheckUpdate = document.getElementById('btnCheckUpdate');
+    const btnRunUpdate = document.getElementById('btnRunUpdate');
+    let updatePollTimer = null;
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, function (match) {
+        const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" };
+        return map[match] || match;
+      });
+    }
+
+    function setUpdateBadge(state, currentAction, lastError) {
+      if (!updateStatusBadge) return;
+      let cls = 'badge ';
+      let label = 'Status';
+      if (state === 'running') {
+        cls += 'warn';
+        label = 'Aktiv';
+      } else if (state === 'error') {
+        cls += 'warn';
+        label = 'Fehler';
+      } else if (state === 'idle') {
+        cls += 'ok';
+        label = 'Bereit';
+      } else {
+        cls += 'warn';
+        label = String(state || '?');
+      }
+      updateStatusBadge.className = cls;
+      updateStatusBadge.textContent = label;
+      if (updateStatusText) {
+        let message = currentAction;
+        if (!message) {
+          if (state === 'error') {
+            message = lastError || 'Update fehlgeschlagen';
+          } else if (state === 'running') {
+            message = 'Update läuft…';
+          } else if (state === 'idle') {
+            message = 'Bereit';
+          } else {
+            message = 'Status unbekannt';
+          }
+        }
+        updateStatusText.textContent = message;
+      }
+    }
+
+    function renderPrerequisites(prereq) {
+      if (!updatePrereqHint) return;
+      if (!prereq || prereq.ok) {
+        updatePrereqHint.className = 'text-xs text-emerald-600 dark:text-emerald-300';
+        updatePrereqHint.textContent = 'Alle Voraussetzungen erfüllt. Auto-Update kann gestartet werden.';
+        return;
+      }
+      const missing = [];
+      if (!prereq.git) missing.push('git');
+      if (!prereq.docker) missing.push('docker');
+      if (!prereq.docker_socket) missing.push('Docker Socket');
+      if (!prereq.workspace) missing.push('Workspace-Mount');
+      updatePrereqHint.className = 'text-xs text-amber-600 dark:text-amber-300';
+      updatePrereqHint.textContent = 'Voraussetzungen fehlen: ' + missing.join(', ');
+    }
+
+    async function loadUpdateStatus(force) {
+      if (!updateStatusBadge) return;
+      if (updatePollTimer) {
+        clearTimeout(updatePollTimer);
+        updatePollTimer = null;
+      }
+      try {
+        const url = force ? '/api/update/status?force=1' : '/api/update/status';
+        const response = await fetch(url);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = data.detail || response.statusText || response.status;
+          throw new Error(String(detail));
+        }
+        setUpdateBadge(data.status, data.current_action, data.last_error);
+        if (updateVersionInfo) {
+          const parts = [];
+          if (data.current_version) {
+            parts.push('Aktuelle Version: ' + data.current_version);
+          }
+          if (data.latest_release && data.latest_release.tag_name) {
+            const releaseName = data.latest_release.name || data.latest_release.tag_name;
+            if (data.latest_release.html_url) {
+              parts.push('Letztes Release: <a class="text-accent-dark dark:text-accent" target="_blank" rel="noopener" href="' + data.latest_release.html_url + '">' + escapeHtml(releaseName) + '</a>');
+            } else {
+              parts.push('Letztes Release: ' + escapeHtml(releaseName));
+            }
+          }
+          if (data.update_available) {
+            parts.push('<strong>Update verfügbar</strong>');
+          }
+          updateVersionInfo.innerHTML = parts.length ? parts.join(' · ') : 'Keine Versionsinformationen verfügbar.';
+        }
+        renderPrerequisites(data.prerequisites);
+        if (btnRunUpdate) {
+          const disabled = !data.prerequisites || !data.prerequisites.ok || data.status === 'running';
+          btnRunUpdate.disabled = disabled;
+          btnRunUpdate.classList.toggle('opacity-60', disabled);
+          btnRunUpdate.classList.toggle('cursor-not-allowed', disabled);
+        }
+        if (updateLog) {
+          if (Array.isArray(data.log) && data.log.length) {
+            updateLog.textContent = data.log.join('\n');
+          } else {
+            updateLog.textContent = 'Noch keine Update-Logs.';
+          }
+        }
+        if (data.status === 'running') {
+          updatePollTimer = setTimeout(() => {
+            loadUpdateStatus(false).catch(() => {});
+          }, 5000);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setUpdateBadge('error', 'Status kann nicht abgerufen werden', message);
+        if (updateLog) {
+          updateLog.textContent = 'Fehler beim Laden des Update-Status: ' + message;
+        }
+      }
+    }
+
+    if (btnCheckUpdate) {
+      btnCheckUpdate.onclick = () => loadUpdateStatus(true);
+    }
+    if (btnRunUpdate) {
+      btnRunUpdate.onclick = async () => {
+        if (btnRunUpdate.disabled) return;
+        if (!confirm('Docker-Compose Stack jetzt aktualisieren? Die Dienste werden kurzzeitig neu gestartet.')) return;
+        const pw = prompt('Admin-Passwort?');
+        if (!pw) return;
+        const fd = new FormData();
+        fd.append('pw', pw);
+        try {
+          const response = await fetch('/api/update/run', { method: 'POST', body: fd });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || !data.ok) {
+            const detail = data.detail || data.error || response.statusText || response.status;
+            alert('Update konnte nicht gestartet werden: ' + detail);
+            return;
+          }
+          alert('Update gestartet. Die UI wird kurz neu gestartet, sobald docker compose neu gebaut wurde.');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          alert('Fehler beim Starten des Updates: ' + message);
+        } finally {
+          loadUpdateStatus(true).catch(() => {});
+        }
+      };
+    }
+
+    loadUpdateStatus(false).catch(() => {});
   </script>
 </body>
 </html>

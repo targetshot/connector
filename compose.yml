@@ -71,9 +71,14 @@ services:
       CONNECT_BASE_URL: http://kafka-connect:8083
       DEFAULT_CONNECTOR_NAME: targetshot-debezium
       UI_TRUSTED_CIDRS: ${UI_TRUSTED_CIDRS:-192.168.0.0/16,10.0.0.0/8,172.16.0.0/12}
+      TS_CONNECT_WORKSPACE: /workspace
+      TS_CONNECT_DATA_DIR: /app/data
+      TS_CONNECT_DOCKER_SOCKET: /var/run/docker.sock
     depends_on:
       - kafka-connect
     volumes:
       - ./ui/data:/app/data
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes: {}

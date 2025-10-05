@@ -9,8 +9,12 @@ import stat
 import sqlite3
 import hashlib
 import secrets
+import shutil
+import time
+from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -18,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 import httpx
 from connector_config import CONNECT_SECRETS_PATH, build_connector_config
+from update_state import UpdateStateManager
 
 APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
@@ -49,6 +54,20 @@ SECRETS_PATH = Path(CONNECT_SECRETS_PATH)
 ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
 APPLY_STATE_PATH = DATA_DIR / "connector_apply_state.json"
 APPLY_RETRY_SECONDS = int(os.getenv("TS_CONNECT_APPLY_RETRY_SECONDS", "60"))
+UPDATE_STATE_PATH = DATA_DIR / "update_state.json"
+WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
+UPDATE_CACHE_SECONDS = int(os.getenv("TS_CONNECT_UPDATE_CACHE_SECONDS", "3600"))
+GITHUB_REPO_OVERRIDE = os.getenv("TS_CONNECT_GITHUB_REPO", "").strip()
+GITHUB_TOKEN = os.getenv("TS_CONNECT_GITHUB_TOKEN", "").strip()
+UPDATE_RUNNER_IMAGE = os.getenv("TS_CONNECT_UPDATE_IMAGE", "").strip()
+UPDATE_CONTAINER_PREFIX = os.getenv("TS_CONNECT_UPDATE_CONTAINER_PREFIX", "ts-connect-update")
+DOCKER_SOCKET_PATH = Path(os.getenv("TS_CONNECT_DOCKER_SOCKET", "/var/run/docker.sock"))
+
+update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
+
+_update_state_lock = asyncio.Lock()
+_update_job_lock = asyncio.Lock()
+_cached_repo_slug: str | None = None
 
 logger = logging.getLogger("ts-connect-ui")
 if not logger.handlers:
@@ -113,6 +132,286 @@ def _short_error_message(raw: str, max_len: int = 180) -> str:
     if len(text) > max_len:
         return text[: max_len - 1] + "…"
     return text
+
+
+def _parse_iso8601(timestamp: str | None) -> datetime | None:
+    if not timestamp:
+        return None
+    try:
+        if timestamp.endswith("Z"):
+            timestamp = timestamp[:-1] + "+00:00"
+        return datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+
+
+async def ensure_update_state() -> dict[str, Any]:
+    return await asyncio.to_thread(update_state_manager.ensure)
+
+
+async def get_update_state_snapshot() -> dict[str, Any]:
+    return await asyncio.to_thread(update_state_manager.read)
+
+
+async def merge_update_state_async(**updates: Any) -> dict[str, Any]:
+    return await asyncio.to_thread(update_state_manager.merge, **updates)
+
+
+async def append_update_log(lines: list[str], *, reset: bool = False) -> dict[str, Any]:
+    return await merge_update_state_async(log_append=lines, log_reset=reset)
+
+
+def _parse_repo_slug(remote_url: str) -> str | None:
+    remote_url = remote_url.strip()
+    if remote_url.endswith(".git"):
+        remote_url = remote_url[:-4]
+    if remote_url.startswith("git@github.com:"):
+        return remote_url[len("git@github.com:") :]
+    if remote_url.startswith("https://github.com/"):
+        return remote_url[len("https://github.com/") :]
+    if remote_url.startswith("http://github.com/"):
+        return remote_url[len("http://github.com/") :]
+    if remote_url.startswith("ssh://git@github.com/"):
+        return remote_url[len("ssh://git@github.com/") :]
+    return None
+
+
+async def _run_command_capture(cmd: list[str], *, cwd: Path | None = None, timeout: float | None = None) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=PIPE,
+        stderr=PIPE,
+        cwd=str(cwd) if cwd else None,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        process.kill()
+        raise
+    return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+
+
+async def _run_command_text(cmd: list[str], *, cwd: Path | None = None, timeout: float | None = None) -> tuple[int, str]:
+    code, stdout, stderr = await _run_command_capture(cmd, cwd=cwd, timeout=timeout)
+    output = stdout if stdout.strip() else stderr
+    return code, output.strip()
+
+
+async def _determine_repo_slug(force: bool = False) -> str | None:
+    global _cached_repo_slug
+    if GITHUB_REPO_OVERRIDE:
+        _cached_repo_slug = GITHUB_REPO_OVERRIDE
+        return _cached_repo_slug or None
+    if _cached_repo_slug and not force:
+        return _cached_repo_slug
+    if not WORKSPACE_PATH.exists() or not (WORKSPACE_PATH / ".git").exists():
+        return None
+    code, remote = await _run_command_text(["git", "remote", "get-url", "origin"], cwd=WORKSPACE_PATH)
+    if code != 0 or not remote:
+        return None
+    slug = _parse_repo_slug(remote)
+    if slug:
+        _cached_repo_slug = slug
+    return slug
+
+
+async def _collect_workspace_info() -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "path": str(WORKSPACE_PATH),
+        "exists": WORKSPACE_PATH.exists(),
+        "git": False,
+        "dirty": None,
+        "current_ref": None,
+        "current_commit": None,
+    }
+    if not info["exists"]:
+        return info
+    git_dir = WORKSPACE_PATH / ".git"
+    info["git"] = git_dir.exists()
+    if not info["git"]:
+        return info
+    status_code, status_out, _ = await _run_command_capture(["git", "status", "--porcelain"], cwd=WORKSPACE_PATH)
+    if status_code == 0:
+        info["dirty"] = bool(status_out.strip())
+    branch_code, branch = await _run_command_text(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=WORKSPACE_PATH)
+    if branch_code == 0 and branch:
+        info["current_ref"] = branch
+    commit_code, commit = await _run_command_text(["git", "rev-parse", "HEAD"], cwd=WORKSPACE_PATH)
+    if commit_code == 0 and commit:
+        info["current_commit"] = commit
+    return info
+
+
+def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any]:
+    git_available = shutil.which("git") is not None
+    docker_available = shutil.which("docker") is not None
+    docker_socket = DOCKER_SOCKET_PATH.exists()
+    workspace_ready = bool(workspace_info.get("exists") and workspace_info.get("git"))
+    return {
+        "git": git_available,
+        "docker": docker_available,
+        "docker_socket": docker_socket,
+        "workspace": workspace_ready,
+        "ok": git_available and docker_available and docker_socket and workspace_ready,
+    }
+
+
+async def _inspect_container_mounts() -> tuple[dict[str, str], str | None]:
+    if shutil.which("docker") is None:
+        return {}, None
+    container_id = os.getenv("HOSTNAME")
+    if not container_id:
+        return {}, None
+    try:
+        code, stdout, _ = await _run_command_capture(["docker", "inspect", container_id])
+    except FileNotFoundError:
+        return {}, None
+    if code != 0:
+        return {}, None
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}, None
+    if not data:
+        return {}, None
+    first = data[0]
+    mounts: dict[str, str] = {}
+    for mount in first.get("Mounts", []):
+        dest = mount.get("Destination")
+        source = mount.get("Source")
+        if dest and source:
+            mounts[dest] = source
+    image = first.get("Config", {}).get("Image")
+    return mounts, image
+
+
+async def _fetch_latest_release(repo_slug: str) -> dict[str, Any] | None:
+    if not repo_slug:
+        return None
+    headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    url = f"https://api.github.com/repos/{repo_slug}/releases/latest"
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(url, headers=headers)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    payload = response.json()
+    return {
+        "tag_name": payload.get("tag_name"),
+        "name": payload.get("name") or payload.get("tag_name"),
+        "published_at": payload.get("published_at"),
+        "html_url": payload.get("html_url"),
+    }
+
+
+async def _ensure_latest_release(force: bool = False) -> dict[str, Any] | None:
+    await ensure_update_state()
+    state = await get_update_state_snapshot()
+    latest_release = state.get("latest_release") if isinstance(state.get("latest_release"), dict) else None
+    last_check = _parse_iso8601(state.get("last_check"))
+    if latest_release and last_check and not force:
+        age = datetime.utcnow() - last_check
+        if age.total_seconds() < UPDATE_CACHE_SECONDS:
+            return latest_release
+    repo_slug = await _determine_repo_slug(force=force)
+    if not repo_slug:
+        await merge_update_state_async(last_check=_now_utc_iso(), last_check_error="Repository konnte nicht bestimmt werden")
+        return latest_release
+    try:
+        release = await _fetch_latest_release(repo_slug)
+    except Exception as exc:  # noqa: BLE001
+        await merge_update_state_async(
+            last_check=_now_utc_iso(),
+            last_check_error=_short_error_message(str(exc), 140),
+        )
+        return latest_release
+    await merge_update_state_async(
+        latest_release=release,
+        last_check=_now_utc_iso(),
+        last_check_error=None,
+    )
+    return release
+
+
+async def _build_update_status(force: bool = False) -> dict[str, Any]:
+    await ensure_update_state()
+    state = await get_update_state_snapshot()
+    release = await _ensure_latest_release(force=force)
+    workspace_info = await _collect_workspace_info()
+    prereq = _detect_prerequisites(workspace_info)
+    repo_slug = await _determine_repo_slug()
+    compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
+    current_marker = CONNECT_VERSION or workspace_info.get("current_ref") or workspace_info.get("current_commit")
+    latest_tag = release.get("tag_name") if isinstance(release, dict) else None
+    update_available = bool(latest_tag and current_marker and latest_tag != current_marker)
+    status: dict[str, Any] = {
+        "ok": True,
+        "status": state.get("status", "idle"),
+        "current_action": state.get("current_action"),
+        "current_version": CONNECT_VERSION,
+        "current_release": CONNECT_RELEASE,
+        "latest_release": release,
+        "update_available": update_available,
+        "last_check": state.get("last_check"),
+        "last_check_error": state.get("last_check_error"),
+        "last_success": state.get("last_success"),
+        "last_error": state.get("last_error"),
+        "update_target": state.get("update_target"),
+        "log": state.get("log", []),
+        "workspace": workspace_info,
+        "prerequisites": prereq,
+        "repo_slug": repo_slug,
+        "compose_env": compose_env_exists,
+        "job_started": state.get("job_started"),
+    }
+    return status
+
+
+async def _start_update_runner(target_ref: str | None, repo_slug: str | None, compose_env: bool) -> str:
+    mounts, image = await _inspect_container_mounts()
+    workspace_host = mounts.get("/workspace") or mounts.get(str(WORKSPACE_PATH))
+    data_host = mounts.get("/app/data")
+    if not workspace_host or not data_host:
+        raise RuntimeError("Update benötigt Bind-Mounts für /workspace und /app/data")
+    runner_image = UPDATE_RUNNER_IMAGE or image
+    if not runner_image:
+        raise RuntimeError("Update-Runner Image konnte nicht bestimmt werden")
+    socket_path = str(DOCKER_SOCKET_PATH)
+    if not os.path.exists(socket_path):
+        raise RuntimeError(f"Docker Socket nicht gefunden: {socket_path}")
+    container_name = f"{UPDATE_CONTAINER_PREFIX}-{int(time.time())}"
+    cmd = [
+        "docker",
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        container_name,
+        "-v",
+        f"{workspace_host}:/workspace",
+        "-v",
+        f"{data_host}:/app/data",
+        "-v",
+        f"{socket_path}:{socket_path}",
+        "-e",
+        "TS_CONNECT_WORKSPACE=/workspace",
+        "-e",
+        "TS_CONNECT_DATA_DIR=/app/data",
+    ]
+    if repo_slug:
+        cmd += ["-e", f"TS_CONNECT_GITHUB_REPO={repo_slug}"]
+    if target_ref:
+        cmd += ["-e", f"TS_CONNECT_UPDATE_REF={target_ref}"]
+    if compose_env:
+        cmd += ["-e", "TS_CONNECT_UPDATE_COMPOSE_ENV=compose.env"]
+    cmd += [runner_image, "python", "-m", "update_runner"]
+    code, stdout, stderr = await _run_command_capture(cmd)
+    if code != 0:
+        message = stderr.strip() or stdout.strip() or "docker run Fehler"
+        raise RuntimeError(message)
+    return stdout.strip()
 
 
 TRANSIENT_HTTP_CODES = {500, 502, 503, 504}
@@ -333,6 +632,7 @@ def verify_admin_password(candidate: str) -> bool:
 @app.on_event("startup")
 async def init_admin_password() -> None:
     ensure_admin_password_file()
+    await ensure_update_state()
     asyncio.create_task(_connector_retry_worker())
 
 
@@ -807,6 +1107,63 @@ async def connector_config():
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
     return {"exists": True, "config": resp.json()}
+
+
+@app.get("/api/update/status", dependencies=[Depends(require_session)])
+async def update_status(force: bool = False):
+    try:
+        status = await _build_update_status(force=force)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=_short_error_message(str(exc), 180))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 180))
+    return status
+
+
+@app.post("/api/update/run", dependencies=[Depends(require_session)])
+async def trigger_update(pw: str = Form(...), target: str | None = Form(None)):
+    require_admin(pw)
+    async with _update_job_lock:
+        state = await get_update_state_snapshot()
+        if state.get("status") == "running":
+            raise HTTPException(status_code=409, detail="Ein Update läuft bereits")
+        workspace_info = await _collect_workspace_info()
+        prereq = _detect_prerequisites(workspace_info)
+        if not prereq.get("ok"):
+            missing = [name for name, enabled in prereq.items() if name != "ok" and not enabled]
+            detail = "Voraussetzungen fehlen: " + ", ".join(missing)
+            raise HTTPException(status_code=400, detail=detail)
+        release = await _ensure_latest_release(force=not target)
+        repo_slug = await _determine_repo_slug()
+        compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
+        target_ref = target or (release.get("tag_name") if isinstance(release, dict) else None)
+        job_started = _now_utc_iso()
+        await append_update_log([f"Update ausgelöst um {job_started}"], reset=True)
+        await merge_update_state_async(
+            status="running",
+            update_in_progress=True,
+            current_action="Starte Update Runner",
+            last_error=None,
+            job_started=job_started,
+            update_target=target_ref,
+        )
+        try:
+            container_id = await _start_update_runner(target_ref, repo_slug, compose_env_exists)
+        except Exception as exc:  # noqa: BLE001
+            message = _short_error_message(str(exc), 200)
+            await merge_update_state_async(
+                status="error",
+                update_in_progress=False,
+                current_action=None,
+                last_error=message,
+                log_append=[f"FEHLER: {message}"],
+            )
+            raise HTTPException(status_code=500, detail=message)
+        await merge_update_state_async(
+            current_action="Update-Runner läuft",
+            log_append=[f"Runner Container: {container_id}"],
+        )
+        return {"ok": True, "container": container_id, "target": target_ref}
 
 if __name__ == "__main__":
     import uvicorn
