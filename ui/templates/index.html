@@ -516,8 +516,12 @@
         <div class="space-y-2">
           <h3 id="infoModalTitle" class="brand-sub text-lg font-semibold text-zinc-900 dark:text-white">Hinweis</h3>
           <p id="infoModalMessage" class="text-sm text-zinc-600 dark:text-zinc-300"></p>
+          <div id="infoModalSpinner" class="hidden mt-4 flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+            <span class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-zinc-300 border-t-transparent dark:border-zinc-500"></span>
+            <span>Bitte warten…</span>
+          </div>
         </div>
-        <div class="mt-6 flex justify-end">
+        <div id="infoModalActions" class="mt-6 flex justify-end">
           <button type="button" id="infoModalClose" class="btn-secondary !bg-white/70 !text-zinc-700 hover:!bg-white dark:!bg-white/20 dark:!text-white">Schließen</button>
         </div>
       </div>
@@ -555,6 +559,8 @@
     const infoModalTitle = document.getElementById('infoModalTitle');
     const infoModalMessage = document.getElementById('infoModalMessage');
     const infoModalClose = document.getElementById('infoModalClose');
+    const infoModalActions = document.getElementById('infoModalActions');
+    const infoModalSpinner = document.getElementById('infoModalSpinner');
     const confirmModal = document.getElementById('confirmModal');
     const confirmModalCard = document.getElementById('confirmModalCard');
     const confirmModalMessage = document.getElementById('confirmModalMessage');
@@ -651,7 +657,7 @@
         resolvePasswordModal(null);
       }
       if (event.key === 'Escape' && !infoModal.classList.contains('hidden')) {
-        closeInfoModal();
+        closeInfoModal(true);
       }
     });
 
@@ -1088,7 +1094,7 @@
             showInfoModal('Update fehlgeschlagen', detail ? String(detail) : 'Update konnte nicht gestartet werden.', 'error');
             return;
           }
-          showInfoModal('Update gestartet', 'Die UI wird kurz neu gestartet, sobald docker compose neu gebaut wurde.');
+          showInfoModal('Update gestartet', 'Die UI wird kurz neu gestartet, sobald docker compose neu gebaut wurde.', 'info', { closable: false, loading: true });
           scheduleUpdateReload();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
