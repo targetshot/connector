@@ -33,6 +33,8 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
+WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
+
 def _load_version_defaults() -> tuple[str, str]:
     version = os.getenv("TS_CONNECT_VERSION")
     release = os.getenv("TS_CONNECT_RELEASE")
@@ -66,7 +68,6 @@ ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
 APPLY_STATE_PATH = DATA_DIR / "connector_apply_state.json"
 APPLY_RETRY_SECONDS = int(os.getenv("TS_CONNECT_APPLY_RETRY_SECONDS", "60"))
 UPDATE_STATE_PATH = DATA_DIR / "update_state.json"
-WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 UPDATE_CACHE_SECONDS = int(os.getenv("TS_CONNECT_UPDATE_CACHE_SECONDS", "3600"))
 GITHUB_REPO_OVERRIDE = os.getenv("TS_CONNECT_GITHUB_REPO", "").strip()
 GITHUB_TOKEN = os.getenv("TS_CONNECT_GITHUB_TOKEN", "").strip()
