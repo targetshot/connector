@@ -12,7 +12,7 @@ import secrets
 import shutil
 import time
 from asyncio.subprocess import PIPE
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
@@ -85,7 +85,7 @@ class DeferredApplyError(RuntimeError):
 
 
 def _now_utc_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _default_apply_state() -> dict:
@@ -228,7 +228,7 @@ def _parse_bool(value: Any, default: bool = False) -> bool:
 
 def _calculate_next_auto_run(hour: int, last_run_iso: str | None) -> datetime:
     hour = _sanitize_hour(hour)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     base = now
     if last_run_iso:
         last_dt = _parse_iso8601(last_run_iso)
@@ -404,7 +404,7 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
     auto_last_run = state.get("auto_update_last_run")
     next_auto_run_iso = None
     if auto_enabled:
-        next_auto_run_iso = _calculate_next_auto_run(auto_hour, auto_last_run).isoformat() + "Z"
+        next_auto_run_iso = _calculate_next_auto_run(auto_hour, auto_last_run).isoformat().replace("+00:00", "Z")
     status: dict[str, Any] = {
         "ok": True,
         "status": state.get("status", "idle"),
@@ -549,7 +549,7 @@ async def _auto_update_worker() -> None:
             if state.get("auto_update_enabled"):
                 auto_hour = _sanitize_hour(state.get("auto_update_hour"))
                 last_run_iso = state.get("auto_update_last_run")
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 today_run = now.replace(hour=auto_hour, minute=0, second=0, microsecond=0)
                 last_run_dt = _parse_iso8601(last_run_iso)
                 already_today = last_run_dt and last_run_dt.date() == now.date()
