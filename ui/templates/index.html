@@ -470,6 +470,7 @@
               <div class="flex flex-wrap gap-3">
                 <button type="button" id="btnCheckUpdate" class="btn-secondary">Nach Update suchen</button>
                 <button type="button" id="btnRunUpdate" class="btn-secondary">Update starten</button>
+                <span id="updateStatusHint" class="text-xs text-zinc-500 dark:text-zinc-400"></span>
               </div>
               <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
             </section>
@@ -704,6 +705,7 @@
     const updateLog = document.getElementById('updateLog');
     const btnCheckUpdate = document.getElementById('btnCheckUpdate');
     const btnRunUpdate = document.getElementById('btnRunUpdate');
+    const updateStatusHint = document.getElementById('updateStatusHint');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     const autoUpdateHour = document.getElementById('autoUpdateHour');
@@ -794,13 +796,7 @@
         }
         setUpdateBadge(data.status, data.current_action, data.last_error);
         if (btnCheckUpdate) {
-          if (data.update_available) {
-            btnCheckUpdate.textContent = 'Update verfügbar';
-          } else if (force) {
-            btnCheckUpdate.textContent = 'Auf aktuellem Stand';
-          } else if (btnCheckDefaultText) {
-            btnCheckUpdate.textContent = btnCheckDefaultText;
-          }
+          btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
         }
         if (updateVersionInfo) {
           const parts = [];
@@ -827,6 +823,14 @@
           btnRunUpdate.classList.toggle('opacity-60', disabled);
           btnRunUpdate.classList.toggle('cursor-not-allowed', disabled);
           btnRunUpdate.title = disabled && !data.update_available ? 'Kein neues Release verfügbar' : '';
+          btnRunUpdate.textContent = disabled ? 'Auf aktuellem Stand' : 'Update starten';
+          if (btnCheckUpdate && !btnCheckUpdate.disabled) {
+            btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
+          }
+          if (updateStatusHint) {
+            updateStatusHint.textContent = disabled ? 'Kein neues Release verfügbar' : 'Neues Release bereit';
+            updateStatusHint.className = disabled ? 'text-xs text-zinc-500 dark:text-zinc-400' : 'text-xs text-emerald-500 dark:text-emerald-300';
+          }
         }
         if (autoUpdateToggle) {
           const auto = data.auto_update || {};
@@ -881,9 +885,9 @@
         loadUpdateStatus(true).finally(() => {
           btnCheckUpdate.disabled = false;
           if (btnRunUpdate && !btnRunUpdate.disabled) {
-            btnCheckUpdate.textContent = 'Update verfügbar';
+            btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
           } else {
-            btnCheckUpdate.textContent = 'Auf aktuellem Stand';
+            btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
           }
         });
       };
