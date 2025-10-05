@@ -65,7 +65,7 @@ git push origin "$VERSION"
 if command -v gh >/dev/null 2>&1; then
   GH_FLAGS=("--generate-notes")
   if [[ -n "$RELEASE_LABEL" ]]; then
-    GH_FLAGS+=("--title" "$RELEASE_LABEL")
+    GH_FLAGS+=("--title" "$VERSION - $RELEASE_LABEL")
   else
     GH_FLAGS+=("--title" "$VERSION")
   fi
