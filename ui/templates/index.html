@@ -468,7 +468,7 @@
                 </div>
               </div>
               <div class="flex flex-wrap gap-3">
-                <button type="button" id="btnCheckUpdate" class="btn-secondary">Nach Updates suchen</button>
+                <button type="button" id="btnCheckUpdate" class="btn-secondary">Nach Update suchen</button>
                 <button type="button" id="btnRunUpdate" class="btn-secondary">Update starten</button>
               </div>
               <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
@@ -704,6 +704,7 @@
     const updateLog = document.getElementById('updateLog');
     const btnCheckUpdate = document.getElementById('btnCheckUpdate');
     const btnRunUpdate = document.getElementById('btnRunUpdate');
+    const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     const autoUpdateHour = document.getElementById('autoUpdateHour');
     const autoUpdateNext = document.getElementById('autoUpdateNext');
@@ -793,7 +794,13 @@
         }
         setUpdateBadge(data.status, data.current_action, data.last_error);
         if (btnCheckUpdate) {
-          btnCheckUpdate.textContent = data.update_available ? 'Neues Update gefunden' : 'Auf aktuellem Stand';
+          if (data.update_available) {
+            btnCheckUpdate.textContent = 'Update verfügbar';
+          } else if (force) {
+            btnCheckUpdate.textContent = 'Auf aktuellem Stand';
+          } else if (btnCheckDefaultText) {
+            btnCheckUpdate.textContent = btnCheckDefaultText;
+          }
         }
         if (updateVersionInfo) {
           const parts = [];
@@ -870,9 +877,14 @@
     if (btnCheckUpdate) {
       btnCheckUpdate.onclick = () => {
         btnCheckUpdate.disabled = true;
-        btnCheckUpdate.textContent = 'Suche nach Updates…';
+        btnCheckUpdate.textContent = 'Suche nach Update…';
         loadUpdateStatus(true).finally(() => {
           btnCheckUpdate.disabled = false;
+          if (btnRunUpdate && !btnRunUpdate.disabled) {
+            btnCheckUpdate.textContent = 'Update verfügbar';
+          } else {
+            btnCheckUpdate.textContent = 'Auf aktuellem Stand';
+          }
         });
       };
     }
