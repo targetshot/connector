@@ -183,7 +183,11 @@ def run_update() -> int:
             manager.merge(log_append=[f"Neuer Commit: {commit}"])
         manager.merge(log_append=["Baue neue Container"], current_action="docker compose build")
         compose_cmd = _compose_base(compose_env)
-        _run_command(compose_cmd + ["down"], cwd=workspace, manager=manager)
+        _run_command(compose_cmd + ["down", "--remove-orphans"], cwd=workspace, manager=manager)
+        try:
+            _run_command(["docker", "rm", "-f", "ts-kafka-connect", "ts-connect-ui"], cwd=workspace, manager=manager)
+        except CommandError:
+            manager.merge(log_append=["Hinweis: Bestehende Container konnten nicht zusätzlich entfernt werden"], current_action="docker compose build")
         _run_command(compose_cmd + ["build", "--pull"], cwd=workspace, manager=manager)
         manager.merge(log_append=["Starte Dienste neu"], current_action="docker compose up")
         _run_command(compose_cmd + ["up", "-d"], cwd=workspace, manager=manager)
