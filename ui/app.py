@@ -284,7 +284,14 @@ async def _determine_repo_slug(force: bool = False) -> str | None:
     code, remote = await _run_command_text(["git", "remote", "get-url", "origin"], cwd=WORKSPACE_PATH)
     if code != 0 or not remote:
         return None
+    remote = remote.strip()
     slug = _parse_repo_slug(remote)
+    if slug and remote.startswith("git@github.com:"):
+        https_url = f"https://github.com/{slug}.git"
+        set_code, _ = await _run_command_text(["git", "remote", "set-url", "origin", https_url], cwd=WORKSPACE_PATH)
+        if set_code == 0:
+            remote = https_url
+    slug = slug or _parse_repo_slug(remote)
     if slug:
         _cached_repo_slug = slug
     return slug

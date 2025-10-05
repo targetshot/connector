@@ -70,6 +70,42 @@ def _ensure_workspace(workspace: Path) -> None:
         raise RuntimeError(f"Kein Git-Repository unter {workspace}")
 
 
+def _parse_repo_slug(remote_url: str) -> str | None:
+    remote_url = remote_url.strip()
+    if remote_url.endswith(".git"):
+        remote_url = remote_url[:-4]
+    prefixes = (
+        "git@github.com:",
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://git@github.com/",
+    )
+    for prefix in prefixes:
+        if remote_url.startswith(prefix):
+            return remote_url[len(prefix) :]
+    return None
+
+
+def _ensure_https_remote(workspace: Path, manager: UpdateStateManager) -> None:
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=str(workspace),
+        text=True,
+        capture_output=True,
+        env=_command_env(),
+        check=False,
+    )
+    if result.returncode != 0:
+        manager.merge(log_append=["Warnung: git remote get-url origin fehlgeschlagen"], current_action="Git Remote prüfen")
+        return
+    remote = result.stdout.strip()
+    slug = _parse_repo_slug(remote)
+    if slug and remote.startswith("git@github.com:"):
+        https_url = f"https://github.com/{slug}.git"
+        manager.merge(log_append=[f"Setze Remote auf {https_url}"], current_action="Git Remote setzen")
+        _run_command(["git", "remote", "set-url", "origin", https_url], cwd=workspace, manager=manager)
+
+
 def _ensure_clean_repo(workspace: Path, manager: UpdateStateManager) -> None:
     result = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -163,6 +199,7 @@ def run_update() -> int:
             manager.merge(log_append=["Warnung: safe.directory konnte nicht gesetzt werden"], current_action="Git konfigurieren")
         manager.merge(log_append=["Prüfe Git-Status"], current_action="Prüfe Repository")
         _ensure_clean_repo(workspace, manager)
+        _ensure_https_remote(workspace, manager)
         manager.merge(log_append=["Hole Git-Updates"], current_action="Git fetch")
         _run_command(["git", "fetch", "--all", "--tags", "--prune"], cwd=workspace, manager=manager)
         target_ref = args.ref
