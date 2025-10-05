@@ -244,10 +244,12 @@ async def _collect_workspace_info() -> dict[str, Any]:
 
 def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any]:
     def _binary_found(name: str, extra_paths: tuple[str, ...] = ()) -> bool:
-        if shutil.which(name):
+        path = shutil.which(name)
+        if path and os.access(path, os.X_OK):
             return True
-        for path in extra_paths:
-            if Path(path).exists():
+        for extra in extra_paths:
+            p = Path(extra)
+            if p.exists() and os.access(p, os.X_OK):
                 return True
         return False
 
