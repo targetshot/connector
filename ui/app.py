@@ -529,6 +529,10 @@ async def _launch_update_job(
             if initiated_by == "auto":
                 result_updates.setdefault("auto_update_last_run", job_started)
             await merge_update_state_async(**result_updates)
+            try:
+                await _run_command_capture(["docker", "rm", "-f", "ts-kafka-connect", "ts-connect-ui"], cwd=WORKSPACE_PATH)
+            except Exception:  # noqa: BLE001
+                pass
             return {"ok": False, "error": message, "code": 500}
         await merge_update_state_async(
             current_action="Update-Runner läuft",
