@@ -30,14 +30,12 @@ if git rev-parse "$VERSION" >/dev/null 2>&1; then
 fi
 
 # Ensure only VERSION/RELEASE are staged/modified
-CHANGES="$(git status --porcelain)"
-if [[ -z "$CHANGES" ]]; then
+mapfile -t STATUS_ENTRIES < <(git status --porcelain | cut -c4-)
+if [[ ${#STATUS_ENTRIES[@]} -eq 0 ]]; then
   echo "No changes to release." >&2
   exit 1
 fi
-while read -r line; do
-  [[ -z "$line" ]] && continue
-  file="${line:3}"
+for file in "${STATUS_ENTRIES[@]}"; do
   case "$file" in
     VERSION|RELEASE) ;;
     *)
@@ -45,7 +43,7 @@ while read -r line; do
       exit 1
       ;;
   esac
-done <<< "$CHANGES"
+done
 
 GIT_ARGS=("$VERSION_FILE")
 RELEASE_LABEL=""
