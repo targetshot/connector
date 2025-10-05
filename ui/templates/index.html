@@ -469,10 +469,10 @@
               </div>
               <div class="flex flex-wrap gap-3">
                 <button type="button" id="btnCheckUpdate" class="btn-secondary">Nach Updates suchen</button>
-                <button type="button" id="btnRunUpdate" class="btn-secondary">Auto-Update starten</button>
+                <button type="button" id="btnRunUpdate" class="btn-secondary">Update starten</button>
               </div>
-                <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
-              </section>
+              <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
+            </section>
             </div>
           </div>
         </div>
@@ -812,10 +812,11 @@
         }
         renderPrerequisites(data.prerequisites);
         if (btnRunUpdate) {
-          const disabled = !data.prerequisites || !data.prerequisites.ok || data.status === 'running';
+          const disabled = !data.update_available || !data.prerequisites || !data.prerequisites.ok || data.status === 'running';
           btnRunUpdate.disabled = disabled;
           btnRunUpdate.classList.toggle('opacity-60', disabled);
           btnRunUpdate.classList.toggle('cursor-not-allowed', disabled);
+          btnRunUpdate.title = disabled && !data.update_available ? 'Kein neues Release verfügbar' : '';
         }
         if (autoUpdateToggle) {
           const auto = data.auto_update || {};
