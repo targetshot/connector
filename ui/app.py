@@ -78,6 +78,10 @@ AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
 
+PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
+
+PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
+
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
 
 _update_state_lock = asyncio.Lock()
@@ -504,6 +508,8 @@ async def _start_update_runner(target_ref: str | None, repo_slug: str | None, co
         "-e",
         "TS_CONNECT_DATA_DIR=/app/data",
     ]
+    if PROJECT_NAME:
+        cmd += ["-e", f"COMPOSE_PROJECT_NAME={PROJECT_NAME}"]
     if repo_slug:
         cmd += ["-e", f"TS_CONNECT_GITHUB_REPO={repo_slug}"]
     if target_ref:

@@ -37,6 +37,8 @@ def _cmd_to_str(cmd: Iterable[str]) -> str:
 def _command_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    if "COMPOSE_PROJECT_NAME" not in env:
+        env["COMPOSE_PROJECT_NAME"] = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
     return env
 
 
