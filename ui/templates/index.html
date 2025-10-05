@@ -454,7 +454,83 @@
     </div>
   </div>
 
+  <div id="passwordModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+    <div id="passwordModalCard" class="w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white">
+      <form id="passwordModalForm" class="space-y-4">
+        <div>
+          <h3 class="brand-sub text-lg font-semibold text-zinc-900 dark:text-white">Admin-Passwort erforderlich</h3>
+          <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">Bitte gib das aktuelle Admin-Passwort ein, um mit der Aktion fortzufahren.</p>
+        </div>
+        <div>
+          <label class="input-label" for="passwordModalInput">Admin-Passwort</label>
+          <input id="passwordModalInput" name="password" type="password" class="ts-input" placeholder="••••••••" autocomplete="current-password" required />
+        </div>
+        <div class="flex justify-end gap-3 pt-2">
+          <button type="button" id="passwordModalCancel" class="btn-secondary !bg-white/50 !text-zinc-700 hover:!bg-white dark:!bg-white/20 dark:!text-white">Abbrechen</button>
+          <button type="submit" class="primary-button">Bestätigen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script>
+    const passwordModal = document.getElementById('passwordModal');
+    const passwordModalForm = document.getElementById('passwordModalForm');
+    const passwordModalInput = document.getElementById('passwordModalInput');
+    const passwordModalCancel = document.getElementById('passwordModalCancel');
+    let passwordResolver = null;
+
+    function closePasswordModal() {
+      passwordModal.classList.add('hidden');
+      document.body.classList.remove('overflow-hidden');
+      passwordModalInput.value = '';
+    }
+
+    function resolvePasswordModal(value) {
+      if (!passwordResolver) return;
+      const resolver = passwordResolver;
+      passwordResolver = null;
+      closePasswordModal();
+      resolver(value);
+    }
+
+    function askAdminPassword() {
+      if (passwordResolver) {
+        return Promise.resolve(null);
+      }
+      passwordModal.classList.remove('hidden');
+      document.body.classList.add('overflow-hidden');
+      setTimeout(() => passwordModalInput.focus(), 50);
+      return new Promise((resolve) => {
+        passwordResolver = resolve;
+      });
+    }
+
+    passwordModalForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!passwordModalInput.value) {
+        passwordModalInput.focus();
+        return;
+      }
+      resolvePasswordModal(passwordModalInput.value);
+    });
+
+    passwordModalCancel.addEventListener('click', () => {
+      resolvePasswordModal(null);
+    });
+
+    passwordModal.addEventListener('click', (event) => {
+      if (event.target === passwordModal) {
+        resolvePasswordModal(null);
+      }
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && passwordResolver) {
+        resolvePasswordModal(null);
+      }
+    });
+
     function setBadge(el, state, msg) {
       let label;
       if (state === 'pending') {
@@ -500,7 +576,7 @@
       setBadge(document.getElementById('cfltBadge'), j.ok, j.msg);
     };
     async function connectorAction(action) {
-      const pw = prompt('Admin-Passwort?');
+      const pw = await askAdminPassword();
       if (!pw) return;
       const fd = new FormData();
       fd.append('pw', pw);
@@ -513,7 +589,7 @@
     document.getElementById('btnRestart').onclick = () => connectorAction('restart');
     document.getElementById('btnResnapshot').onclick = async () => {
       if (!confirm('Connector zurücksetzen und komplette Datenaufnahme neu starten? Dieser Vorgang löscht den aktuellen Debezium-Status.')) return;
-      const pw = prompt('Admin-Passwort?');
+      const pw = await askAdminPassword();
       if (!pw) return;
       const fd = new FormData();
       fd.append('pw', pw);
@@ -569,7 +645,7 @@
         secretsPanel.classList.add('hidden');
         return;
       }
-      const pw = prompt('Admin-Passwort?');
+      const pw = await askAdminPassword();
       if (!pw) return;
       const fd = new FormData();
       fd.append('pw', pw);
@@ -729,7 +805,7 @@
       btnRunUpdate.onclick = async () => {
         if (btnRunUpdate.disabled) return;
         if (!confirm('Docker-Compose Stack jetzt aktualisieren? Die Dienste werden kurzzeitig neu gestartet.')) return;
-        const pw = prompt('Admin-Passwort?');
+        const pw = await askAdminPassword();
         if (!pw) return;
         const fd = new FormData();
         fd.append('pw', pw);

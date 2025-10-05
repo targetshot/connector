@@ -243,8 +243,16 @@ async def _collect_workspace_info() -> dict[str, Any]:
 
 
 def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any]:
-    git_available = shutil.which("git") is not None
-    docker_available = shutil.which("docker") is not None
+    def _binary_found(name: str, extra_paths: tuple[str, ...] = ()) -> bool:
+        if shutil.which(name):
+            return True
+        for path in extra_paths:
+            if Path(path).exists():
+                return True
+        return False
+
+    git_available = _binary_found("git", ("/usr/bin/git", "/usr/local/bin/git"))
+    docker_available = _binary_found("docker", ("/usr/bin/docker", "/usr/local/bin/docker"))
     docker_socket = DOCKER_SOCKET_PATH.exists()
     workspace_ready = bool(workspace_info.get("exists") and workspace_info.get("git"))
     return {
