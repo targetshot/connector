@@ -18,6 +18,7 @@ docker compose up -d
 - Commit the change, create an annotated tag (`git tag -a vX.Y.Z -m "Release vX.Y.Z"`), and push it (`git push origin vX.Y.Z`).
 - The UI reads these files automatically when no explicit `TS_CONNECT_VERSION/TS_CONNECT_RELEASE` environment variables are set.
 - GitHub releases should be created from the pushed tag so the auto-update job can discover the new version.
+- If you need to run `docker compose` from another directory (e.g. via systemd), set `TS_CONNECT_WORKSPACE_HOST=/absolute/path/to/connector` in `.env` or `compose.env`. Otherwise the default bind `.:/workspace` (relative to `compose.yml`) is used.
 
 ### Services
 - `redpanda`: local Kafka (single node) for offsets/history

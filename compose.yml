@@ -79,7 +79,9 @@ services:
       - kafka-connect
     volumes:
       - ./ui/data:/app/data
-      - .:/workspace
+      - type: bind
+        source: ${TS_CONNECT_WORKSPACE_HOST:-.}
+        target: /workspace
       - /var/run/docker.sock:/var/run/docker.sock
 
 volumes: {}
