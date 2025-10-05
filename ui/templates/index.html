@@ -824,12 +824,12 @@
           btnRunUpdate.classList.toggle('cursor-not-allowed', disabled);
           btnRunUpdate.title = disabled && !data.update_available ? 'Kein neues Release verfügbar' : '';
           btnRunUpdate.textContent = disabled ? 'Auf aktuellem Stand' : 'Update starten';
-          if (btnCheckUpdate && !btnCheckUpdate.disabled) {
-            btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
-          }
           if (updateStatusHint) {
             updateStatusHint.textContent = disabled ? 'Kein neues Release verfügbar' : 'Neues Release bereit';
             updateStatusHint.className = disabled ? 'text-xs text-zinc-500 dark:text-zinc-400' : 'text-xs text-emerald-500 dark:text-emerald-300';
+          }
+          if (btnCheckUpdate && !btnCheckUpdate.disabled) {
+            btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
           }
         }
         if (autoUpdateToggle) {

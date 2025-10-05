@@ -14,6 +14,7 @@ RUN apt-get update \
     && mkdir -p /usr/lib/docker/cli-plugins \
     && curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" -o /usr/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/lib/docker/cli-plugins/docker-compose \
+    && git config --global --add safe.directory /workspace \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir --upgrade pip

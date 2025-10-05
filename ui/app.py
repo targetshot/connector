@@ -84,6 +84,7 @@ _update_state_lock = asyncio.Lock()
 _update_job_lock = asyncio.Lock()
 _cached_repo_slug: str | None = None
 _auto_update_task: asyncio.Task | None = None
+_git_safe_configured = False
 
 logger = logging.getLogger("ts-connect-ui")
 if not logger.handlers:
@@ -159,6 +160,13 @@ def _parse_iso8601(timestamp: str | None) -> datetime | None:
         return datetime.fromisoformat(timestamp)
     except ValueError:
         return None
+
+
+async def configure_git_safety() -> None:
+    try:
+        await _ensure_git_safe_directory()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to configure git safe.directory: %s", exc)
 
 
 async def ensure_update_state() -> dict[str, Any]:
@@ -252,6 +260,17 @@ def _calculate_next_auto_run(hour: int, last_run_iso: str | None) -> datetime:
     return candidate
 
 
+async def _ensure_git_safe_directory() -> None:
+    global _git_safe_configured
+    if _git_safe_configured:
+        return
+    if not WORKSPACE_PATH.exists():
+        return
+    code, _ = await _run_command_text(["git", "config", "--global", "--add", "safe.directory", str(WORKSPACE_PATH)], cwd=WORKSPACE_PATH)
+    if code == 0:
+        _git_safe_configured = True
+
+
 async def _determine_repo_slug(force: bool = False) -> str | None:
     global _cached_repo_slug
     if GITHUB_REPO_OVERRIDE:
@@ -261,6 +280,7 @@ async def _determine_repo_slug(force: bool = False) -> str | None:
         return _cached_repo_slug
     if not WORKSPACE_PATH.exists() or not (WORKSPACE_PATH / ".git").exists():
         return None
+    await _ensure_git_safe_directory()
     code, remote = await _run_command_text(["git", "remote", "get-url", "origin"], cwd=WORKSPACE_PATH)
     if code != 0 or not remote:
         return None
@@ -809,6 +829,7 @@ def verify_admin_password(candidate: str) -> bool:
 @app.on_event("startup")
 async def init_admin_password() -> None:
     ensure_admin_password_file()
+    await configure_git_safety()
     await ensure_update_state()
     state = await get_update_state_snapshot()
     updates: dict[str, Any] = {}
