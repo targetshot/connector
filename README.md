@@ -19,6 +19,8 @@ docker compose up -d
 - The UI reads these files automatically when no explicit `TS_CONNECT_VERSION/TS_CONNECT_RELEASE` environment variables are set.
 - GitHub releases should be created from the pushed tag so the auto-update job can discover the new version.
 - If you need to run `docker compose` from another directory (e.g. via systemd), set `TS_CONNECT_WORKSPACE_HOST=/absolute/path/to/connector` in `.env` or `compose.env`. Otherwise the default bind `.:/workspace` (relative to `compose.yml`) is used.
+- To automate the release workflow (commit + tag + GitHub release), run `./scripts/create_release.sh` from within `ts-connect/` after bumping the version. It reads `VERSION`, creates a `chore(release): <version>` commit, tags it, pushes, and invokes `gh release create`.
+- The release script expects only `VERSION` (and optionally `RELEASE`) to be modified and requires `gh` CLI to be authenticated (`gh auth login`).
 
 ### Services
 - `redpanda`: local Kafka (single node) for offsets/history
