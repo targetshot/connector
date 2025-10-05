@@ -184,15 +184,22 @@ def run_update() -> int:
         manager.merge(log_append=["Baue neue Container"], current_action="docker compose build")
         compose_cmd = _compose_base(compose_env)
         _run_command(compose_cmd + ["down", "--remove-orphans"], cwd=workspace, manager=manager)
-        try:
-            _run_command(["docker", "rm", "-f", "ts-kafka-connect", "ts-connect-ui"], cwd=workspace, manager=manager)
-        except CommandError:
-            manager.merge(log_append=["Hinweis: Bestehende Container konnten nicht zusätzlich entfernt werden"], current_action="docker compose build")
+        for name in ("ts-kafka-connect", "ts-connect-ui", "ts-redpanda", "workspace-kafka-connect", "workspace-ui", "workspace-redpanda-1"):
+            try:
+                _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
+            except CommandError:
+                continue
         _run_command(compose_cmd + ["build", "--pull"], cwd=workspace, manager=manager)
         manager.merge(log_append=["Starte Dienste neu"], current_action="docker compose up")
         _run_command(compose_cmd + ["up", "-d"], cwd=workspace, manager=manager)
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
+        for name in ("ts-kafka-connect", "ts-connect-ui", "ts-redpanda", "workspace-kafka-connect", "workspace-ui", "workspace-redpanda-1"):
+            try:
+                _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
+            except CommandError:
+                manager.merge(log_append=[f"Hinweis: Container {name} konnte nicht gelöscht werden"])
+                continue
         manager.merge(
             status="error",
             update_in_progress=False,

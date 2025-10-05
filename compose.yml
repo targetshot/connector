@@ -1,6 +1,7 @@
 services:
   redpanda:
     image: redpandadata/redpanda:v24.1.10
+    container_name: ts-redpanda
     command:
       - redpanda
       - start
