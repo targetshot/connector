@@ -368,34 +368,7 @@
 
           </div>
 
-          <div class="grid gap-7 lg:grid-cols-2">
-            <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
-              <input type="hidden" name="section" value="admin" />
-              <div>
-                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Administrator-Zugang</h2>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Aktualisiere bei Bedarf das Admin-Passwort. Das aktuelle Passwort wird zum Speichern jeder Änderung benötigt.</p>
-              </div>
-              <div>
-                <label class="input-label" for="pw_admin">Aktuelles Admin-Passwort</label>
-                <input id="pw_admin" type="password" name="pw" class="ts-input" placeholder="Admin Passwort" required />
-                <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Pflichtfeld – schützt Konfiguration &amp; Worker-Steuerung.</p>
-              </div>
-              <div class="grid gap-6 md:grid-cols-2">
-                <div>
-                  <label class="input-label" for="new_admin_password">Neues Admin-Passwort</label>
-                  <input id="new_admin_password" name="new_admin_password" type="password" class="ts-input" placeholder="Mindestens 8 Zeichen" autocomplete="new-password" required />
-                </div>
-                <div>
-                  <label class="input-label" for="confirm_admin_password">Bestätigung</label>
-                  <input id="confirm_admin_password" name="confirm_admin_password" type="password" class="ts-input" placeholder="Nochmals eingeben" autocomplete="new-password" required />
-                </div>
-              </div>
-              <div class="flex flex-wrap gap-3 pt-2">
-                <button type="submit" class="primary-button">Passwort speichern</button>
-              </div>
-            </form>
-
-            <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
+          <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
               <div>
                 <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Connector-Steuerung</h2>
                 <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Starte, pausiere oder prüfe den Debezium Worker direkt aus der UI.</p>
@@ -429,25 +402,53 @@
               </div>
             </section>
 
-            <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
-              <div>
-                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">System-Update</h2>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Prüft neue Git-Releases und aktualisiert das Docker-Compose Deployment inklusive Neuaufbau der Services.</p>
-              </div>
-              <div class="space-y-2 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-                <div class="flex flex-wrap items-center gap-3 text-sm">
-                  <span id="updateStatusBadge" class="badge">…</span>
-                  <span id="updateStatusText" class="text-zinc-700 dark:text-zinc-200">Status wird ermittelt…</span>
+            <div class="grid gap-7 lg:grid-cols-2">
+              <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
+                <input type="hidden" name="section" value="admin" />
+                <div>
+                  <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Administrator-Zugang</h2>
+                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Aktualisiere bei Bedarf das Admin-Passwort. Das aktuelle Passwort wird zum Speichern jeder Änderung benötigt.</p>
                 </div>
-                <div id="updateVersionInfo">Version wird geladen…</div>
-                <div id="updatePrereqHint"></div>
-              </div>
-              <div class="flex flex-wrap gap-3">
-                <button type="button" id="btnCheckUpdate" class="btn-secondary">Nach Updates suchen</button>
-                <button type="button" id="btnRunUpdate" class="btn-secondary">Auto-Update starten</button>
-              </div>
-              <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
-            </section>
+                <div>
+                  <label class="input-label" for="pw_admin">Aktuelles Admin-Passwort</label>
+                  <input id="pw_admin" type="password" name="pw" class="ts-input" placeholder="Admin Passwort" required />
+                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Pflichtfeld – schützt Konfiguration &amp; Worker-Steuerung.</p>
+                </div>
+                <div class="grid gap-6 md:grid-cols-2">
+                  <div>
+                    <label class="input-label" for="new_admin_password">Neues Admin-Passwort</label>
+                    <input id="new_admin_password" name="new_admin_password" type="password" class="ts-input" placeholder="Mindestens 8 Zeichen" autocomplete="new-password" required />
+                  </div>
+                  <div>
+                    <label class="input-label" for="confirm_admin_password">Bestätigung</label>
+                    <input id="confirm_admin_password" name="confirm_admin_password" type="password" class="ts-input" placeholder="Nochmals eingeben" autocomplete="new-password" required />
+                  </div>
+                </div>
+                <div class="flex flex-wrap gap-3 pt-2">
+                  <button type="submit" class="primary-button">Passwort speichern</button>
+                </div>
+              </form>
+
+              <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
+                <div>
+                  <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">System-Update</h2>
+                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Prüft neue Git-Releases und aktualisiert das Docker-Compose Deployment inklusive Neuaufbau der Services.</p>
+                </div>
+                <div class="space-y-2 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                  <div class="flex flex-wrap items-center gap-3 text-sm">
+                    <span id="updateStatusBadge" class="badge">…</span>
+                    <span id="updateStatusText" class="text-zinc-700 dark:text-zinc-200">Status wird ermittelt…</span>
+                  </div>
+                  <div id="updateVersionInfo">Version wird geladen…</div>
+                  <div id="updatePrereqHint"></div>
+                </div>
+                <div class="flex flex-wrap gap-3">
+                  <button type="button" id="btnCheckUpdate" class="btn-secondary">Nach Updates suchen</button>
+                  <button type="button" id="btnRunUpdate" class="btn-secondary">Auto-Update starten</button>
+                </div>
+                <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
+              </section>
+            </div>
           </div>
         </div>
       </main>
