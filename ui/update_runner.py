@@ -186,6 +186,7 @@ def run_update() -> int:
         job_started=start_ts,
         log_append=[f"Update-Runner gestartet um {start_ts}", f"Workspace: {workspace}"],
     )
+    compose_down_called = False
     try:
         _ensure_workspace(workspace)
         try:
@@ -221,6 +222,7 @@ def run_update() -> int:
         manager.merge(log_append=["Baue neue Container"], current_action="docker compose build")
         compose_cmd = _compose_base(compose_env)
         _run_command(compose_cmd + ["down", "--remove-orphans"], cwd=workspace, manager=manager)
+        compose_down_called = True
         for name in ("ts-kafka-connect", "ts-connect-ui", "ts-redpanda", "workspace-kafka-connect", "workspace-ui", "workspace-redpanda-1"):
             try:
                 _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
@@ -231,12 +233,13 @@ def run_update() -> int:
         _run_command(compose_cmd + ["up", "-d"], cwd=workspace, manager=manager)
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
-        for name in ("ts-kafka-connect", "ts-connect-ui", "ts-redpanda", "workspace-kafka-connect", "workspace-ui", "workspace-redpanda-1"):
-            try:
-                _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
-            except CommandError:
-                manager.merge(log_append=[f"Hinweis: Container {name} konnte nicht gelöscht werden"])
-                continue
+        if compose_down_called:
+            for name in ("ts-kafka-connect", "ts-connect-ui", "ts-redpanda", "workspace-kafka-connect", "workspace-ui", "workspace-redpanda-1"):
+                try:
+                    _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
+                except CommandError:
+                    manager.merge(log_append=[f"Hinweis: Container {name} konnte nicht gelöscht werden"])
+                    continue
         manager.merge(
             status="error",
             update_in_progress=False,
