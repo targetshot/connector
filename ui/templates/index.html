@@ -781,6 +781,7 @@
     const connectorStatusBadge = document.getElementById('connectorStatusBadge');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
+    let updateReloadTimer = null;
     const autoUpdateHour = document.getElementById('autoUpdateHour');
     const autoUpdateNext = document.getElementById('autoUpdateNext');
     const autoUpdateLast = document.getElementById('autoUpdateLast');
@@ -851,6 +852,23 @@
       if (!prereq.workspace) missing.push('Workspace-Mount');
       updatePrereqHint.className = 'text-xs text-amber-600 dark:text-amber-300';
       updatePrereqHint.textContent = 'Voraussetzungen fehlen: ' + missing.join(', ');
+    }
+
+    function scheduleUpdateReload() {
+      if (updateReloadTimer) return;
+      const probe = async () => {
+        try {
+          const response = await fetch('/api/status', { cache: 'no-store' });
+          if (response.ok) {
+            window.location.reload();
+            return;
+          }
+        } catch (error) {
+          // UI likely restarting; keep polling
+        }
+        updateReloadTimer = setTimeout(probe, 4000);
+      };
+      updateReloadTimer = setTimeout(probe, 4000);
     }
 
     function setHealthBadge(el, summary) {
@@ -1018,6 +1036,7 @@
             return;
           }
           showInfoModal('Update gestartet', 'Die UI wird kurz neu gestartet, sobald docker compose neu gebaut wurde.');
+          scheduleUpdateReload();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           showInfoModal('Update fehlgeschlagen', message, 'error');
