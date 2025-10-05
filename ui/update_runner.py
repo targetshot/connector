@@ -152,6 +152,15 @@ def run_update() -> int:
     )
     try:
         _ensure_workspace(workspace)
+        try:
+            manager.merge(log_append=["Konfiguriere Git safe.directory"], current_action="Git konfigurieren")
+            _run_command(
+                ["git", "config", "--global", "--add", "safe.directory", str(workspace)],
+                cwd=workspace,
+                manager=manager,
+            )
+        except CommandError:
+            manager.merge(log_append=["Warnung: safe.directory konnte nicht gesetzt werden"], current_action="Git konfigurieren")
         manager.merge(log_append=["Prüfe Git-Status"], current_action="Prüfe Repository")
         _ensure_clean_repo(workspace, manager)
         manager.merge(log_append=["Hole Git-Updates"], current_action="Git fetch")
