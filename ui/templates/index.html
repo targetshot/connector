@@ -496,6 +496,21 @@
   </div>
 
   <div id="infoModal" class="fixed inset-0 z-50 hidden bg-black/50 backdrop-blur-sm">
+  <div id="confirmModal" class="fixed inset-0 z-50 hidden bg-black/50 backdrop-blur-sm">
+    <div class="absolute inset-0 flex items-center justify-center p-4">
+      <div id="confirmModalCard" class="w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white">
+        <div class="space-y-2">
+          <h3 class="brand-sub text-lg font-semibold text-zinc-900 dark:text-white">Bestätigung</h3>
+          <p id="confirmModalMessage" class="text-sm text-zinc-600 dark:text-zinc-300"></p>
+        </div>
+        <div class="mt-6 flex justify-end gap-3">
+          <button type="button" id="confirmModalCancel" class="btn-secondary !bg-white/70 !text-zinc-700 hover:!bg-white dark:!bg-white/20 dark:!text-white">Abbrechen</button>
+          <button type="button" id="confirmModalAccept" class="primary-button">OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
     <div class="absolute inset-0 flex items-center justify-center p-4">
       <div id="infoModalCard" class="w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white">
         <div class="space-y-2">
@@ -540,6 +555,11 @@
     const infoModalTitle = document.getElementById('infoModalTitle');
     const infoModalMessage = document.getElementById('infoModalMessage');
     const infoModalClose = document.getElementById('infoModalClose');
+    const confirmModal = document.getElementById('confirmModal');
+    const confirmModalCard = document.getElementById('confirmModalCard');
+    const confirmModalMessage = document.getElementById('confirmModalMessage');
+    const confirmModalAccept = document.getElementById('confirmModalAccept');
+    const confirmModalCancel = document.getElementById('confirmModalCancel');
     const INFO_MODAL_BASE = 'w-full max-w-md rounded-3xl border border-white/10 bg-white/95 p-6 shadow-2xl dark:bg-ink-900/95 dark:text-white';
     const INFO_MODAL_ERROR = 'border-rose-300 bg-rose-100 dark:border-rose-400/40 dark:bg-rose-900/40 dark:text-rose-100';
     const INFO_MODAL_TITLE_BASE = 'brand-sub text-lg font-semibold text-zinc-900 dark:text-white';
@@ -547,6 +567,7 @@
     const INFO_MODAL_MESSAGE_BASE = 'text-sm text-zinc-600 dark:text-zinc-300';
     const INFO_MODAL_MESSAGE_ERROR = 'text-sm text-rose-600 dark:text-rose-200';
     let passwordResolver = null;
+    let confirmResolver = null;
 
     function closePasswordModal() {
       passwordModal.classList.add('hidden');
@@ -590,6 +611,38 @@
     passwordModal.addEventListener('click', (event) => {
       if (event.target === passwordModal) {
         resolvePasswordModal(null);
+      }
+    });
+
+    function closeConfirmModal() {
+      confirmModal.classList.add('hidden');
+      document.body.classList.remove('overflow-hidden');
+    }
+
+    function resolveConfirmModal(value) {
+      if (!confirmResolver) return;
+      const resolver = confirmResolver;
+      confirmResolver = null;
+      closeConfirmModal();
+      resolver(!!value);
+    }
+
+    function showConfirmModal(message) {
+      confirmModalMessage.textContent = message;
+      confirmModalCard.className = INFO_MODAL_BASE;
+      confirmModal.classList.remove('hidden');
+      document.body.classList.add('overflow-hidden');
+      return new Promise((resolve) => {
+        confirmResolver = resolve;
+        confirmModalAccept.focus();
+      });
+    }
+
+    confirmModalAccept.addEventListener('click', () => resolveConfirmModal(true));
+    confirmModalCancel.addEventListener('click', () => resolveConfirmModal(false));
+    confirmModal.addEventListener('click', (event) => {
+      if (event.target === confirmModal) {
+        resolveConfirmModal(false);
       }
     });
 
