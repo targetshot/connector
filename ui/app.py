@@ -47,7 +47,6 @@ def _load_version_defaults() -> tuple[str, str]:
     return (version or "dev"), (release or "Unbekannt")
 
 
-CONNECT_VERSION, CONNECT_RELEASE = _load_version_defaults()
 SESSION_SECRET = os.getenv("UI_SESSION_SECRET", "targetshot-connect-ui-secret")
 CONFLUENT_CLUSTER_URL = os.getenv(
     "TS_CONNECT_CLUSTER_URL",
@@ -437,10 +436,11 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
     state = await get_update_state_snapshot()
     release = await _ensure_latest_release(force=force)
     workspace_info = await _collect_workspace_info()
+    connect_version, connect_release = _load_version_defaults()
     prereq = _detect_prerequisites(workspace_info)
     repo_slug = await _determine_repo_slug()
     compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
-    current_marker = CONNECT_VERSION or workspace_info.get("current_ref") or workspace_info.get("current_commit")
+    current_marker = connect_version or workspace_info.get("current_ref") or workspace_info.get("current_commit")
     latest_tag = release.get("tag_name") if isinstance(release, dict) else None
     update_available = bool(latest_tag and current_marker and latest_tag != current_marker)
     auto_enabled = bool(state.get("auto_update_enabled"))
@@ -453,8 +453,8 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         "ok": True,
         "status": state.get("status", "idle"),
         "current_action": state.get("current_action"),
-        "current_version": CONNECT_VERSION,
-        "current_release": CONNECT_RELEASE,
+        "current_version": connect_version,
+        "current_release": connect_release,
         "latest_release": release,
         "update_available": update_available,
         "last_check": state.get("last_check"),
@@ -983,6 +983,7 @@ def require_session(request: Request):
 def build_index_context(request: Request) -> dict:
     data = fetch_settings().copy()
     secrets_data = read_secrets_file()
+    connect_version, connect_release = _load_version_defaults()
     placeholders = {
         "YOUR-BOOTSTRAP:9092",
         "YOUR-BOOTSTRAP",
@@ -1000,8 +1001,8 @@ def build_index_context(request: Request) -> dict:
         "request": request,
         "data": data,
         "has_secrets": has_secrets,
-        "connect_version": CONNECT_VERSION,
-        "connect_release": CONNECT_RELEASE,
+        "connect_version": connect_version,
+        "connect_release": connect_release,
         "confluent_cluster_url": CONFLUENT_CLUSTER_URL,
         "confluent_cluster_id": CONFLUENT_CLUSTER_ID,
         "flash_message": flash_message,
