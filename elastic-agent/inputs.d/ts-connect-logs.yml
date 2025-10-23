@@ -1,0 +1,34 @@
+inputs:
+  - type: filestream
+    id: ts-connect-app-logs
+    enabled: true
+    paths:
+      - /app/data/logs/*.log
+      - /app/data/logs/*.json
+    parsers:
+      - ndjson:
+          add_error_key: true
+    fields:
+      service.name: ts-connect
+      service.type: application
+      service.environment: ${ELASTIC_AGENT_ENVIRONMENT:prod}
+    fields_under_root: true
+    processors:
+      - add_tags:
+          tags:
+            - ts-connect
+            - app-log
+
+  - type: docker
+    id: ts-connect-docker-logs
+    enabled: true
+    containers.ids:
+      - "${DATA_STREAM_DATASET:-*}"
+    processors:
+      - add_tags:
+          tags: [ts-connect, docker]
+      - add_fields:
+          target: ts_connect
+          fields:
+            site: ${ELASTIC_AGENT_SITE_TAG:unknown}
+            tier: ${ELASTIC_AGENT_TIER_TAG:unknown}

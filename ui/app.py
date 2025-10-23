@@ -73,6 +73,23 @@ def _retention_for_license(value: str | None) -> int:
     return LICENSE_RETENTION_DAYS.get(_normalize_license_tier(value), DEFAULT_RETENTION_DAYS)
 
 
+def _license_status_snapshot(settings: dict) -> dict:
+    license_valid_iso = settings.get("license_valid_until")
+    valid_dt = _parse_iso8601(license_valid_iso)
+    days_remaining: int | None = None
+    if valid_dt:
+        days_remaining = (valid_dt.date() - datetime.now(timezone.utc).date()).days
+    return {
+        "timestamp": _now_utc_iso(),
+        "license_key_present": bool(settings.get("license_key")),
+        "license_status": settings.get("license_status"),
+        "license_plan": settings.get("license_tier"),
+        "license_valid_until": license_valid_iso,
+        "days_remaining": days_remaining,
+        "site": settings.get("topic_prefix"),
+    }
+
+
 def _normalize_iso8601(value: str | None) -> str | None:
     if not value:
         return None
@@ -98,6 +115,13 @@ def _parse_variant_plan_map(raw: str) -> dict[str, str]:
 
 
 LEMON_VARIANT_PLAN_MAP = _parse_variant_plan_map(LEMON_VARIANT_PLAN_MAP_RAW)
+
+
+def _write_json_log(filename: str, payload: dict) -> None:
+    path = LOG_DIR / filename
+    line = json.dumps(payload, ensure_ascii=False)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
 
 def _load_version_defaults() -> tuple[str, str]:
     version = os.getenv("TS_CONNECT_VERSION")
@@ -125,6 +149,8 @@ DOCS_URL = os.getenv("TS_CONNECT_DOCS_URL", "https://docs.targetshot.app/")
 
 DATA_DIR = Path("/app/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "config.db"
 SECRETS_PATH = Path(CONNECT_SECRETS_PATH)
 ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
@@ -2299,6 +2325,18 @@ async def health_summary():
         _check_backup_health(),
         _check_license_health(),
     )
+    snapshot = {
+        "timestamp": _now_utc_iso(),
+        "database": database,
+        "confluent": confluent,
+        "connector": connector,
+        "backup": backup,
+        "license": license,
+    }
+    try:
+        _write_json_log("health.log", snapshot)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to write health log: %s", exc)
     return {
         "database": database,
         "confluent": confluent,
