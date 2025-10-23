@@ -42,7 +42,7 @@ TOPIC_REPLICATION_FACTOR = os.getenv("TS_CONNECT_TOPIC_REPLICATION_FACTOR", "1")
 TOPIC_PARTITIONS = os.getenv("TS_CONNECT_TOPIC_PARTITIONS", "3")
 
 
-def build_connector_config(settings: dict) -> dict:
+def build_connector_config(settings: dict, *, offline_mode: bool = False) -> dict:
     """Return the Kafka Connect configuration payload for Debezium.
 
     Parameters
@@ -52,7 +52,18 @@ def build_connector_config(settings: dict) -> dict:
         db_host, db_port, db_user, server_id, server_name, topic_prefix,
         confluent_bootstrap, confluent_sasl_username.
     """
-    transforms = ["unwrap"]
+    transforms = ["unwrap", "addsrc"]
+
+    router_configs = [
+        ("route_schuetze", r"^.+\.SMDB\.Schuetze$", "ts.raw.schuetze"),
+        ("route_scheiben", r"^.+\.SSMDB2\.Scheiben$", "ts.raw.scheiben"),
+        ("route_serien", r"^.+\.SSMDB2\.Serien$", "ts.raw.serien"),
+        ("route_treffer", r"^.+\.SSMDB2\.Treffer$", "ts.raw.treffer"),
+    ]
+
+    if not SINGLE_TOPIC_MODE:
+        transforms.extend(name for name, _, _ in router_configs)
+
     cfg: dict[str, str] = {
         "connector.class": "io.debezium.connector.mysql.MySqlConnector",
         "database.hostname": settings["db_host"],
@@ -66,9 +77,6 @@ def build_connector_config(settings: dict) -> dict:
         "database.allowPublicKeyRetrieval": "true",
         "decimal.handling.mode": "string",
         "time.precision.mode": "connect",
-        "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-        "transforms.unwrap.drop.tombstones": "false",
-        "transforms.unwrap.delete.handling.mode": "rewrite",
         "database.history.kafka.bootstrap.servers": HISTORY_BOOTSTRAP,
         "database.history.kafka.topic": HISTORY_TOPIC,
         "schema.history.internal.kafka.bootstrap.servers": HISTORY_BOOTSTRAP,
@@ -81,8 +89,22 @@ def build_connector_config(settings: dict) -> dict:
             f"username='${{file:{CONNECT_SECRETS_PATH}:confluent_sasl_username}}' "
             f"password='${{file:{CONNECT_SECRETS_PATH}:confluent_sasl_password}}';"
         ),
-        "producer.override.key.serializer": "org.apache.kafka.common.serialization.ByteArraySerializer",
-        "producer.override.value.serializer": "org.apache.kafka.common.serialization.ByteArraySerializer",
+        "key.converter": "io.confluent.connect.avro.AvroConverter",
+        "value.converter": "io.confluent.connect.avro.AvroConverter",
+        "key.converter.schemas.enable": "true",
+        "value.converter.schemas.enable": "true",
+        "key.converter.schema.registry.url": f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_url}}",
+        "value.converter.schema.registry.url": f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_url}}",
+        "key.converter.basic.auth.credentials.source": "USER_INFO",
+        "value.converter.basic.auth.credentials.source": "USER_INFO",
+        "key.converter.basic.auth.user.info": (
+            f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_key}}:"
+            f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_secret}}"
+        ),
+        "value.converter.basic.auth.user.info": (
+            f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_key}}:"
+            f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_secret}}"
+        ),
         "database.include.list": DB_INCLUDE_LIST,
         "table.include.list": TABLE_INCLUDE_LIST,
         "column.include.list": COLUMN_INCLUDE_LIST,
@@ -91,9 +113,64 @@ def build_connector_config(settings: dict) -> dict:
         "topic.creation.default.replication.factor": TOPIC_REPLICATION_FACTOR,
         "topic.creation.default.partitions": TOPIC_PARTITIONS,
         "topic.creation.default.cleanup.policy": "delete",
+        "errors.retry.timeout": "600",
+        "errors.retry.delay.max.ms": "10000",
+        "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+        "transforms.unwrap.drop.tombstones": "false",
+        "transforms.unwrap.delete.handling.mode": "rewrite",
+        "transforms.addsrc.type": "org.apache.kafka.connect.transforms.InsertField$Value",
+        "transforms.addsrc.topic.field": "source_topic",
     }
 
-    if SINGLE_TOPIC_MODE:
+    if offline_mode:
+        cfg.update(
+            {
+                "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "key.converter.schemas.enable": "false",
+                "value.converter.schemas.enable": "false",
+            }
+        )
+    else:
+        cfg.update(
+            {
+                "producer.override.bootstrap.servers": f"${{file:{CONNECT_SECRETS_PATH}:confluent_bootstrap}}",
+                "producer.override.security.protocol": "SASL_SSL",
+                "producer.override.sasl.mechanism": "PLAIN",
+                "producer.override.sasl.jaas.config": (
+                    "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                    f"username='${{file:{CONNECT_SECRETS_PATH}:confluent_sasl_username}}' "
+                    f"password='${{file:{CONNECT_SECRETS_PATH}:confluent_sasl_password}}';"
+                ),
+                "key.converter": "io.confluent.connect.avro.AvroConverter",
+                "value.converter": "io.confluent.connect.avro.AvroConverter",
+                "key.converter.schemas.enable": "true",
+                "value.converter.schemas.enable": "true",
+                "key.converter.schema.registry.url": f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_url}}",
+                "value.converter.schema.registry.url": f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_url}}",
+                "key.converter.basic.auth.credentials.source": "USER_INFO",
+                "value.converter.basic.auth.credentials.source": "USER_INFO",
+                "key.converter.basic.auth.user.info": (
+                    f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_key}}:"
+                    f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_secret}}"
+                ),
+                "value.converter.basic.auth.user.info": (
+                    f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_key}}:"
+                    f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_secret}}"
+                ),
+            }
+        )
+
+    if not SINGLE_TOPIC_MODE:
+        for name, regex, replacement in router_configs:
+            cfg.update(
+                {
+                    f"transforms.{name}.type": "org.apache.kafka.connect.transforms.RegexRouter",
+                    f"transforms.{name}.regex": regex,
+                    f"transforms.{name}.replacement": replacement,
+                }
+            )
+    else:
         transforms.append("route")
         cfg.update(
             {
@@ -103,5 +180,10 @@ def build_connector_config(settings: dict) -> dict:
             }
         )
 
+    if SINGLE_TOPIC_MODE:
+        cfg["transforms"] = ",".join(transforms)
+        return cfg
+
     cfg["transforms"] = ",".join(transforms)
+
     return cfg

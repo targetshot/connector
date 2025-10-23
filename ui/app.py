@@ -15,6 +15,7 @@ from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+import psycopg2
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -27,6 +28,7 @@ from update_state import UpdateStateManager
 APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
 DEFAULT_CONNECTOR_NAME = os.getenv("DEFAULT_CONNECTOR_NAME", "targetshot-debezium")
+BACKUP_CONNECTOR_NAME = os.getenv("BACKUP_CONNECTOR_NAME", f"{DEFAULT_CONNECTOR_NAME}-backup-sink")
 ADMIN_PASSWORD = os.getenv("UI_ADMIN_PASSWORD", "change-me")
 PASSWORD_PLACEHOLDER = "********"
 TRUSTED_CIDRS = [c.strip() for c in os.getenv(
@@ -34,6 +36,33 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
 WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
+
+LICENSE_RETENTION_DAYS = {
+    "basic": 14,
+    "plus": 30,
+    "pro": 90,
+}
+DEFAULT_LICENSE_TIER = os.getenv("TS_CONNECT_DEFAULT_LICENSE_TIER", "basic").strip().lower()
+if DEFAULT_LICENSE_TIER not in LICENSE_RETENTION_DAYS:
+    DEFAULT_LICENSE_TIER = "basic"
+DEFAULT_RETENTION_DAYS = LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER]
+DEFAULT_BACKUP_HOST = os.getenv("TS_CONNECT_BACKUP_HOST", "backup-db")
+DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
+DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
+DEFAULT_BACKUP_USER = os.getenv("TS_CONNECT_BACKUP_USER", "targetshot")
+
+
+def _normalize_license_tier(value: str | None) -> str:
+    if not value:
+        return DEFAULT_LICENSE_TIER
+    normalized = value.strip().lower()
+    if normalized not in LICENSE_RETENTION_DAYS:
+        return DEFAULT_LICENSE_TIER
+    return normalized
+
+
+def _retention_for_license(value: str | None) -> int:
+    return LICENSE_RETENTION_DAYS.get(_normalize_license_tier(value), DEFAULT_RETENTION_DAYS)
 
 def _load_version_defaults() -> tuple[str, str]:
     version = os.getenv("TS_CONNECT_VERSION")
@@ -65,6 +94,7 @@ DB_PATH = DATA_DIR / "config.db"
 SECRETS_PATH = Path(CONNECT_SECRETS_PATH)
 ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
 APPLY_STATE_PATH = DATA_DIR / "connector_apply_state.json"
+MM2_CONFIG_PATH = DATA_DIR / "mm2.properties"
 APPLY_RETRY_SECONDS = int(os.getenv("TS_CONNECT_APPLY_RETRY_SECONDS", "60"))
 UPDATE_STATE_PATH = DATA_DIR / "update_state.json"
 UPDATE_CACHE_SECONDS = int(os.getenv("TS_CONNECT_UPDATE_CACHE_SECONDS", "3600"))
@@ -76,10 +106,6 @@ DOCKER_SOCKET_PATH = Path(os.getenv("TS_CONNECT_DOCKER_SOCKET", "/var/run/docker
 AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
-PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
-
-PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
-
 PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
 
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
@@ -717,11 +743,19 @@ async def ip_allowlist(request: Request, call_next):
 # --------- DB Helpers ----------
 def get_db():
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS settings (
         id INTEGER PRIMARY KEY CHECK (id=1),
         db_host TEXT, db_port INTEGER, db_user TEXT,
         confluent_bootstrap TEXT, confluent_sasl_username TEXT,
-        topic_prefix TEXT, server_id INTEGER, server_name TEXT
+        topic_prefix TEXT, server_id INTEGER, server_name TEXT,
+        offline_buffer_enabled INTEGER DEFAULT 0,
+        license_tier TEXT,
+        retention_days INTEGER,
+        backup_pg_host TEXT,
+        backup_pg_port INTEGER,
+        backup_pg_db TEXT,
+        backup_pg_user TEXT
     )""")
     cur = conn.execute("SELECT COUNT(*) FROM settings")
     if cur.fetchone()[0] == 0:
@@ -730,11 +764,14 @@ def get_db():
             INSERT INTO settings(
                 id, db_host, db_port, db_user,
                 confluent_bootstrap, confluent_sasl_username,
-                topic_prefix, server_id, server_name
+                topic_prefix, server_id, server_name,
+                offline_buffer_enabled, license_tier, retention_days,
+                backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
             )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                1,
                 os.getenv("TS_CONNECT_DEFAULT_DB_HOST", "192.168.10.200"),
                 3306,
                 os.getenv("TS_CONNECT_DEFAULT_DB_USER", "debezium_sync"),
@@ -743,10 +780,245 @@ def get_db():
                 os.getenv("TS_CONNECT_DEFAULT_TOPIC_PREFIX", "413067"),
                 int(os.getenv("TS_CONNECT_DEFAULT_SERVER_ID", "413067")),
                 os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mysql"),
+                0,
+                DEFAULT_LICENSE_TIER,
+                DEFAULT_RETENTION_DAYS,
+                DEFAULT_BACKUP_HOST,
+                DEFAULT_BACKUP_PORT,
+                DEFAULT_BACKUP_DB,
+                DEFAULT_BACKUP_USER,
             ),
         )
         conn.commit()
+    _ensure_settings_schema(conn)
     return conn
+
+
+def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(settings)").fetchall()}
+
+    def add_column(name: str, ddl: str) -> None:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE settings ADD COLUMN {ddl}")
+            existing.add(name)
+
+    add_column("offline_buffer_enabled", "offline_buffer_enabled INTEGER DEFAULT 0")
+    add_column("license_tier", "license_tier TEXT")
+    add_column("retention_days", "retention_days INTEGER")
+    add_column("backup_pg_host", "backup_pg_host TEXT")
+    add_column("backup_pg_port", "backup_pg_port INTEGER")
+    add_column("backup_pg_db", "backup_pg_db TEXT")
+    add_column("backup_pg_user", "backup_pg_user TEXT")
+    conn.commit()
+
+    cur = conn.execute("SELECT COUNT(*) as cnt FROM settings")
+    if cur.fetchone()["cnt"] == 0:
+        return
+    row = conn.execute("SELECT license_tier, retention_days FROM settings WHERE id=1").fetchone()
+    license_value = _normalize_license_tier(row["license_tier"] if row else None)
+    retention_value = row["retention_days"] if row and row["retention_days"] else LICENSE_RETENTION_DAYS[license_value]
+    conn.execute(
+        """
+        UPDATE settings
+        SET
+            offline_buffer_enabled = COALESCE(offline_buffer_enabled, 0),
+            license_tier = ?,
+            retention_days = COALESCE(retention_days, ?),
+            backup_pg_host = COALESCE(NULLIF(TRIM(backup_pg_host), ''), ?),
+            backup_pg_port = COALESCE(backup_pg_port, ?),
+            backup_pg_db = COALESCE(NULLIF(TRIM(backup_pg_db), ''), ?),
+            backup_pg_user = COALESCE(NULLIF(TRIM(backup_pg_user), ''), ?)
+        WHERE id=1
+        """,
+        (
+            license_value,
+            retention_value,
+            DEFAULT_BACKUP_HOST,
+            DEFAULT_BACKUP_PORT,
+            DEFAULT_BACKUP_DB,
+            DEFAULT_BACKUP_USER,
+        ),
+    )
+    conn.commit()
+
+
+def ensure_backup_schema(*, host: str, port: int, database: str, user: str, password: str) -> None:
+    try:
+        with psycopg2.connect(
+            host=host,
+            port=port,
+            dbname=database,
+            user=user,
+            password=password,
+            connect_timeout=5,
+        ) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS buffer_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        topic TEXT NOT NULL,
+                        payload JSONB NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_buffer_events_created_at ON buffer_events (created_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_buffer_events_topic_created_at ON buffer_events (topic, created_at)
+                    """
+                )
+    except psycopg2.Error as exc:  # noqa: BLE001
+        raise RuntimeError(f"Backup-Datenbank nicht erreichbar: {exc}") from exc
+
+
+def prune_backup_data(*, days: int, host: str, port: int, database: str, user: str, password: str) -> None:
+    if days <= 0:
+        return
+    interval_literal = f"{int(days)} days"
+    try:
+        with psycopg2.connect(
+            host=host,
+            port=port,
+            dbname=database,
+            user=user,
+            password=password,
+            connect_timeout=5,
+        ) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM buffer_events WHERE created_at < NOW() - INTERVAL %s",
+                    (interval_literal,),
+                )
+    except psycopg2.Error as exc:  # noqa: BLE001
+        raise RuntimeError(f"Bereinigung der Backup-Datenbank fehlgeschlagen: {exc}") from exc
+
+
+def _escape_jaas(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _probe_backup_connection(*, host: str, port: int, database: str, user: str, password: str, timeout: int = 3) -> None:
+    with psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=database,
+        user=user,
+        password=password,
+        connect_timeout=timeout,
+    ) as connection:
+        with connection.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+
+
+def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
+    confluent_bootstrap = settings.get("confluent_bootstrap") or secrets.get("confluent_bootstrap") or CONFLUENT_BOOTSTRAP_DEFAULT
+    sasl_user = secrets.get("confluent_sasl_username")
+    sasl_password = secrets.get("confluent_sasl_password")
+    if not (confluent_bootstrap and sasl_user and sasl_password):
+        raise RuntimeError("MirrorMaker benötigt gültige Confluent Zugangsdaten (Bootstrap, API Key & Secret).")
+    config_lines = [
+        "clusters = local,remote",
+        "local.bootstrap.servers = redpanda:9092",
+        f"remote.bootstrap.servers = {confluent_bootstrap}",
+        "local.security.protocol = PLAINTEXT",
+        "remote.security.protocol = SASL_SSL",
+        "remote.sasl.mechanism = PLAIN",
+        (
+            "remote.sasl.jaas.config = org.apache.kafka.common.security.plain.PlainLoginModule required "
+            f"username='{_escape_jaas(sasl_user)}' password='{_escape_jaas(sasl_password)}';"
+        ),
+        "remote.ssl.endpoint.identification.algorithm = https",
+        "local->remote.enabled = true",
+        "local->remote.topics = ts.raw.*",
+        "local->remote.groups = _ts.*",
+        "local->remote.emit.heartbeats.interval.seconds = 15",
+        "offset.storage.topic = _ts_mm2_offsets",
+        "config.storage.topic = _ts_mm2_configs",
+        "status.storage.topic = _ts_mm2_status",
+        "checkpoint.topic.replication.factor = 1",
+        "heartbeats.topic.replication.factor = 1",
+        "offset.syncs.topic.replication.factor = 1",
+        "replication.factor = 1",
+        "tasks.max = 1",
+        "sync.topic.acls.enabled = false",
+        "emit.checkpoints.enabled = true",
+        "refresh.topics.interval.seconds = 30",
+    ]
+    MM2_CONFIG_PATH.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
+
+
+def _build_backup_sink_config(settings: dict, secrets: dict) -> dict:
+    backup_password = secrets.get("backup_pg_password", "")
+    if not backup_password:
+        raise ValueError("Backup-Datenbank Passwort fehlt in secrets.properties (backup_pg_password).")
+    host = settings["backup_pg_host"]
+    port = settings["backup_pg_port"]
+    database = settings["backup_pg_db"]
+    user = settings["backup_pg_user"]
+    jdbc_url = f"jdbc:postgresql://{host}:{port}/{database}"
+    return {
+        "name": BACKUP_CONNECTOR_NAME,
+        "config": {
+            "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+            "tasks.max": "1",
+            "topics.regex": r"ts\.raw\..+",
+            "connection.url": jdbc_url,
+            "connection.user": user,
+            "connection.password": backup_password,
+            "dialect.name": "PostgreSqlDatabaseDialect",
+            "table.name.format": "buffer_events",
+            "auto.create": "false",
+            "auto.evolve": "false",
+            "insert.mode": "insert",
+            "pk.mode": "none",
+            "delete.enabled": "false",
+            "max.batch.size": "500",
+            "max.retries": "6",
+            "retry.backoff.ms": "5000",
+            "behavior.on.null.values": "ignore",
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter.schemas.enable": "false",
+            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "key.converter.schemas.enable": "false",
+            "transforms": "HoistPayload,AddTopic",
+            "transforms.HoistPayload.type": "org.apache.kafka.connect.transforms.HoistField$Value",
+            "transforms.HoistPayload.field": "payload",
+            "transforms.AddTopic.type": "org.apache.kafka.connect.transforms.InsertField$Value",
+            "transforms.AddTopic.topic.field": "topic",
+            "errors.tolerance": "all",
+            "errors.log.enable": "true",
+            "errors.log.include.messages": "true",
+            "errors.deadletterqueue.topic.name": "_ts_backup_dlq",
+            "errors.deadletterqueue.topic.replication.factor": "1",
+        },
+    }
+
+
+async def restart_mirror_maker() -> None:
+    code, output = await _run_command_text(
+        ["docker", "ps", "-aq", "--filter", "name=ts-mirror-maker"],
+        timeout=10,
+    )
+    if code != 0:
+        raise RuntimeError(f"docker ps für mirror-maker fehlgeschlagen: {output}")
+    if not output.strip():
+        # Container existiert nicht - vermutlich offline Buffer nicht aktiviert.
+        return
+    code, restart_out = await _run_command_text(
+        ["docker", "restart", "ts-mirror-maker"],
+        timeout=30,
+    )
+    if code != 0:
+        raise RuntimeError(f"docker restart ts-mirror-maker fehlgeschlagen: {restart_out}")
 
 
 def fetch_settings() -> dict:
@@ -755,31 +1027,43 @@ def fetch_settings() -> dict:
         """
         SELECT db_host, db_port, db_user,
                confluent_bootstrap, confluent_sasl_username,
-               topic_prefix, server_id, server_name
+               topic_prefix, server_id, server_name,
+               offline_buffer_enabled, license_tier, retention_days,
+               backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
         FROM settings WHERE id=1
         """
     )
     row = cur.fetchone()
     conn.close()
+    if row is None:
+        raise RuntimeError("settings row missing")
+    license_tier = _normalize_license_tier(row["license_tier"])
+    retention_days = row["retention_days"] if row["retention_days"] else LICENSE_RETENTION_DAYS[license_tier]
     return {
-        "db_host": row[0],
-        "db_port": row[1],
-        "db_user": row[2],
-        "confluent_bootstrap": row[3],
-        "confluent_sasl_username": row[4],
-        "topic_prefix": row[5],
-        "server_id": row[6],
-        "server_name": row[7],
+        "db_host": row["db_host"],
+        "db_port": row["db_port"],
+        "db_user": row["db_user"],
+        "confluent_bootstrap": row["confluent_bootstrap"],
+        "confluent_sasl_username": row["confluent_sasl_username"],
+        "topic_prefix": row["topic_prefix"],
+        "server_id": row["server_id"],
+        "server_name": row["server_name"],
+        "offline_buffer_enabled": bool(row["offline_buffer_enabled"]),
+        "license_tier": license_tier,
+        "retention_days": retention_days,
+        "backup_pg_host": row["backup_pg_host"] or DEFAULT_BACKUP_HOST,
+        "backup_pg_port": row["backup_pg_port"] or DEFAULT_BACKUP_PORT,
+        "backup_pg_db": row["backup_pg_db"] or DEFAULT_BACKUP_DB,
+        "backup_pg_user": row["backup_pg_user"] or DEFAULT_BACKUP_USER,
     }
 
-def write_secrets_file(db_password: str, confluent_bootstrap: str,
-                       confluent_user: str, confluent_pass: str):
-    lines = [
-        f"db_password={db_password}",
-        f"confluent_bootstrap={confluent_bootstrap}",
-        f"confluent_sasl_username={confluent_user}",
-        f"confluent_sasl_password={confluent_pass}"
-    ]
+
+def write_secrets_file(values: dict[str, str]) -> None:
+    if not values:
+        if SECRETS_PATH.exists():
+            SECRETS_PATH.unlink()
+        return
+    lines = [f"{key}={value}" for key, value in sorted(values.items()) if value is not None]
     SECRETS_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(SECRETS_PATH, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)  # 0644 allows read across containers
 
@@ -898,9 +1182,73 @@ async def _connect_request(
     return resp
 
 
+async def _ensure_connector(
+    client: httpx.AsyncClient,
+    *,
+    name: str,
+    config: dict,
+    allow_defer: bool,
+) -> None:
+    url_base = f"{CONNECT_BASE_URL}/connectors/{name}"
+    resp = await _connect_request(
+        client,
+        "GET",
+        url_base,
+        allow_defer=allow_defer,
+        ok_statuses=(200, 404),
+    )
+    if resp.status_code == 200:
+        await _connect_request(
+            client,
+            "PUT",
+            f"{url_base}/pause",
+            allow_defer=allow_defer,
+            ok_statuses=(200, 202, 204, 409),
+        )
+        await _connect_request(
+            client,
+            "PUT",
+            f"{url_base}/config",
+            json_payload=config,
+            allow_defer=allow_defer,
+        )
+        await _connect_request(
+            client,
+            "PUT",
+            f"{url_base}/resume",
+            allow_defer=allow_defer,
+            ok_statuses=(200, 202, 204, 409),
+        )
+        return
+    await _connect_request(
+        client,
+        "POST",
+        f"{CONNECT_BASE_URL}/connectors",
+        json_payload={"name": name, "config": config},
+        allow_defer=allow_defer,
+        ok_statuses=(200, 201, 202),
+    )
+
+
+async def _delete_connector_if_exists(
+    client: httpx.AsyncClient,
+    *,
+    name: str,
+    allow_defer: bool,
+) -> None:
+    await _connect_request(
+        client,
+        "DELETE",
+        f"{CONNECT_BASE_URL}/connectors/{name}",
+        allow_defer=allow_defer,
+        ok_statuses=(200, 202, 204, 404),
+    )
+
+
 async def apply_connector_config(*, allow_defer: bool = True) -> None:
     settings = fetch_settings()
     secrets = read_secrets_file()
+    offline_enabled = settings.get("offline_buffer_enabled", False)
 
     required = {
         "db_password": "DB-Passwort",
@@ -908,55 +1256,48 @@ async def apply_connector_config(*, allow_defer: bool = True) -> None:
         "confluent_sasl_username": "Confluent API Key",
         "confluent_sasl_password": "Confluent API Secret",
     }
+    if offline_enabled:
+        required["backup_pg_password"] = "Backup-Datenbank Passwort"
     missing = [label for key, label in required.items() if not secrets.get(key)]
     if missing:
         raise ValueError("Es fehlen Werte in secrets.properties: " + ", ".join(missing))
 
-    connector_cfg = {
-        "name": DEFAULT_CONNECTOR_NAME,
-        "config": build_connector_config(settings),
-    }
+    connectors = [
+        {
+            "name": DEFAULT_CONNECTOR_NAME,
+            "config": build_connector_config(settings, offline_mode=offline_enabled),
+        }
+    ]
+    if offline_enabled:
+        connectors.append(_build_backup_sink_config(settings, secrets))
 
     async with httpx.AsyncClient(timeout=10) as client:
-        url_base = f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}"
-        resp = await _connect_request(
-            client,
-            "GET",
-            url_base,
-            allow_defer=allow_defer,
-            ok_statuses=(200, 404),
-        )
-        if resp.status_code == 200:
-            await _connect_request(
+        for connector in connectors:
+            await _ensure_connector(
                 client,
-                "PUT",
-                f"{url_base}/pause",
-                allow_defer=allow_defer,
-                ok_statuses=(200, 202, 204, 409),
-            )
-            await _connect_request(
-                client,
-                "PUT",
-                f"{url_base}/config",
-                json_payload=connector_cfg["config"],
+                name=connector["name"],
+                config=connector["config"],
                 allow_defer=allow_defer,
             )
-            await _connect_request(
+        if not offline_enabled:
+            await _delete_connector_if_exists(
                 client,
-                "PUT",
-                f"{url_base}/resume",
+                name=BACKUP_CONNECTOR_NAME,
                 allow_defer=allow_defer,
-                ok_statuses=(200, 202, 204, 409),
             )
-        else:
-            await _connect_request(
-                client,
-                "POST",
-                f"{CONNECT_BASE_URL}/connectors",
-                json_payload=connector_cfg,
-                allow_defer=allow_defer,
-                ok_statuses=(200, 201, 202),
-            )
+
+    if offline_enabled:
+        try:
+            _write_mirror_maker_config(settings, secrets)
+            await restart_mirror_maker()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"MirrorMaker-Konfiguration fehlgeschlagen: {exc}") from exc
+    else:
+        if MM2_CONFIG_PATH.exists():
+            try:
+                MM2_CONFIG_PATH.unlink()
+            except OSError:
+                pass
 
     await _mark_apply_success()
 
@@ -983,6 +1324,10 @@ def require_session(request: Request):
 def build_index_context(request: Request) -> dict:
     data = fetch_settings().copy()
     secrets_data = read_secrets_file()
+    data["retention_days"] = LICENSE_RETENTION_DAYS.get(
+        data["license_tier"],
+        LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER],
+    )
     connect_version, connect_release = _load_version_defaults()
     placeholders = {
         "YOUR-BOOTSTRAP:9092",
@@ -994,7 +1339,12 @@ def build_index_context(request: Request) -> dict:
 
     has_secrets = SECRETS_PATH.exists()
     db_password_saved = bool(secrets_data.get("db_password"))
+    backup_pg_password_saved = bool(secrets_data.get("backup_pg_password"))
     flash_message = request.session.pop("flash_message", None)
+    retention_mapping = [
+        {"key": key, "label": key.capitalize(), "days": days}
+        for key, days in LICENSE_RETENTION_DAYS.items()
+    ]
     error_message = request.session.pop("error_message", None)
 
     return {
@@ -1010,6 +1360,10 @@ def build_index_context(request: Request) -> dict:
         "docs_url": DOCS_URL,
         "db_password_placeholder": PASSWORD_PLACEHOLDER if db_password_saved else "",
         "db_password_saved": db_password_saved,
+        "backup_pg_password_placeholder": PASSWORD_PLACEHOLDER if backup_pg_password_saved else "",
+        "backup_pg_password_saved": backup_pg_password_saved,
+        "license_options": retention_mapping,
+        "license_retention_map": LICENSE_RETENTION_DAYS,
     }
 
 
@@ -1082,6 +1436,26 @@ async def test_confluent(bootstrap: str):
         return {"ok": False, "msg": str(e)}
 
 
+@app.get("/api/test/backup-db", dependencies=[Depends(require_session)])
+async def test_backup_db(host: str, port: int, database: str, user: str, password: str):
+    secrets_data = read_secrets_file()
+    if password == PASSWORD_PLACEHOLDER and secrets_data.get("backup_pg_password"):
+        password = secrets_data["backup_pg_password"]
+    try:
+        await asyncio.to_thread(
+            _probe_backup_connection,
+            host=host,
+            port=int(port),
+            database=database,
+            user=user,
+            password=password,
+            timeout=3,
+        )
+        return {"ok": True, "msg": "Backup-DB OK"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "msg": str(exc)}
+
+
 async def _check_database_health() -> dict[str, str]:
     settings = fetch_settings()
     host = settings.get("db_host")
@@ -1127,6 +1501,28 @@ async def _check_confluent_health() -> dict[str, str]:
     if result.get("ok"):
         return {"status": "ok", "message": result.get("msg", "Erreichbar")}
     return {"status": "error", "message": _short_error_message(str(result.get("msg", "Fehler")), 140)}
+
+
+async def _check_backup_health() -> dict[str, str]:
+    settings = fetch_settings()
+    if not settings.get("offline_buffer_enabled"):
+        return {"status": "skipped", "message": "Offline-Puffer deaktiviert"}
+    secrets = read_secrets_file()
+    password = secrets.get("backup_pg_password")
+    if not password:
+        return {"status": "warn", "message": "Passwort fehlt"}
+    try:
+        await asyncio.to_thread(
+            _probe_backup_connection,
+            host=settings["backup_pg_host"],
+            port=int(settings["backup_pg_port"]),
+            database=settings["backup_pg_db"],
+            user=settings["backup_pg_user"],
+            password=password,
+        )
+        return {"status": "ok", "message": "Backup-DB erreichbar"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "message": _short_error_message(str(exc), 140)}
 
 
 async def _check_connector_health() -> dict[str, str]:
@@ -1175,6 +1571,13 @@ async def save(
     topic_prefix: str | None = Form(default=None),
     server_id: int | None = Form(default=None),
     server_name: str | None = Form(default=None),
+    offline_enabled: str | None = Form(default=None),
+    license_tier: str | None = Form(default=None),
+    backup_pg_host: str | None = Form(default=None),
+    backup_pg_port: int | None = Form(default=None),
+    backup_pg_db: str | None = Form(default=None),
+    backup_pg_user: str | None = Form(default=None),
+    backup_pg_password: str | None = Form(default=None),
     new_admin_password: str = Form(default=""),
     confirm_admin_password: str = Form(default=""),
 ):
@@ -1231,7 +1634,15 @@ async def save(
         confluent_user_val = settings["confluent_sasl_username"] or secrets_data.get("confluent_sasl_username", "")
         confluent_pass_val = secrets_data.get("confluent_sasl_password", "")
 
-        write_secrets_file(db_password_value, confluent_bootstrap_val, confluent_user_val, confluent_pass_val)
+        secrets_data.update(
+            {
+                "db_password": db_password_value,
+                "confluent_bootstrap": confluent_bootstrap_val,
+                "confluent_sasl_username": confluent_user_val,
+                "confluent_sasl_password": confluent_pass_val,
+            }
+        )
+        write_secrets_file(secrets_data)
 
         try:
             await apply_connector_config()
@@ -1249,6 +1660,102 @@ async def save(
             )
         except Exception as exc:
             request.session["error_message"] = f"Connector-Update fehlgeschlagen: {exc}"
+        return RedirectResponse("/", status_code=303)
+
+    if section_key == "offline":
+        enabled = _parse_bool(offline_enabled, default=settings.get("offline_buffer_enabled", False))
+        selected_license = _normalize_license_tier(license_tier or settings.get("license_tier"))
+        retention_days = LICENSE_RETENTION_DAYS[selected_license]
+        pg_host = (backup_pg_host or settings.get("backup_pg_host") or DEFAULT_BACKUP_HOST).strip()
+        pg_port_value_raw = backup_pg_port if backup_pg_port is not None else settings.get("backup_pg_port", DEFAULT_BACKUP_PORT)
+        try:
+            pg_port_value = int(pg_port_value_raw)
+        except (TypeError, ValueError):
+            request.session["error_message"] = "Bitte eine gültige Portnummer für die Backup-Datenbank angeben."
+            return RedirectResponse("/", status_code=303)
+        if pg_port_value <= 0 or pg_port_value > 65535:
+            request.session["error_message"] = "Backup-Datenbank Port muss zwischen 1 und 65535 liegen."
+            return RedirectResponse("/", status_code=303)
+
+        pg_db = (backup_pg_db or settings.get("backup_pg_db") or DEFAULT_BACKUP_DB).strip()
+        pg_user_value = (backup_pg_user or settings.get("backup_pg_user") or DEFAULT_BACKUP_USER).strip()
+        submitted_backup_pw = (backup_pg_password or "").strip() if backup_pg_password is not None else ""
+        existing_backup_pw = secrets_data.get("backup_pg_password", "")
+        if submitted_backup_pw == PASSWORD_PLACEHOLDER and existing_backup_pw:
+            backup_pw_value = existing_backup_pw
+        else:
+            backup_pw_value = submitted_backup_pw
+
+        if enabled and not backup_pw_value:
+            request.session["error_message"] = "Bitte ein Passwort für die Backup-Datenbank hinterlegen."
+            return RedirectResponse("/", status_code=303)
+        if not pg_host or not pg_db or not pg_user_value:
+            request.session["error_message"] = "Bitte Host, Datenbank und Benutzer für die Backup-Datenbank angeben."
+            return RedirectResponse("/", status_code=303)
+
+        conn = get_db()
+        conn.execute(
+            """
+            UPDATE settings
+            SET offline_buffer_enabled=?, license_tier=?, retention_days=?,
+                backup_pg_host=?, backup_pg_port=?, backup_pg_db=?, backup_pg_user=?
+            WHERE id=1
+            """,
+            (
+                1 if enabled else 0,
+                selected_license,
+                retention_days,
+                pg_host,
+                pg_port_value,
+                pg_db,
+                pg_user_value,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        secrets_data.update(
+            {
+                "backup_pg_password": backup_pw_value,
+            }
+        )
+        write_secrets_file(secrets_data)
+
+        try:
+            if enabled and backup_pw_value:
+                ensure_backup_schema(
+                    host=pg_host,
+                    port=pg_port_value,
+                    database=pg_db,
+                    user=pg_user_value,
+                    password=backup_pw_value,
+                )
+                prune_backup_data(
+                    days=retention_days,
+                    host=pg_host,
+                    port=pg_port_value,
+                    database=pg_db,
+                    user=pg_user_value,
+                    password=backup_pw_value,
+                )
+        except Exception as exc:  # noqa: BLE001
+            request.session["error_message"] = f"Offline-Puffer konnte nicht vorbereitet werden: {exc}"
+            return RedirectResponse("/", status_code=303)
+
+        try:
+            await apply_connector_config()
+        except DeferredApplyError as exc:
+            request.session["flash_message"] = (
+                "Offline-Puffer gespeichert. Connector-Update wird automatisch erneut versucht, "
+                "sobald die Vereinsdatenbank erreichbar ist. "
+                f"Letzter Fehler: {exc}"
+            )
+            return RedirectResponse("/", status_code=303)
+        except Exception as exc:  # noqa: BLE001
+            request.session["error_message"] = f"Connector-Update fehlgeschlagen: {exc}"
+            return RedirectResponse("/", status_code=303)
+
+        request.session["flash_message"] = "Offline-Puffer Einstellungen gespeichert."
         return RedirectResponse("/", status_code=303)
 
     if section_key == "confluent":
@@ -1293,12 +1800,15 @@ async def save(
             request.session["error_message"] = "Bitte zuerst die MariaDB-Zugangsdaten speichern (DB-Passwort fehlt)."
             return RedirectResponse("/", status_code=303)
 
-        write_secrets_file(
-            db_password_val,
-            settings["confluent_bootstrap"],
-            confluent_sasl_username,
-            confluent_sasl_password,
+        secrets_data.update(
+            {
+                "db_password": db_password_val,
+                "confluent_bootstrap": settings["confluent_bootstrap"],
+                "confluent_sasl_username": confluent_sasl_username,
+                "confluent_sasl_password": confluent_sasl_password,
+            }
         )
+        write_secrets_file(secrets_data)
 
         try:
             await apply_connector_config()
@@ -1422,15 +1932,17 @@ async def update_status(force: bool = False):
 
 @app.get("/api/health/summary", dependencies=[Depends(require_session)])
 async def health_summary():
-    database, confluent, connector = await asyncio.gather(
+    database, confluent, connector, backup = await asyncio.gather(
         _check_database_health(),
         _check_confluent_health(),
         _check_connector_health(),
+        _check_backup_health(),
     )
     return {
         "database": database,
         "confluent": confluent,
         "connector": connector,
+        "backup": backup,
     }
 
 

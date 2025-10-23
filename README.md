@@ -26,9 +26,23 @@ docker compose up -d
 - `redpanda`: local Kafka (single node) for offsets/history
 - `kafka-connect`: Confluent Kafka Connect with Debezium MySQL plugin
 - `ui`: FastAPI web UI to manage connector, tests, secrets
+- `schema-registry`: lokaler Schema Registry Dienst für Avro/JSON Converter
+- `mirror-maker`: Kafka MirrorMaker 2, spiegelt `ts.raw.*`-Topics in die Confluent Cloud sobald erreichbar
+- `backup-db`: lokaler PostgreSQL-Puffer für Offline-Backups
 
 ### Notes
 - UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `compose.env` for localhost-only access.
+
+### Offline-Puffer konfigurieren
+- Die UI bietet im Bereich *Offline-Puffer & Backup* einen Schalter, um den lokalen Buffer zu aktivieren. Dabei landet jeder Debezium-Event zusätzlich in der Postgres-Datenbank `buffer_events`.
+- MirrorMaker 2 repliziert die lokal gepufferten Topics nach Confluent, sobald eine Verbindung besteht. Die benötigten Zugangsdaten werden weiterhin über `secrets.properties` verwaltet.
+- Die Aufbewahrungszeit richtet sich nach der Lizenz:
+  - **Basic**: 14 Tage
+  - **Plus**: 30 Tage
+  - **Pro**: 90 Tage
+- Standard-Credentials für den Postgres-Puffer können über `TS_CONNECT_BACKUP_DB/USER/PASSWORD/PORT` im `compose.env` angepasst werden.
+
+Beim ersten Aktivieren legt die UI automatisch die Tabelle `buffer_events` an und rotiert Einträge gemäß Lizenz.
 
 ## Folder Structure
 ```

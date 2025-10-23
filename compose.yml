@@ -16,6 +16,20 @@ services:
     ports:
       - "9092:9092"  # optional für Debug von außen
 
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.0
+    container_name: ts-schema-registry
+    restart: unless-stopped
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://redpanda:9092
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
+    depends_on:
+      - redpanda
+    ports:
+      - "8081:8081"  # optional für Debug und Troubleshooting
+
   kafka-connect:
     build:
       context: ./connect
@@ -49,15 +63,50 @@ services:
 
       CONNECT_REST_PORT: 8083
       CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
+      CONNECT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
     volumes:
       - ./ui/data:/app/data   # Connect liest hier die secrets.properties
     depends_on:
       - redpanda
+      - schema-registry
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8083/connectors"]
       interval: 15s
       timeout: 5s
       retries: 5
+
+  mirror-maker:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: ts-mirror-maker
+    restart: unless-stopped
+    environment:
+      KAFKA_LOG4J_ROOT_LOGLEVEL: INFO
+    entrypoint: /bin/bash
+    command: >
+      -lc "
+      while [ ! -f /app/data/mm2.properties ]; do
+        echo 'Warte auf MirrorMaker-Konfiguration...';
+        sleep 5;
+      done;
+      exec connect-mirror-maker /app/data/mm2.properties
+      "
+    volumes:
+      - ./ui/data:/app/data
+    depends_on:
+      - redpanda
+
+  backup-db:
+    image: postgres:16-alpine
+    container_name: ts-backup-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TS_CONNECT_BACKUP_DB:-targetshot_backup}
+      POSTGRES_USER: ${TS_CONNECT_BACKUP_USER:-targetshot}
+      POSTGRES_PASSWORD: ${TS_CONNECT_BACKUP_PASSWORD:-targetshot}
+    volumes:
+      - ./ui/data/backup-db:/var/lib/postgresql/data
+    ports:
+      - "${TS_CONNECT_BACKUP_PORT:-5432}:5432"
 
   ui:
     build:
