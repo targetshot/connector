@@ -257,7 +257,7 @@
               <span id="statusBadge" class="badge">…</span>
               <span class="text-xs text-zinc-500 dark:text-zinc-400">Live-Abfrage des aktuellen Debezium Connectors</span>
             </div>
-          <div class="mt-4 grid gap-3 sm:grid-cols-5">
+          <div class="mt-4 grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">MariaDB</p>
               <div class="mt-2"><span id="dbStatusBadge" class="badge">…</span></div>
@@ -277,6 +277,10 @@
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Lizenz</p>
               <div class="mt-2"><span id="licenseStatusBadge" class="badge">…</span></div>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
+              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Elastic Agent</p>
+              <div class="mt-2"><span id="elasticAgentStatusBadge" class="badge">…</span></div>
             </div>
           </div>
           </section>
@@ -977,6 +981,7 @@
     const connectorStatusBadge = document.getElementById('connectorStatusBadge');
     const backupStatusBadge = document.getElementById('backupStatusBadge');
     const licenseStatusBadge = document.getElementById('licenseStatusBadge');
+    const elasticAgentStatusBadge = document.getElementById('elasticAgentStatusBadge');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     let updateReloadTimer = null;
@@ -1099,6 +1104,7 @@
         setHealthBadge(connectorStatusBadge, data.connector);
         setHealthBadge(backupStatusBadge, data.backup);
         setHealthBadge(licenseStatusBadge, data.license);
+        setHealthBadge(elasticAgentStatusBadge, data.elastic_agent);
       } catch (error) {
         if (showError) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1109,6 +1115,7 @@
         setHealthBadge(connectorStatusBadge, { status: 'error', message: '' });
         setHealthBadge(backupStatusBadge, { status: 'error', message: '' });
         setHealthBadge(licenseStatusBadge, { status: 'error', message: '' });
+        setHealthBadge(elasticAgentStatusBadge, { status: 'error', message: '' });
       }
     }
 

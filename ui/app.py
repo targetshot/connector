@@ -1805,6 +1805,24 @@ async def _check_license_health() -> dict[str, str]:
     return {"status": "ok", "message": message}
 
 
+async def _check_elastic_agent_health() -> dict[str, str]:
+    try:
+        code, status_output = await _run_command_text(
+            ["docker", "ps", "--filter", "name=ts-elastic-agent", "--format", "{{.Status}}"],
+            timeout=5,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "message": _short_error_message(str(exc), 140)}
+    if code != 0 or not status_output.strip():
+        return {"status": "warn", "message": "Agent nicht gestartet"}
+    status_text = status_output.strip()
+    if "Up" in status_text:
+        return {"status": "ok", "message": status_text}
+    if "Exited" in status_text or "Dead" in status_text:
+        return {"status": "error", "message": status_text}
+    return {"status": "warn", "message": status_text}
+
+
 async def _check_connector_health() -> dict[str, str]:
     async with httpx.AsyncClient(timeout=5) as client:
         try:
@@ -2318,12 +2336,13 @@ async def update_status(force: bool = False):
 
 @app.get("/api/health/summary", dependencies=[Depends(require_session)])
 async def health_summary():
-    database, confluent, connector, backup, license = await asyncio.gather(
+    database, confluent, connector, backup, license, elastic_agent = await asyncio.gather(
         _check_database_health(),
         _check_confluent_health(),
         _check_connector_health(),
         _check_backup_health(),
         _check_license_health(),
+        _check_elastic_agent_health(),
     )
     snapshot = {
         "timestamp": _now_utc_iso(),
@@ -2332,6 +2351,7 @@ async def health_summary():
         "connector": connector,
         "backup": backup,
         "license": license,
+        "elastic_agent": elastic_agent,
     }
     try:
         _write_json_log("health.log", snapshot)
@@ -2343,6 +2363,7 @@ async def health_summary():
         "connector": connector,
         "backup": backup,
         "license": license,
+        "elastic_agent": elastic_agent,
     }
 
 
