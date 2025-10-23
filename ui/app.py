@@ -50,6 +50,14 @@ DEFAULT_BACKUP_HOST = os.getenv("TS_CONNECT_BACKUP_HOST", "backup-db")
 DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
 DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
 DEFAULT_BACKUP_USER = os.getenv("TS_CONNECT_BACKUP_USER", "targetshot")
+LEMON_LICENSE_API_URL = os.getenv(
+    "TS_LICENSE_API_URL",
+    "https://api.lemonsqueezy.com/v1/licenses/validate",
+).strip()
+LEMON_LICENSE_API_KEY = os.getenv("TS_LICENSE_API_KEY", "").strip()
+LEMON_VARIANT_PLAN_MAP_RAW = os.getenv("TS_LICENSE_VARIANT_PLAN_MAP", "")
+LEMON_INSTANCE_NAME = os.getenv("TS_LICENSE_INSTANCE_NAME", "").strip()
+LEMON_INSTANCE_ID = os.getenv("TS_LICENSE_INSTANCE_ID", "").strip()
 
 
 def _normalize_license_tier(value: str | None) -> str:
@@ -63,6 +71,33 @@ def _normalize_license_tier(value: str | None) -> str:
 
 def _retention_for_license(value: str | None) -> int:
     return LICENSE_RETENTION_DAYS.get(_normalize_license_tier(value), DEFAULT_RETENTION_DAYS)
+
+
+def _normalize_iso8601(value: str | None) -> str | None:
+    if not value:
+        return None
+    dt = _parse_iso8601(value)
+    if not dt:
+        return None
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_variant_plan_map(raw: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for entry in raw.split(","):
+        if not entry.strip():
+            continue
+        if "=" not in entry:
+            continue
+        key, value = entry.split("=", 1)
+        key = key.strip()
+        value = _normalize_license_tier(value)
+        if key:
+            mapping[key.lower()] = value
+    return mapping
+
+
+LEMON_VARIANT_PLAN_MAP = _parse_variant_plan_map(LEMON_VARIANT_PLAN_MAP_RAW)
 
 def _load_version_defaults() -> tuple[str, str]:
     version = os.getenv("TS_CONNECT_VERSION")
@@ -230,6 +265,144 @@ def _parse_repo_slug(remote_url: str) -> str | None:
     return None
 
 
+def _determine_plan_from_license(
+    *,
+    variant_id: str | None,
+    variant_name: str | None,
+    plan_hint: str | None,
+) -> str:
+    for candidate in (variant_id, variant_name, plan_hint):
+        if not candidate:
+            continue
+        key = str(candidate).strip().lower()
+        if not key:
+            continue
+        mapped = LEMON_VARIANT_PLAN_MAP.get(key)
+        if mapped:
+            return mapped
+    for candidate in (plan_hint, variant_name):
+        if not candidate:
+            continue
+        lowered = str(candidate).strip().lower()
+        for plan in LICENSE_RETENTION_DAYS:
+            if plan in lowered:
+                return plan
+    return DEFAULT_LICENSE_TIER
+
+
+def _parse_license_validation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    meta = payload.get("meta") or {}
+    data_section = payload.get("data") or {}
+    attributes = data_section.get("attributes") or {}
+    relationships = data_section.get("relationships") or {}
+    valid_flag: bool | None = None
+    if isinstance(meta, dict) and "valid" in meta:
+        valid_flag = bool(meta.get("valid"))
+    if valid_flag is None and "valid" in payload:
+        valid_flag = bool(payload.get("valid"))
+    status_raw = (meta.get("status") if isinstance(meta, dict) else None) or attributes.get("status")
+    status = (status_raw or "").strip() or ("valid" if valid_flag else "")
+    variant_id = attributes.get("variant_id") or meta.get("variant_id")
+    if not variant_id and isinstance(relationships, dict):
+        variant_rel = relationships.get("variant") or {}
+        if isinstance(variant_rel, dict):
+            variant_data = variant_rel.get("data") or {}
+            if isinstance(variant_data, dict):
+                variant_id = variant_data.get("id")
+    variant_name = meta.get("variant_name") if isinstance(meta, dict) else None
+    if not variant_name:
+        variant_name = attributes.get("variant_name")
+    plan_hint = (
+        meta.get("plan") if isinstance(meta, dict) else None
+    ) or (meta.get("plan_name") if isinstance(meta, dict) else None) or attributes.get("plan")
+    plan = _determine_plan_from_license(
+        variant_id=str(variant_id).strip() if variant_id else None,
+        variant_name=variant_name,
+        plan_hint=plan_hint,
+    )
+    expires_at = None
+    if isinstance(meta, dict):
+        expires_at = meta.get("expires_at") or meta.get("renews_at") or meta.get("renewal_at")
+    if not expires_at:
+        expires_at = attributes.get("expires_at")
+    customer_email = None
+    if isinstance(meta, dict):
+        customer_email = meta.get("customer_email") or meta.get("email")
+    if not customer_email and isinstance(relationships, dict):
+        customer_rel = relationships.get("customer") or {}
+        if isinstance(customer_rel, dict):
+            customer_data = customer_rel.get("data") or {}
+            if isinstance(customer_data, dict):
+                customer_attr = customer_data.get("attributes") or {}
+                if isinstance(customer_attr, dict):
+                    customer_email = customer_attr.get("email")
+    error_message = None
+    if isinstance(payload, dict):
+        if payload.get("error"):
+            error_message = str(payload.get("error"))
+        elif payload.get("message"):
+            error_message = str(payload.get("message"))
+        elif payload.get("errors"):
+            errors_obj = payload.get("errors")
+            if isinstance(errors_obj, list) and errors_obj:
+                error_message = str(errors_obj[0])
+            elif isinstance(errors_obj, dict):
+                error_message = ", ".join(str(v) for v in errors_obj.values())
+    message = (meta.get("message") if isinstance(meta, dict) else None) or error_message
+    normalized_expiry = _normalize_iso8601(expires_at)
+    valid = bool(valid_flag if valid_flag is not None else status.lower() in {"active", "valid"})
+    return {
+        "valid": valid,
+        "plan": _normalize_license_tier(plan),
+        "status": status or ("valid" if valid else "unbekannt"),
+        "variant_id": str(variant_id).strip() if variant_id else None,
+        "variant_name": variant_name,
+        "expires_at": normalized_expiry,
+        "raw_expires_at": expires_at,
+        "customer_email": customer_email,
+        "message": message,
+        "payload": payload,
+    }
+
+
+async def validate_license_key_remote(license_key: str) -> dict[str, Any]:
+    key = (license_key or "").strip()
+    if not key:
+        raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
+    headers = {"Accept": "application/json"}
+    if LEMON_LICENSE_API_KEY:
+        headers["Authorization"] = f"Bearer {LEMON_LICENSE_API_KEY}"
+    payload: dict[str, Any] = {"license_key": key}
+    if LEMON_INSTANCE_NAME:
+        payload["instance_name"] = LEMON_INSTANCE_NAME
+    if LEMON_INSTANCE_ID:
+        payload["instance_id"] = LEMON_INSTANCE_ID
+    payload["options"] = {"increment_uses_count": False}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                LEMON_LICENSE_API_URL or "https://api.lemonsqueezy.com/v1/licenses/validate",
+                json=payload,
+                headers=headers,
+            )
+    except httpx.RequestError as exc:  # noqa: BLE001
+        raise RuntimeError(f"Lizenzserver nicht erreichbar: {exc}") from exc
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Lizenzprüfung fehlgeschlagen ({response.status_code}): {_extract_error_message(response)}"
+        )
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Lizenzserver lieferte eine ungültige Antwort.") from exc
+    parsed = _parse_license_validation_payload(data if isinstance(data, dict) else {})
+    if not parsed.get("message") and isinstance(data, dict):
+        parsed["message"] = data.get("message")
+    if isinstance(data, dict) and data.get("error"):
+        parsed["error"] = str(data.get("error"))
+    elif parsed.get("message"):
+        parsed["error"] = parsed["message"]
+    return parsed
 async def _run_command_capture(cmd: list[str], *, cwd: Path | None = None, timeout: float | None = None) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -752,6 +925,11 @@ def get_db():
         offline_buffer_enabled INTEGER DEFAULT 0,
         license_tier TEXT,
         retention_days INTEGER,
+        license_key TEXT,
+        license_status TEXT,
+        license_valid_until TEXT,
+        license_last_checked TEXT,
+        license_customer_email TEXT,
         backup_pg_host TEXT,
         backup_pg_port INTEGER,
         backup_pg_db TEXT,
@@ -766,9 +944,11 @@ def get_db():
                 confluent_bootstrap, confluent_sasl_username,
                 topic_prefix, server_id, server_name,
                 offline_buffer_enabled, license_tier, retention_days,
+                license_key, license_status, license_valid_until,
+                license_last_checked, license_customer_email,
                 backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 1,
@@ -783,6 +963,11 @@ def get_db():
                 0,
                 DEFAULT_LICENSE_TIER,
                 DEFAULT_RETENTION_DAYS,
+                "",
+                "unknown",
+                None,
+                None,
+                None,
                 DEFAULT_BACKUP_HOST,
                 DEFAULT_BACKUP_PORT,
                 DEFAULT_BACKUP_DB,
@@ -805,6 +990,11 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
     add_column("offline_buffer_enabled", "offline_buffer_enabled INTEGER DEFAULT 0")
     add_column("license_tier", "license_tier TEXT")
     add_column("retention_days", "retention_days INTEGER")
+    add_column("license_key", "license_key TEXT")
+    add_column("license_status", "license_status TEXT")
+    add_column("license_valid_until", "license_valid_until TEXT")
+    add_column("license_last_checked", "license_last_checked TEXT")
+    add_column("license_customer_email", "license_customer_email TEXT")
     add_column("backup_pg_host", "backup_pg_host TEXT")
     add_column("backup_pg_port", "backup_pg_port INTEGER")
     add_column("backup_pg_db", "backup_pg_db TEXT")
@@ -823,7 +1013,9 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
         SET
             offline_buffer_enabled = COALESCE(offline_buffer_enabled, 0),
             license_tier = ?,
-            retention_days = COALESCE(retention_days, ?),
+            retention_days = ?,
+            license_key = COALESCE(license_key, ''),
+            license_status = COALESCE(NULLIF(TRIM(license_status), ''), 'unknown'),
             backup_pg_host = COALESCE(NULLIF(TRIM(backup_pg_host), ''), ?),
             backup_pg_port = COALESCE(backup_pg_port, ?),
             backup_pg_db = COALESCE(NULLIF(TRIM(backup_pg_db), ''), ?),
@@ -1029,6 +1221,7 @@ def fetch_settings() -> dict:
                confluent_bootstrap, confluent_sasl_username,
                topic_prefix, server_id, server_name,
                offline_buffer_enabled, license_tier, retention_days,
+               license_key, license_status, license_valid_until, license_last_checked, license_customer_email,
                backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
         FROM settings WHERE id=1
         """
@@ -1038,7 +1231,7 @@ def fetch_settings() -> dict:
     if row is None:
         raise RuntimeError("settings row missing")
     license_tier = _normalize_license_tier(row["license_tier"])
-    retention_days = row["retention_days"] if row["retention_days"] else LICENSE_RETENTION_DAYS[license_tier]
+    retention_days = LICENSE_RETENTION_DAYS.get(license_tier, LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER])
     return {
         "db_host": row["db_host"],
         "db_port": row["db_port"],
@@ -1051,6 +1244,11 @@ def fetch_settings() -> dict:
         "offline_buffer_enabled": bool(row["offline_buffer_enabled"]),
         "license_tier": license_tier,
         "retention_days": retention_days,
+        "license_key": row["license_key"] or "",
+        "license_status": row["license_status"] or "unknown",
+        "license_valid_until": row["license_valid_until"],
+        "license_last_checked": row["license_last_checked"],
+        "license_customer_email": row["license_customer_email"],
         "backup_pg_host": row["backup_pg_host"] or DEFAULT_BACKUP_HOST,
         "backup_pg_port": row["backup_pg_port"] or DEFAULT_BACKUP_PORT,
         "backup_pg_db": row["backup_pg_db"] or DEFAULT_BACKUP_DB,
@@ -1341,11 +1539,41 @@ def build_index_context(request: Request) -> dict:
     db_password_saved = bool(secrets_data.get("db_password"))
     backup_pg_password_saved = bool(secrets_data.get("backup_pg_password"))
     flash_message = request.session.pop("flash_message", None)
-    retention_mapping = [
-        {"key": key, "label": key.capitalize(), "days": days}
-        for key, days in LICENSE_RETENTION_DAYS.items()
-    ]
     error_message = request.session.pop("error_message", None)
+    license_valid_iso = data.get("license_valid_until")
+    license_valid_dt = _parse_iso8601(license_valid_iso)
+    license_valid_display: str | None = None
+    license_days_remaining: int | None = None
+    if license_valid_dt:
+        license_valid_display = license_valid_dt.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        license_days_remaining = (license_valid_dt.date() - datetime.now(timezone.utc).date()).days
+    status_raw = (data.get("license_status") or "unknown").lower()
+    status_labels = {
+        "active": "Aktiv",
+        "valid": "Aktiv",
+        "expired": "Abgelaufen",
+        "revoked": "Widerrufen",
+        "cancelled": "Gekündigt",
+        "disabled": "Deaktiviert",
+        "inactive": "Inaktiv",
+        "pending": "In Prüfung",
+        "unknown": "Unbekannt",
+        "invalid": "Ungültig",
+    }
+    license_status_label = status_labels.get(status_raw, (data.get("license_status") or "Unbekannt").capitalize())
+    license_info = {
+        "key": data.get("license_key", ""),
+        "status": data.get("license_status", "unknown"),
+        "status_label": license_status_label,
+        "plan": data.get("license_tier", DEFAULT_LICENSE_TIER),
+        "plan_label": _normalize_license_tier(data.get("license_tier")).capitalize(),
+        "valid_until": license_valid_iso,
+        "valid_until_display": license_valid_display,
+        "days_remaining": license_days_remaining,
+        "last_checked": data.get("license_last_checked"),
+        "customer_email": data.get("license_customer_email"),
+        "status_raw": status_raw,
+    }
 
     return {
         "request": request,
@@ -1362,8 +1590,7 @@ def build_index_context(request: Request) -> dict:
         "db_password_saved": db_password_saved,
         "backup_pg_password_placeholder": PASSWORD_PLACEHOLDER if backup_pg_password_saved else "",
         "backup_pg_password_saved": backup_pg_password_saved,
-        "license_options": retention_mapping,
-        "license_retention_map": LICENSE_RETENTION_DAYS,
+        "license": license_info,
     }
 
 
@@ -1525,6 +1752,33 @@ async def _check_backup_health() -> dict[str, str]:
         return {"status": "error", "message": _short_error_message(str(exc), 140)}
 
 
+async def _check_license_health() -> dict[str, str]:
+    settings = fetch_settings()
+    license_key = (settings.get("license_key") or "").strip()
+    if not license_key:
+        return {"status": "warn", "message": "Keine Lizenz hinterlegt"}
+    status = (settings.get("license_status") or "unbekannt").lower()
+    valid_until = _parse_iso8601(settings.get("license_valid_until"))
+    now = datetime.now(timezone.utc)
+    if valid_until:
+        if valid_until < now:
+            return {"status": "error", "message": "Lizenz abgelaufen"}
+        days_left = (valid_until.date() - now.date()).days
+        if days_left <= 3:
+            message = f"Läuft in {days_left} Tagen ab"
+        else:
+            message = f"{days_left} Tage verbleiben"
+    else:
+        message = "Gültigkeit unbekannt"
+    if status in {"revoked", "expired", "disabled", "cancelled", "invalid"}:
+        return {"status": "error", "message": f"Status: {status}"}
+    if status in {"pending", "inactive"}:
+        return {"status": "warn", "message": f"Status: {status}"}
+    if status in {"unknown", ""}:
+        return {"status": "warn", "message": message}
+    return {"status": "ok", "message": message}
+
+
 async def _check_connector_health() -> dict[str, str]:
     async with httpx.AsyncClient(timeout=5) as client:
         try:
@@ -1571,8 +1825,8 @@ async def save(
     topic_prefix: str | None = Form(default=None),
     server_id: int | None = Form(default=None),
     server_name: str | None = Form(default=None),
+    license_key: str | None = Form(default=None),
     offline_enabled: str | None = Form(default=None),
-    license_tier: str | None = Form(default=None),
     backup_pg_host: str | None = Form(default=None),
     backup_pg_port: int | None = Form(default=None),
     backup_pg_db: str | None = Form(default=None),
@@ -1602,6 +1856,112 @@ async def save(
             return RedirectResponse("/", status_code=303)
         set_admin_password(new_admin_password)
         request.session["flash_message"] = "Admin-Passwort aktualisiert."
+        return RedirectResponse("/", status_code=303)
+
+    if section_key == "license":
+        license_key_value = (license_key or "").strip()
+        prune_error: str | None = None
+        if not license_key_value:
+            plan = DEFAULT_LICENSE_TIER
+            retention_days = LICENSE_RETENTION_DAYS[plan]
+            now_iso = _now_utc_iso()
+            conn = get_db()
+            conn.execute(
+                """
+                UPDATE settings
+                SET license_key='', license_tier=?, retention_days=?,
+                    license_status='unknown', license_valid_until=NULL,
+                    license_last_checked=?, license_customer_email=NULL
+                WHERE id=1
+                """,
+                (
+                    plan,
+                    retention_days,
+                    now_iso,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            if settings.get("offline_buffer_enabled") and secrets_data.get("backup_pg_password"):
+                try:
+                    updated_settings = fetch_settings()
+                    prune_backup_data(
+                        days=retention_days,
+                        host=updated_settings["backup_pg_host"],
+                        port=updated_settings["backup_pg_port"],
+                        database=updated_settings["backup_pg_db"],
+                        user=updated_settings["backup_pg_user"],
+                        password=secrets_data["backup_pg_password"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    prune_error = f"Backup-Bereinigung nach Lizenz-Reset fehlgeschlagen: {exc}"
+            request.session["flash_message"] = (
+                f"Lizenz entfernt. Plan auf {plan.capitalize()} zurückgesetzt."
+            )
+            if prune_error:
+                request.session.setdefault("error_message", prune_error)
+            return RedirectResponse("/", status_code=303)
+        try:
+            validation = await validate_license_key_remote(license_key_value)
+        except Exception as exc:  # noqa: BLE001
+            request.session["error_message"] = f"Lizenzprüfung fehlgeschlagen: {exc}"
+            return RedirectResponse("/", status_code=303)
+        plan = validation.get("plan") or DEFAULT_LICENSE_TIER
+        if not validation.get("valid"):
+            plan = DEFAULT_LICENSE_TIER
+        plan = _normalize_license_tier(plan)
+        retention_days = LICENSE_RETENTION_DAYS.get(plan, DEFAULT_RETENTION_DAYS)
+        status = validation.get("status") or ("valid" if validation.get("valid") else "unbekannt")
+        expires_at_norm = _normalize_iso8601(validation.get("expires_at") or validation.get("raw_expires_at"))
+        last_checked = _now_utc_iso()
+        conn = get_db()
+        conn.execute(
+            """
+            UPDATE settings
+            SET license_key=?, license_tier=?, retention_days=?, license_status=?, license_valid_until=?, license_last_checked=?, license_customer_email=?
+            WHERE id=1
+            """,
+            (
+                license_key_value,
+                plan,
+                retention_days,
+                status,
+                expires_at_norm,
+                last_checked,
+                validation.get("customer_email"),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        if settings.get("offline_buffer_enabled") and secrets_data.get("backup_pg_password"):
+            try:
+                updated_settings = fetch_settings()
+                prune_backup_data(
+                    days=retention_days,
+                    host=updated_settings["backup_pg_host"],
+                    port=updated_settings["backup_pg_port"],
+                    database=updated_settings["backup_pg_db"],
+                    user=updated_settings["backup_pg_user"],
+                    password=secrets_data["backup_pg_password"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                prune_error = f"Backup-Bereinigung nach Lizenz-Update fehlgeschlagen: {exc}"
+
+        message_parts = [f"Plan: {plan.capitalize()}"]
+        if expires_at_norm:
+            message_parts.append(f"gültig bis {expires_at_norm}")
+        message = " | ".join(message_parts)
+        if validation.get("valid"):
+            request.session["flash_message"] = f"Lizenz erfolgreich geprüft. {message}"
+            if prune_error:
+                request.session["error_message"] = prune_error
+        else:
+            reason = validation.get("message") or validation.get("error") or "Lizenz ungültig."
+            full_reason = f"Lizenz ungültig: {reason} ({message})"
+            if prune_error:
+                full_reason = f"{full_reason} | {prune_error}"
+            request.session["error_message"] = full_reason
         return RedirectResponse("/", status_code=303)
 
     if section_key == "db":
@@ -1664,8 +2024,8 @@ async def save(
 
     if section_key == "offline":
         enabled = _parse_bool(offline_enabled, default=settings.get("offline_buffer_enabled", False))
-        selected_license = _normalize_license_tier(license_tier or settings.get("license_tier"))
-        retention_days = LICENSE_RETENTION_DAYS[selected_license]
+        plan = _normalize_license_tier(settings.get("license_tier"))
+        retention_days = LICENSE_RETENTION_DAYS[plan]
         pg_host = (backup_pg_host or settings.get("backup_pg_host") or DEFAULT_BACKUP_HOST).strip()
         pg_port_value_raw = backup_pg_port if backup_pg_port is not None else settings.get("backup_pg_port", DEFAULT_BACKUP_PORT)
         try:
@@ -1703,7 +2063,7 @@ async def save(
             """,
             (
                 1 if enabled else 0,
-                selected_license,
+                plan,
                 retention_days,
                 pg_host,
                 pg_port_value,
@@ -1932,17 +2292,19 @@ async def update_status(force: bool = False):
 
 @app.get("/api/health/summary", dependencies=[Depends(require_session)])
 async def health_summary():
-    database, confluent, connector, backup = await asyncio.gather(
+    database, confluent, connector, backup, license = await asyncio.gather(
         _check_database_health(),
         _check_confluent_health(),
         _check_connector_health(),
         _check_backup_health(),
+        _check_license_health(),
     )
     return {
         "database": database,
         "confluent": confluent,
         "connector": connector,
         "backup": backup,
+        "license": license,
     }
 
 

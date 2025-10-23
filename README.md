@@ -41,8 +41,15 @@ docker compose up -d
   - **Plus**: 30 Tage
   - **Pro**: 90 Tage
 - Standard-Credentials für den Postgres-Puffer können über `TS_CONNECT_BACKUP_DB/USER/PASSWORD/PORT` im `compose.env` angepasst werden.
+- Beim ersten Aktivieren legt die UI automatisch die Tabelle `buffer_events` an und rotiert Einträge gemäß Lizenz.
 
-Beim ersten Aktivieren legt die UI automatisch die Tabelle `buffer_events` an und rotiert Einträge gemäß Lizenz.
+### Lizenzprüfung (Lemon Squeezy)
+- Hinterlege deinen Lemon-Squeezy-Lizenzschlüssel im neuen Abschnitt *Lizenzverwaltung*. Die UI prüft den Schlüssel gegen die Lemon-Squeezy-API und zeigt Status, Laufzeit und den zugehörigen Plan an.
+- Der aktive Plan (Basic / Plus / Pro) steuert automatisch die Aufbewahrungsdauer des Offline-Puffers. Abgelaufene oder ungültige Lizenzen fallen auf den Basisplan zurück.
+- Umgebungskonfiguration:
+  - `TS_LICENSE_API_KEY`: (optional, empfohlen) Lemon-Squeezy API-Key für die Lizenzprüfung.
+  - `TS_LICENSE_VARIANT_PLAN_MAP`: Zuordnung von Produkt- oder Varianten-IDs zum Plan, z.&nbsp;B. `123=basic,234=plus`.
+  - `TS_LICENSE_INSTANCE_NAME` / `TS_LICENSE_INSTANCE_ID`: optionale Angaben, die an Lemon Squeezy übertragen werden.
 
 ## Folder Structure
 ```

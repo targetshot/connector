@@ -257,7 +257,7 @@
               <span id="statusBadge" class="badge">…</span>
               <span class="text-xs text-zinc-500 dark:text-zinc-400">Live-Abfrage des aktuellen Debezium Connectors</span>
             </div>
-          <div class="mt-4 grid gap-3 sm:grid-cols-4">
+          <div class="mt-4 grid gap-3 sm:grid-cols-5">
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">MariaDB</p>
               <div class="mt-2"><span id="dbStatusBadge" class="badge">…</span></div>
@@ -273,6 +273,10 @@
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Backup-Puffer</p>
               <div class="mt-2"><span id="backupStatusBadge" class="badge">…</span></div>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
+              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Lizenz</p>
+              <div class="mt-2"><span id="licenseStatusBadge" class="badge">…</span></div>
             </div>
           </div>
           </section>
@@ -331,11 +335,11 @@
               </div>
             </form>
 
-            <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
-              <input type="hidden" name="section" value="confluent" />
-              <div class="space-y-4">
-                <div>
-                  <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Confluent Cloud</h2>
+          <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
+            <input type="hidden" name="section" value="confluent" />
+            <div class="space-y-4">
+              <div>
+                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Confluent Cloud</h2>
                   <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Konfiguration des Ziel-Clusters für den Datenstrom.</p>
                 </div>
                 <div class="rounded-2xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-accent-dark shadow-sm dark:border-accent/30 dark:bg-accent/20 dark:text-white/90">
@@ -379,10 +383,62 @@
                 <button type="button" id="btnTestCflt" class="btn-secondary">Test Confluent</button>
                 <span id="cfltBadge" class="badge">…</span>
               </div>
-            <div class="flex flex-wrap gap-3 pt-2">
-              <button type="submit" class="primary-button">Confluent speichern</button>
-            </div>
-          </form>
+              <div class="flex flex-wrap gap-3 pt-2">
+                <button type="submit" class="primary-button">Confluent speichern</button>
+              </div>
+            </form>
+
+            <form method="post" action="/save" class="rounded-[28px] border border-indigo-200/70 bg-white/80 p-7 shadow-2xl shadow-indigo-500/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-indigo-300/20 dark:bg-ink-800/70 dark:shadow-indigo-500/20 space-y-6">
+              <input type="hidden" name="section" value="license" />
+              <div class="space-y-3">
+                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Lizenzverwaltung</h2>
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">
+                  Prüfe deinen Lemon Squeezy Lizenzschlüssel. Der aktive Plan bestimmt automatisch die Aufbewahrungszeit des Offline-Puffers.
+                </p>
+              </div>
+              <div class="grid gap-6 md:grid-cols-2">
+                <div>
+                  <label class="input-label" for="license_key">Lizenzschlüssel</label>
+                  <input id="license_key" name="license_key" class="ts-input" value="{{ license.key }}" placeholder="XXXX-XXXX-XXXX" />
+                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Leer lassen, um die Lizenz zu entfernen und auf den Basic-Plan zurückzufallen.</p>
+                </div>
+                <div class="rounded-2xl border border-indigo-200/70 bg-indigo-50/80 p-4 text-sm shadow-inner dark:border-indigo-300/20 dark:bg-indigo-500/10 dark:text-indigo-100">
+                  <p class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-200">Aktiver Plan</p>
+                  <p class="mt-1 text-lg font-semibold text-indigo-900 dark:text-white">{{ license.plan_label }}</p>
+                  <p class="mt-1 text-xs text-indigo-700/80 dark:text-indigo-200/80">Aufbewahrung: {{ data.retention_days }} Tage</p>
+                </div>
+              </div>
+              <div class="grid gap-4 md:grid-cols-3">
+                <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Status</p>
+                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">{{ license.status_label }}</p>
+                  {% if license.days_remaining is not none %}
+                  {% if license.days_remaining >= 0 %}
+                  <p class="mt-1 text-[0.75rem] text-zinc-500 dark:text-zinc-400">{{ license.days_remaining }} Tage verbleiben</p>
+                  {% else %}
+                  <p class="mt-1 text-[0.75rem] text-amber-600 dark:text-amber-300">Abgelaufen seit {{ license.days_remaining | abs }} Tagen</p>
+                  {% endif %}
+                  {% endif %}
+                </div>
+                <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Gültig bis</p>
+                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">{{ license.valid_until_display or '–' }}</p>
+                </div>
+                <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Letzte Prüfung</p>
+                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">{{ license.last_checked or '–' }}</p>
+                  {% if license.customer_email %}
+                  <p class="mt-1 text-[0.75rem] text-zinc-500 dark:text-zinc-400">{{ license.customer_email }}</p>
+                  {% endif %}
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-3 pt-2">
+                <button type="submit" class="primary-button">Lizenz prüfen</button>
+              </div>
+              <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                Hinweis: Nur ein gültiger Lizenzschlüssel aktiviert Features über den Basic-Plan hinaus. Bei abgelaufener Lizenz fällt die Aufbewahrung automatisch auf den Basiswert zurück.
+              </p>
+            </form>
 
           <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
             <input type="hidden" name="section" value="offline" />
@@ -396,20 +452,13 @@
                 <span>Offline-Puffer aktivieren</span>
               </label>
             </div>
-            <div class="grid gap-6 md:grid-cols-2">
-              <div>
-                <label class="input-label" for="license_tier">Lizenzstufe</label>
-                <select id="license_tier" name="license_tier" class="ts-input">
-                  {% for opt in license_options %}
-                  <option value="{{ opt.key }}" {% if data.license_tier == opt.key %}selected{% endif %}>{{ opt.label }} ({{ opt.days }} Tage)</option>
-                  {% endfor %}
-                </select>
-              </div>
-              <div class="flex items-end">
-                <p class="text-xs text-zinc-600 dark:text-zinc-400">
-                  Aufbewahrung: <span id="retentionDaysLabel" class="font-semibold text-zinc-800 dark:text-zinc-100">{{ data.retention_days }}</span> Tage.
-                </p>
-              </div>
+            <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
+              <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Plan &amp; Aufbewahrung</p>
+              <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">Lizenzplan: {{ license.plan_label }}</p>
+              <p class="text-xs text-zinc-500 dark:text-zinc-400">Vorhaltezeit aktuell: {{ data.retention_days }} Tage</p>
+              {% if not license.key %}
+              <p class="mt-2 text-xs text-amber-600 dark:text-amber-300">Keine Lizenz hinterlegt – es gilt automatisch der Basisplan.</p>
+              {% endif %}
             </div>
             <div class="grid gap-6 md:grid-cols-2">
               <div>
@@ -763,6 +812,9 @@
       if (state === 'pending') {
         el.className = 'badge warn';
         label = 'Wartet';
+      } else if (state === 'warn') {
+        el.className = 'badge warn';
+        label = 'Warnung';
       } else {
         const ok = !!state;
         el.className = 'badge ' + (ok ? 'ok' : 'warn');
@@ -924,20 +976,7 @@
     const confluentStatusBadge = document.getElementById('confluentStatusBadge');
     const connectorStatusBadge = document.getElementById('connectorStatusBadge');
     const backupStatusBadge = document.getElementById('backupStatusBadge');
-    const licenseRetentionMap = {{ license_retention_map | tojson }};
-    const licenseSelect = document.getElementById('license_tier');
-    const retentionLabel = document.getElementById('retentionDaysLabel');
-
-    function updateRetentionLabel() {
-      if (!licenseSelect || !retentionLabel) return;
-      const selected = licenseSelect.value || '';
-      const days = licenseRetentionMap[selected] ?? licenseRetentionMap.basic ?? licenseRetentionMap['basic'] ?? 14;
-      retentionLabel.textContent = days;
-    }
-    if (licenseSelect) {
-      licenseSelect.addEventListener('change', updateRetentionLabel);
-      updateRetentionLabel();
-    }
+    const licenseStatusBadge = document.getElementById('licenseStatusBadge');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     let updateReloadTimer = null;
@@ -1039,7 +1078,7 @@
       } else if (status === 'error') {
         setBadge(el, false, message);
       } else if (status === 'warn') {
-        setBadge(el, 'pending', message || 'Warnung');
+        setBadge(el, 'warn', message || 'Warnung');
       } else if (status === 'skipped') {
         setBadge(el, 'pending', message || 'Deaktiviert');
       } else {
@@ -1059,6 +1098,7 @@
         setHealthBadge(confluentStatusBadge, data.confluent);
         setHealthBadge(connectorStatusBadge, data.connector);
         setHealthBadge(backupStatusBadge, data.backup);
+        setHealthBadge(licenseStatusBadge, data.license);
       } catch (error) {
         if (showError) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1068,6 +1108,7 @@
         setHealthBadge(confluentStatusBadge, { status: 'error', message: '' });
         setHealthBadge(connectorStatusBadge, { status: 'error', message: '' });
         setHealthBadge(backupStatusBadge, { status: 'error', message: '' });
+        setHealthBadge(licenseStatusBadge, { status: 'error', message: '' });
       }
     }
 
