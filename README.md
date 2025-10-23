@@ -51,6 +51,12 @@ docker compose up -d
   - `TS_LICENSE_VARIANT_PLAN_MAP`: Zuordnung von Produkt- oder Varianten-IDs zum Plan, z.&nbsp;B. `123=basic,234=plus`.
   - `TS_LICENSE_INSTANCE_NAME` / `TS_LICENSE_INSTANCE_ID`: optionale Angaben, die an Lemon Squeezy übertragen werden.
 
+### Zentrales Monitoring mit Elastic Agent
+- `elastic-agent` joined automatisch deine Elastic-Fleet, sobald `ELASTIC_FLEET_URL` und `ELASTIC_FLEET_ENROLLMENT_TOKEN` gesetzt sind.
+- Der Agent läuft vollständig im Fleet-Modus (kein `inputs.d`). Konfiguriere Docker-, System- und Log-Integrationen direkt in Kibana → Fleet für deine Policy.
+- Persistenter Agent-State liegt unter `./elastic-agent/state`, damit Upgrades und Reboots sauber durchlaufen.
+- Health- und Lizenzdaten schreibt die UI als NDJSON nach `/app/data/logs/health.log`. Binde diesen Pfad in der Logs-Integration ein, um Status-Dashboards aufzubauen.
+
 ## Folder Structure
 ```
 compose.yml

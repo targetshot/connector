@@ -135,7 +135,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
   elastic-agent:
-    image: docker.elastic.co/beats/elastic-agent:8.14.3
+    image: docker.elastic.co/beats/elastic-agent:8.15.3
     container_name: ts-elastic-agent
     restart: unless-stopped
     user: root
@@ -143,15 +143,12 @@ services:
       FLEET_ENROLL: "1"
       FLEET_URL: ${ELASTIC_FLEET_URL}
       FLEET_ENROLLMENT_TOKEN: ${ELASTIC_FLEET_ENROLLMENT_TOKEN}
-      FLEET_CA: ${ELASTIC_FLEET_CA_PATH:-}
-      ELASTIC_APM_ENVIRONMENT: ${ELASTIC_AGENT_ENVIRONMENT:-prod}
       ELASTIC_AGENT_TAGS: ${ELASTIC_AGENT_TAGS:-site:unknown,tier:unknown}
-      LOG_LEVEL: info
+      ELASTIC_AGENT_LOG_LEVEL: ${ELASTIC_AGENT_LOG_LEVEL:-info}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ui/data:/app/data
-      - ./elastic-agent/inputs.d:/usr/share/elastic-agent/inputs.d:ro
-      - ./elastic-agent/logs:/usr/share/elastic-agent/state/logs
+      - ./elastic-agent/state:/usr/share/elastic-agent/state
     depends_on:
       - ui
 
