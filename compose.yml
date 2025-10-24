@@ -95,6 +95,21 @@ services:
     depends_on:
       - redpanda
 
+  streams-transform:
+    build:
+      context: ./streams
+    container_name: ts-streams-transform
+    restart: unless-stopped
+    environment:
+      STREAMS_BOOTSTRAP_SERVERS: redpanda:9092
+      STREAMS_TARGET_PREFIX: ${TS_STREAMS_TARGET_PREFIX:-ts.sds-test}
+      STREAMS_APPLICATION_ID: ${TS_STREAMS_APPLICATION_ID:-ts-streams-transform}
+      STREAMS_INPUT_PATTERN: ${TS_STREAMS_INPUT_PATTERN:-^[0-9]+\\.SMDB\\.(Schuetze|Treffer|Scheiben|Serien)$}
+      STREAMS_NUM_THREADS: ${TS_STREAMS_NUM_THREADS:-1}
+      STREAMS_COMMIT_INTERVAL_MS: ${TS_STREAMS_COMMIT_INTERVAL_MS:-5000}
+    depends_on:
+      - redpanda
+
   backup-db:
     image: postgres:16-alpine
     container_name: ts-backup-db

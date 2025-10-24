@@ -28,10 +28,17 @@ docker compose up -d
 - `ui`: FastAPI web UI to manage connector, tests, secrets
 - `schema-registry`: lokaler Schema Registry Dienst für Avro/JSON Converter
 - `mirror-maker`: Kafka MirrorMaker 2, spiegelt `ts.raw.*`-Topics in die Confluent Cloud sobald erreichbar
+- `streams-transform`: Kafka Streams Anwendung, die Vereins-Topics auf einheitliche Confluent-Topics mapped
 - `backup-db`: lokaler PostgreSQL-Puffer für Offline-Backups
 
 ### Notes
 - UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `compose.env` for localhost-only access.
+
+### Kafka Streams Transformation
+- Der Dienst `streams-transform` abonniert alle Topics nach dem Muster `<Vereinsnummer>.SMDB.(Schuetze|Treffer|Scheiben|Serien)` und leitet sie in die Standard-Topics `ts.sds-test.{schuetze,treffer,scheiben,serien}` weiter.
+- Standardmäßig verbindet sich die Anwendung mit `redpanda:9092`; per `TS_STREAMS_TARGET_PREFIX` lässt sich das Zielpräfix anpassen.
+- Die erzeugten Ziele werden zusätzlich über MirrorMaker 2 in die Confluent Cloud repliziert (`ts.sds-test.*`).
+- Feintuning (Application ID, Pattern, Threads, Commit-Intervalle) erfolgt über die optionalen `TS_STREAMS_*` Variablen in `compose.env`.
 
 ### Offline-Puffer konfigurieren
 - Der Offline-Puffer ist dauerhaft aktiv. Alle Debezium-Events werden lokal in der Postgres-Datenbank `buffer_events` zwischengespeichert und bei verfügbarer Verbindung automatisch hochgeladen.

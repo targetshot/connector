@@ -53,6 +53,7 @@ DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
 DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
 DEFAULT_BACKUP_USER = os.getenv("TS_CONNECT_BACKUP_USER", "targetshot")
 DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mysql")
+STREAMS_TARGET_PREFIX = (os.getenv("TS_STREAMS_TARGET_PREFIX", "ts.sds-test") or "ts.sds-test").strip() or "ts.sds-test"
 LEMON_LICENSE_API_URL = os.getenv(
     "TS_LICENSE_API_URL",
     "https://api.lemonsqueezy.com/v1/licenses/validate",
@@ -1159,7 +1160,7 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         ),
         "remote.ssl.endpoint.identification.algorithm = https",
         "local->remote.enabled = true",
-        "local->remote.topics = ts.raw.*",
+        f"local->remote.topics = ts.raw.*,{STREAMS_TARGET_PREFIX}.*",
         "local->remote.groups = _ts.*",
         "local->remote.emit.heartbeats.interval.seconds = 15",
         "offset.storage.topic = _ts_mm2_offsets",
