@@ -1044,7 +1044,6 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
             offline_buffer_enabled = 1,
             license_tier = ?,
             retention_days = ?,
-            license_key = COALESCE(license_key, ''),
             license_status = COALESCE(NULLIF(TRIM(license_status), ''), 'unknown'),
             backup_pg_host = COALESCE(NULLIF(TRIM(backup_pg_host), ''), ?),
             backup_pg_port = COALESCE(backup_pg_port, ?),
