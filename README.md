@@ -59,7 +59,7 @@ docker compose up -d
   - `TS_LICENSE_API_KEY`: (optional, empfohlen) Lemon-Squeezy API-Key für die Lizenzprüfung.
   - `TS_LICENSE_VARIANT_PLAN_MAP`: Zuordnung von Produkt- oder Varianten-IDs zum Plan, z.&nbsp;B. `123=basic,234=plus`.
   - `TS_LICENSE_INSTANCE_NAME` / `TS_LICENSE_INSTANCE_ID`: optionale Angaben, die an Lemon Squeezy übertragen werden.
-  - `TS_CONNECT_DEFAULT_LICENSE_KEY`: optionaler Testschlüssel, der bei neuen Installationen automatisch in die UI übernommen wird.
+  - `TS_LICENSE_AUTO_ACTIVATE`: aktiviert nach erfolgreicher Prüfung automatisch eine neue Installation (Standard: `true`).
 
 ### Zentrales Monitoring mit Elastic Agent
 - `elastic-agent` joined automatisch deine Elastic-Fleet, sobald `ELASTIC_FLEET_URL` und `ELASTIC_FLEET_ENROLLMENT_TOKEN` gesetzt sind.

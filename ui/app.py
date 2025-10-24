@@ -58,10 +58,15 @@ LEMON_LICENSE_API_URL = os.getenv(
     "TS_LICENSE_API_URL",
     "https://api.lemonsqueezy.com/v1/licenses/validate",
 ).strip()
+LEMON_ACTIVATION_URL = os.getenv(
+    "TS_LICENSE_ACTIVATION_URL",
+    "https://api.lemonsqueezy.com/v1/activations",
+).strip()
 LEMON_LICENSE_API_KEY = os.getenv("TS_LICENSE_API_KEY", "").strip()
 LEMON_VARIANT_PLAN_MAP_RAW = os.getenv("TS_LICENSE_VARIANT_PLAN_MAP", "")
 LEMON_INSTANCE_NAME = os.getenv("TS_LICENSE_INSTANCE_NAME", "").strip()
 LEMON_INSTANCE_ID = os.getenv("TS_LICENSE_INSTANCE_ID", "").strip()
+LEMON_AUTO_ACTIVATE = os.getenv("TS_LICENSE_AUTO_ACTIVATE", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_license_tier(value: str | None) -> str:
@@ -240,10 +245,20 @@ def _next_retry_iso() -> str | None:
 def _short_error_message(raw: str, max_len: int = 180) -> str:
     if not raw:
         return ""
-    text = raw.strip().splitlines()[0]
-    if len(text) > max_len:
-        return text[: max_len - 1] + "…"
-    return text
+    lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
+    if not lines:
+        return ""
+    message = lines[0]
+    for extra in lines[1:]:
+        candidate = f"{message} | {extra}"
+        if len(candidate) > max_len:
+            message = message if len(message) <= max_len else message[: max_len - 1] + "…"
+            break
+        message = candidate
+    else:
+        if len(message) > max_len:
+            message = message[: max_len - 1] + "…"
+    return message
 
 
 def _parse_iso8601(timestamp: str | None) -> datetime | None:
@@ -433,6 +448,54 @@ async def validate_license_key_remote(license_key: str) -> dict[str, Any]:
     elif parsed.get("message"):
         parsed["error"] = parsed["message"]
     return parsed
+
+
+async def activate_license_key_remote(
+    license_key: str,
+    *,
+    instance_name: str,
+    instance_id: str,
+) -> dict[str, Any]:
+    key = (license_key or "").strip()
+    if not key:
+        raise ValueError("Lizenzschlüssel fehlt für die Aktivierung.")
+    instance_id = (instance_id or "").strip()
+    if not instance_id:
+        raise ValueError("Lizenzaktivierung benötigt eine Instance ID.")
+    payload: dict[str, Any] = {
+        "license_key": key,
+        "instance_id": instance_id,
+    }
+    if instance_name:
+        payload["instance_name"] = instance_name.strip()
+    headers = {"Accept": "application/json"}
+    if LEMON_LICENSE_API_KEY:
+        headers["Authorization"] = f"Bearer {LEMON_LICENSE_API_KEY}"
+    url = LEMON_ACTIVATION_URL or "https://api.lemonsqueezy.com/v1/activations"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(url, json=payload, headers=headers)
+    except httpx.RequestError as exc:  # noqa: BLE001
+        raise RuntimeError(f"Lizenzaktivierung fehlgeschlagen: {exc}") from exc
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Lizenzaktivierung fehlgeschlagen ({response.status_code}): {_extract_error_message(response)}"
+        )
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Lizenzaktivierung lieferte eine ungültige Antwort.") from exc
+    result: dict[str, Any] = {"payload": data}
+    if isinstance(data, dict):
+        result.update(
+            {
+                "activated": bool(data.get("activated")),
+                "activation_id": data.get("id"),
+                "status": data.get("status"),
+                "message": data.get("message"),
+            }
+        )
+    return result
 async def _run_command_capture(cmd: list[str], *, cwd: Path | None = None, timeout: float | None = None) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -2097,6 +2160,7 @@ async def save(
     if section_key == "license":
         license_key_value = (license_key or "").strip()
         prune_error: str | None = None
+        current_license = (settings.get("license_key") or "").strip()
         if not license_key_value:
             plan = DEFAULT_LICENSE_TIER
             retention_days = LICENSE_RETENTION_DAYS[plan]
@@ -2150,6 +2214,30 @@ async def save(
         status = validation.get("status") or ("valid" if validation.get("valid") else "unbekannt")
         expires_at_norm = _normalize_iso8601(validation.get("expires_at") or validation.get("raw_expires_at"))
         last_checked = _now_utc_iso()
+
+        activation_feedback: dict[str, Any] | None = None
+        activation_error: str | None = None
+        should_activate = (
+            LEMON_AUTO_ACTIVATE
+            and validation.get("valid")
+            and license_key_value
+            and license_key_value != current_license
+        )
+        if should_activate:
+            instance_id_value = LEMON_INSTANCE_ID or str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
+            instance_name_value = LEMON_INSTANCE_NAME or settings.get("server_name") or "ts-connect"
+            if not instance_id_value:
+                activation_error = "Keine Instance ID für Lizenzaktivierung konfiguriert."
+            else:
+                try:
+                    activation_feedback = await activate_license_key_remote(
+                        license_key_value,
+                        instance_name=instance_name_value,
+                        instance_id=str(instance_id_value),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    activation_error = _short_error_message(str(exc), 180)
+
         conn = get_db()
         conn.execute(
             """
@@ -2187,11 +2275,19 @@ async def save(
         message_parts = [f"Plan: {plan.capitalize()}"]
         if expires_at_norm:
             message_parts.append(f"gültig bis {expires_at_norm}")
+        if activation_feedback and activation_feedback.get("activated"):
+            message_parts.append("Lizenz aktiviert")
+        elif activation_feedback and activation_feedback.get("message"):
+            message_parts.append(str(activation_feedback.get("message")))
         message = " | ".join(message_parts)
         if validation.get("valid"):
             request.session["flash_message"] = f"Lizenz erfolgreich geprüft. {message}"
             if prune_error:
                 request.session["error_message"] = prune_error
+            if activation_error:
+                extra = request.session.get("error_message")
+                activation_msg = f"Lizenzaktivierung fehlgeschlagen: {activation_error}"
+                request.session["error_message"] = f"{extra} | {activation_msg}" if extra else activation_msg
         else:
             reason = validation.get("message") or validation.get("error") or "Lizenz ungültig."
             full_reason = f"Lizenz ungültig: {reason} ({message})"
