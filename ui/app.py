@@ -60,7 +60,7 @@ LEMON_LICENSE_API_URL = os.getenv(
 ).strip()
 LEMON_ACTIVATION_URL = os.getenv(
     "TS_LICENSE_ACTIVATION_URL",
-    "https://api.lemonsqueezy.com/v1/activations",
+    "https://api.lemonsqueezy.com/v1/licenses/activate",
 ).strip()
 LEMON_LICENSE_API_KEY = os.getenv("TS_LICENSE_API_KEY", "").strip()
 LEMON_VARIANT_PLAN_MAP_RAW = os.getenv("TS_LICENSE_VARIANT_PLAN_MAP", "")

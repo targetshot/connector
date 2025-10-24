@@ -60,6 +60,7 @@ docker compose up -d
   - `TS_LICENSE_VARIANT_PLAN_MAP`: Zuordnung von Produkt- oder Varianten-IDs zum Plan, z.&nbsp;B. `123=basic,234=plus`.
   - `TS_LICENSE_INSTANCE_NAME` / `TS_LICENSE_INSTANCE_ID`: optionale Angaben, die an Lemon Squeezy übertragen werden.
   - `TS_LICENSE_AUTO_ACTIVATE`: aktiviert nach erfolgreicher Prüfung automatisch eine neue Installation (Standard: `true`).
+  - `TS_LICENSE_ACTIVATION_URL`: Endpoint für Aktivierungen (Standard: `https://api.lemonsqueezy.com/v1/licenses/activate`).
 
 ### Zentrales Monitoring mit Elastic Agent
 - `elastic-agent` joined automatisch deine Elastic-Fleet, sobald `ELASTIC_FLEET_URL` und `ELASTIC_FLEET_ENROLLMENT_TOKEN` gesetzt sind.
