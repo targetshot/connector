@@ -1459,6 +1459,30 @@ def store_license_key(value: str) -> None:
         LICENSE_KEY_FILE.unlink()
 
 
+def _license_meta_path() -> Path:
+    return DATA_DIR / "license_meta.json"
+
+
+def read_license_meta() -> dict[str, Any]:
+    path = _license_meta_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def write_license_meta(data: dict[str, Any]) -> None:
+    path = _license_meta_path()
+    if not data:
+        if path.exists():
+            path.unlink()
+        return
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+
+
 def _license_is_active(settings: dict) -> bool:
     key = (settings.get("license_key") or "").strip()
     if not key:
