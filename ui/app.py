@@ -108,6 +108,20 @@ def _normalize_iso8601(value: str | None) -> str | None:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _normalize_license_expiry(value: str | None) -> str | None:
+    normalized = _normalize_iso8601(value)
+    if normalized or not value:
+        return normalized
+    value = value.strip()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+            return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_variant_plan_map(raw: str) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for entry in raw.split(","):
@@ -395,7 +409,7 @@ def _parse_license_validation_payload(payload: dict[str, Any]) -> dict[str, Any]
             elif isinstance(errors_obj, dict):
                 error_message = ", ".join(str(v) for v in errors_obj.values())
     message = (meta.get("message") if isinstance(meta, dict) else None) or error_message
-    normalized_expiry = _normalize_iso8601(expires_at)
+    normalized_expiry = _normalize_license_expiry(expires_at)
     valid = bool(valid_flag if valid_flag is not None else status.lower() in {"active", "valid"})
     return {
         "valid": valid,
@@ -2269,6 +2283,7 @@ async def save(
         current_license = (settings.get("license_key") or "").strip()
         current_activation_id = settings.get("license_activation_id") or ""
         current_activation_at = settings.get("license_activated_at")
+        verein_identifier = str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
 
         if not license_key_value:
             plan = DEFAULT_LICENSE_TIER
@@ -2346,8 +2361,8 @@ async def save(
             elif not validation.get("valid"):
                 activation_error = "Lizenz kann erst nach erfolgreicher Prüfung aktiviert werden."
             else:
-                instance_id_value = LEMON_INSTANCE_ID or str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
-                instance_name_value = LEMON_INSTANCE_NAME or settings.get("server_name") or "ts-connect"
+                instance_id_value = LEMON_INSTANCE_ID or verein_identifier
+                instance_name_value = LEMON_INSTANCE_NAME or verein_identifier or settings.get("server_name") or "ts-connect"
                 if not instance_id_value:
                     activation_error = "Keine Instance ID für die Lizenzaktivierung konfiguriert."
                 else:
