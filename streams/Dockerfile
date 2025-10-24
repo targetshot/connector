@@ -7,5 +7,5 @@ RUN mvn -q -DskipTests package
 FROM eclipse-temurin:17-jre
 USER 1000
 WORKDIR /app
-COPY --from=build /workspace/target/ts-streams-transform-0.1.0-shaded.jar /app/app.jar
+COPY --from=build /workspace/target/ts-streams-transform-0.1.0.jar /app/app.jar
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
