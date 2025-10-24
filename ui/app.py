@@ -1352,6 +1352,18 @@ def _ensure_backup_password(settings: dict, secrets_data: dict) -> tuple[str, di
         secrets_data["backup_pg_password"] = new_password
         write_secrets_file(secrets_data)
         return new_password, secrets_data
+
+    # Rotation fehlgeschlagen – versuche mit vorhandenem Passwort weiterzuarbeiten
+    for candidate in fallback_candidates:
+        if not candidate:
+            continue
+        secrets_data["backup_pg_password"] = candidate
+        write_secrets_file(secrets_data)
+        logger.warning(
+            "Backup-Passwort Rotation fehlgeschlagen, nutze vorhandenes Passwort weiter (keine Verbindung zur Rotation möglich)."
+        )
+        return candidate, secrets_data
+
     raise RuntimeError("Backup-Passwort konnte nicht initialisiert werden") from last_error
 
 

@@ -225,7 +225,16 @@ def run_update() -> int:
         compose_cmd = _compose_base(compose_env)
         _run_command(compose_cmd + ["down", "--remove-orphans"], cwd=workspace, manager=manager)
         compose_down_called = True
-        for name in ("ts-kafka-connect", "ts-connect-ui", "ts-redpanda", "workspace-kafka-connect", "workspace-ui", "workspace-redpanda-1"):
+        for name in (
+            "ts-kafka-connect",
+            "ts-connect-ui",
+            "ts-redpanda",
+            "ts-streams-transform",
+            "workspace-kafka-connect",
+            "workspace-ui",
+            "workspace-redpanda-1",
+            "workspace-streams-transform-1",
+        ):
             try:
                 _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
             except CommandError:
@@ -236,7 +245,16 @@ def run_update() -> int:
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
         if compose_down_called:
-            for name in ("ts-kafka-connect", "ts-connect-ui", "ts-redpanda", "workspace-kafka-connect", "workspace-ui", "workspace-redpanda-1"):
+            for name in (
+                "ts-kafka-connect",
+                "ts-connect-ui",
+                "ts-redpanda",
+                "ts-streams-transform",
+                "workspace-kafka-connect",
+                "workspace-ui",
+                "workspace-redpanda-1",
+                "workspace-streams-transform-1",
+            ):
                 try:
                     _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
                 except CommandError:
