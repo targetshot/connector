@@ -137,6 +137,11 @@ def _parse_variant_plan_map(raw: str) -> dict[str, str]:
     return mapping
 
 
+_DEFAULT_VARIANT_MAP = {
+    "1056369": "basic",
+    "1056375": "plus",
+    "1056379": "pro",
+}
 LEMON_VARIANT_PLAN_MAP = _parse_variant_plan_map(LEMON_VARIANT_PLAN_MAP_RAW)
 
 
@@ -337,7 +342,7 @@ def _determine_plan_from_license(
         key = str(candidate).strip().lower()
         if not key:
             continue
-        mapped = LEMON_VARIANT_PLAN_MAP.get(key)
+        mapped = LEMON_VARIANT_PLAN_MAP.get(key) or _DEFAULT_VARIANT_MAP.get(key)
         if mapped:
             return mapped
     for candidate in (plan_hint, variant_name):
