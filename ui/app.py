@@ -385,6 +385,10 @@ def _parse_license_validation_payload(payload: dict[str, Any]) -> dict[str, Any]
         expires_at = meta.get("expires_at") or meta.get("renews_at") or meta.get("renewal_at")
     if not expires_at:
         expires_at = attributes.get("expires_at")
+    if not expires_at and isinstance(payload, dict):
+        license_key_data = payload.get("license_key")
+        if isinstance(license_key_data, dict):
+            expires_at = license_key_data.get("expires_at")
     customer_email = None
     if isinstance(meta, dict):
         customer_email = meta.get("customer_email") or meta.get("email")
