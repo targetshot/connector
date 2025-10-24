@@ -401,6 +401,7 @@
                   <p class="mt-1 text-xs text-indigo-700/80 dark:text-indigo-200/80">Aufbewahrung: {{ data.retention_days }} Tage</p>
                 </div>
               </div>
+              <input type="hidden" name="license_action" id="license_action" value="validate" />
               <div class="grid gap-4 md:grid-cols-3">
                 <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
                   <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Status</p>
@@ -426,11 +427,20 @@
                 </div>
               </div>
               <div class="flex flex-wrap gap-3 pt-2">
-                <button type="submit" class="primary-button">Lizenz prüfen</button>
+                <button type="submit" class="primary-button license-action" data-license-action="validate">Lizenz prüfen</button>
+                {% if license_activation_enabled %}
+                <button type="submit" id="btnActivateLicense" class="btn-secondary license-action {% if license.activation_id %}opacity-60 cursor-not-allowed{% endif %}" data-license-action="activate" {% if license.activation_id %}disabled aria-disabled="true"{% endif %}>Lizenz aktivieren</button>
+                {% endif %}
               </div>
+              {% if license.activation_id %}
+              <p class="text-xs text-emerald-600 dark:text-emerald-300">Aktiviert am {{ license.activation_at_display or 'unbekannt' }} (ID: {{ license.activation_id }}).</p>
+              {% elif license_activation_enabled %}
+              <p class="text-xs text-zinc-500 dark:text-zinc-400">Hinweis: Der Aktivieren-Button vergibt einen Installationsslot bei Lemon Squeezy. Verwende ihn nur auf produktiven Systemen.</p>
+              {% else %}
               <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
                 Hinweis: Nur ein gültiger Lizenzschlüssel aktiviert Features über den Basic-Plan hinaus. Bei abgelaufener Lizenz fällt die Aufbewahrung automatisch auf den Basiswert zurück.
               </p>
+              {% endif %}
             </form>
 
           <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
@@ -873,6 +883,15 @@
           setBadge(backupBadgeEl, false, err?.message || 'Export fehlgeschlagen');
         }
       };
+    }
+    const licenseActionInput = document.getElementById('license_action');
+    if (licenseActionInput) {
+      document.querySelectorAll('.license-action').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (btn.hasAttribute('disabled') || btn.classList.contains('cursor-not-allowed')) return;
+          licenseActionInput.value = btn.dataset.licenseAction || 'validate';
+        });
+      });
     }
     async function connectorAction(action) {
       const pw = await askAdminPassword();

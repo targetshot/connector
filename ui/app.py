@@ -66,7 +66,7 @@ LEMON_LICENSE_API_KEY = os.getenv("TS_LICENSE_API_KEY", "").strip()
 LEMON_VARIANT_PLAN_MAP_RAW = os.getenv("TS_LICENSE_VARIANT_PLAN_MAP", "")
 LEMON_INSTANCE_NAME = os.getenv("TS_LICENSE_INSTANCE_NAME", "").strip()
 LEMON_INSTANCE_ID = os.getenv("TS_LICENSE_INSTANCE_ID", "").strip()
-LEMON_AUTO_ACTIVATE = os.getenv("TS_LICENSE_AUTO_ACTIVATE", "true").lower() in {"1", "true", "yes", "on"}
+LEMON_ACTIVATION_ENABLED = os.getenv("TS_LICENSE_AUTO_ACTIVATE", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_license_tier(value: str | None) -> str:
@@ -165,6 +165,7 @@ SECRETS_PATH = Path(CONNECT_SECRETS_PATH)
 ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
 APPLY_STATE_PATH = DATA_DIR / "connector_apply_state.json"
 MM2_CONFIG_PATH = DATA_DIR / "mm2.properties"
+LICENSE_KEY_FILE = DATA_DIR / "license.key"
 APPLY_RETRY_SECONDS = int(os.getenv("TS_CONNECT_APPLY_RETRY_SECONDS", "60"))
 UPDATE_STATE_PATH = DATA_DIR / "update_state.json"
 UPDATE_CACHE_SECONDS = int(os.getenv("TS_CONNECT_UPDATE_CACHE_SECONDS", "3600"))
@@ -487,14 +488,28 @@ async def activate_license_key_remote(
         raise RuntimeError("Lizenzaktivierung lieferte eine ungültige Antwort.") from exc
     result: dict[str, Any] = {"payload": data}
     if isinstance(data, dict):
-        result.update(
-            {
-                "activated": bool(data.get("activated")),
-                "activation_id": data.get("id"),
-                "status": data.get("status"),
-                "message": data.get("message"),
-            }
-        )
+        payload_data = data.get("data") if isinstance(data.get("data"), dict) else None
+        if payload_data:
+            attributes = payload_data.get("attributes") if isinstance(payload_data.get("attributes"), dict) else {}
+            result.update(
+                {
+                    "activation_id": payload_data.get("id"),
+                    "status": attributes.get("status") or data.get("status"),
+                    "activated": bool(attributes.get("activated")),
+                    "activated_at": attributes.get("created_at") or attributes.get("activated_at"),
+                    "message": attributes.get("message") or data.get("message"),
+                }
+            )
+        else:
+            result.update(
+                {
+                    "activated": bool(data.get("activated")),
+                    "activation_id": data.get("id"),
+                    "status": data.get("status"),
+                    "activated_at": data.get("created_at") or data.get("activated_at"),
+                    "message": data.get("message"),
+                }
+            )
     return result
 async def _run_command_capture(cmd: list[str], *, cwd: Path | None = None, timeout: float | None = None) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
@@ -1023,6 +1038,8 @@ def get_db():
         license_valid_until TEXT,
         license_last_checked TEXT,
         license_customer_email TEXT,
+        license_activation_id TEXT,
+        license_activated_at TEXT,
         backup_pg_host TEXT,
         backup_pg_port INTEGER,
         backup_pg_db TEXT,
@@ -1039,9 +1056,10 @@ def get_db():
                 offline_buffer_enabled, license_tier, retention_days,
                 license_key, license_status, license_valid_until,
                 license_last_checked, license_customer_email,
+                license_activation_id, license_activated_at,
                 backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 1,
@@ -1060,6 +1078,8 @@ def get_db():
                 "unknown",
                 None,
                 None,
+                None,
+                "",
                 None,
                 DEFAULT_BACKUP_HOST,
                 DEFAULT_BACKUP_PORT,
@@ -1088,6 +1108,8 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
     add_column("license_valid_until", "license_valid_until TEXT")
     add_column("license_last_checked", "license_last_checked TEXT")
     add_column("license_customer_email", "license_customer_email TEXT")
+    add_column("license_activation_id", "license_activation_id TEXT")
+    add_column("license_activated_at", "license_activated_at TEXT")
     add_column("backup_pg_host", "backup_pg_host TEXT")
     add_column("backup_pg_port", "backup_pg_port INTEGER")
     add_column("backup_pg_db", "backup_pg_db TEXT")
@@ -1108,6 +1130,7 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
             license_tier = ?,
             retention_days = ?,
             license_status = COALESCE(NULLIF(TRIM(license_status), ''), 'unknown'),
+            license_activation_id = COALESCE(license_activation_id, ''),
             backup_pg_host = COALESCE(NULLIF(TRIM(backup_pg_host), ''), ?),
             backup_pg_port = COALESCE(backup_pg_port, ?),
             backup_pg_db = COALESCE(NULLIF(TRIM(backup_pg_db), ''), ?),
@@ -1305,6 +1328,46 @@ async def restart_mirror_maker() -> None:
         raise RuntimeError(f"docker restart ts-mirror-maker fehlgeschlagen: {restart_out}")
 
 
+async def update_remote_replication_state(active: bool) -> None:
+    try:
+        _, status_output = await _run_command_text(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                "name=ts-mirror-maker",
+                "--format",
+                "{{.Status}}",
+            ],
+            timeout=5,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("MirrorMaker Status konnte nicht abgefragt werden: %s", exc)
+        return
+    status_output = status_output.strip()
+    has_container = bool(status_output)
+    is_running = "Up" in status_output if status_output else False
+
+    if active:
+        if not has_container:
+            logger.warning("MirrorMaker Container nicht gefunden. Cloud-Replikation kann nicht aktiviert werden.")
+            return
+        if is_running:
+            return
+        try:
+            await restart_mirror_maker()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MirrorMaker konnte nicht gestartet werden: %s", exc)
+    else:
+        if not has_container or not is_running:
+            return
+        try:
+            await _run_command_text(["docker", "stop", "ts-mirror-maker"], timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MirrorMaker konnte nicht gestoppt werden: %s", exc)
+
+
 def fetch_settings() -> dict:
     conn = get_db()
     cur = conn.execute(
@@ -1314,6 +1377,7 @@ def fetch_settings() -> dict:
                topic_prefix, server_id, server_name,
                offline_buffer_enabled, license_tier, retention_days,
                license_key, license_status, license_valid_until, license_last_checked, license_customer_email,
+               license_activation_id, license_activated_at,
                backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
         FROM settings WHERE id=1
         """
@@ -1341,6 +1405,8 @@ def fetch_settings() -> dict:
         "license_valid_until": row["license_valid_until"],
         "license_last_checked": row["license_last_checked"],
         "license_customer_email": row["license_customer_email"],
+        "license_activation_id": row["license_activation_id"] or "",
+        "license_activated_at": row["license_activated_at"],
         "backup_pg_host": row["backup_pg_host"] or DEFAULT_BACKUP_HOST,
         "backup_pg_port": row["backup_pg_port"] or DEFAULT_BACKUP_PORT,
         "backup_pg_db": row["backup_pg_db"] or DEFAULT_BACKUP_DB,
@@ -1368,6 +1434,32 @@ def read_secrets_file() -> dict:
         key, value = line.split("=", 1)
         data[key.strip()] = value.strip()
     return data
+
+
+def store_license_key(value: str) -> None:
+    value = (value or "").strip()
+    if value:
+        LICENSE_KEY_FILE.write_text(value + "\n", encoding="utf-8")
+        os.chmod(LICENSE_KEY_FILE, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    elif LICENSE_KEY_FILE.exists():
+        LICENSE_KEY_FILE.unlink()
+
+
+def _license_is_active(settings: dict) -> bool:
+    key = (settings.get("license_key") or "").strip()
+    if not key:
+        return False
+    status = (settings.get("license_status") or "").strip().lower()
+    if status in {"revoked", "cancelled", "disabled", "invalid"}:
+        return False
+    activation_id = (settings.get("license_activation_id") or "").strip()
+    if not activation_id:
+        return False
+    expires_iso = settings.get("license_valid_until")
+    expires_dt = _parse_iso8601(expires_iso)
+    if expires_dt and expires_dt < datetime.now(timezone.utc):
+        return False
+    return True
 
 
 def _rotate_backup_password(*, settings: dict, current_password: str, new_password: str) -> None:
@@ -1518,6 +1610,8 @@ def verify_admin_password(candidate: str) -> bool:
 async def init_admin_password() -> None:
     ensure_admin_password_file()
     await ensure_offline_buffer_ready()
+    current_settings = fetch_settings()
+    await update_remote_replication_state(_license_is_active(current_settings))
     await configure_git_safety()
     await ensure_update_state()
     state = await get_update_state_snapshot()
@@ -1754,6 +1848,12 @@ def build_index_context(request: Request) -> dict:
         "invalid": "Ungültig",
     }
     license_status_label = status_labels.get(status_raw, (data.get("license_status") or "Unbekannt").capitalize())
+    activation_id = data.get("license_activation_id") or ""
+    activation_iso = data.get("license_activated_at")
+    activation_dt = _parse_iso8601(activation_iso)
+    activation_display: str | None = None
+    if activation_dt:
+        activation_display = activation_dt.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     license_info = {
         "key": data.get("license_key", ""),
         "status": data.get("license_status", "unknown"),
@@ -1766,6 +1866,9 @@ def build_index_context(request: Request) -> dict:
         "last_checked": data.get("license_last_checked"),
         "customer_email": data.get("license_customer_email"),
         "status_raw": status_raw,
+        "activation_id": activation_id,
+        "activation_at": activation_iso,
+        "activation_at_display": activation_display,
     }
 
     verein_identifier = str(data.get("topic_prefix") or data.get("server_id") or "").strip()
@@ -1786,6 +1889,7 @@ def build_index_context(request: Request) -> dict:
         "db_password_saved": db_password_saved,
         "default_server_name": DEFAULT_SERVER_NAME,
         "license": license_info,
+        "license_activation_enabled": LEMON_ACTIVATION_ENABLED,
     }
 
 
@@ -2131,6 +2235,7 @@ async def save(
     server_name: str | None = Form(default=None),
     verein_id: str | None = Form(default=None),
     license_key: str | None = Form(default=None),
+    license_action: str | None = Form(default="validate"),
     new_admin_password: str = Form(default=""),
     confirm_admin_password: str = Form(default=""),
 ):
@@ -2159,8 +2264,12 @@ async def save(
 
     if section_key == "license":
         license_key_value = (license_key or "").strip()
+        license_action_value = (license_action or "validate").strip().lower()
         prune_error: str | None = None
         current_license = (settings.get("license_key") or "").strip()
+        current_activation_id = settings.get("license_activation_id") or ""
+        current_activation_at = settings.get("license_activated_at")
+
         if not license_key_value:
             plan = DEFAULT_LICENSE_TIER
             retention_days = LICENSE_RETENTION_DAYS[plan]
@@ -2171,7 +2280,8 @@ async def save(
                 UPDATE settings
                 SET license_key='', license_tier=?, retention_days=?,
                     license_status='unknown', license_valid_until=NULL,
-                    license_last_checked=?, license_customer_email=NULL
+                    license_last_checked=?, license_customer_email=NULL,
+                    license_activation_id='', license_activated_at=NULL
                 WHERE id=1
                 """,
                 (
@@ -2182,6 +2292,7 @@ async def save(
             )
             conn.commit()
             conn.close()
+            store_license_key("")
             if settings.get("offline_buffer_enabled") and secrets_data.get("backup_pg_password"):
                 try:
                     updated_settings = fetch_settings()
@@ -2200,12 +2311,15 @@ async def save(
             )
             if prune_error:
                 request.session.setdefault("error_message", prune_error)
+            await update_remote_replication_state(False)
             return RedirectResponse("/", status_code=303)
+
         try:
             validation = await validate_license_key_remote(license_key_value)
         except Exception as exc:  # noqa: BLE001
             request.session["error_message"] = f"Lizenzprüfung fehlgeschlagen: {exc}"
             return RedirectResponse("/", status_code=303)
+
         plan = validation.get("plan") or DEFAULT_LICENSE_TIER
         if not validation.get("valid"):
             plan = DEFAULT_LICENSE_TIER
@@ -2215,34 +2329,48 @@ async def save(
         expires_at_norm = _normalize_iso8601(validation.get("expires_at") or validation.get("raw_expires_at"))
         last_checked = _now_utc_iso()
 
+        new_activation_id = current_activation_id
+        new_activation_at = current_activation_at
+        if license_key_value != current_license:
+            new_activation_id = ""
+            new_activation_at = None
+
         activation_feedback: dict[str, Any] | None = None
         activation_error: str | None = None
-        should_activate = (
-            LEMON_AUTO_ACTIVATE
-            and validation.get("valid")
-            and license_key_value
-            and license_key_value != current_license
-        )
-        if should_activate:
-            instance_id_value = LEMON_INSTANCE_ID or str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
-            instance_name_value = LEMON_INSTANCE_NAME or settings.get("server_name") or "ts-connect"
-            if not instance_id_value:
-                activation_error = "Keine Instance ID für Lizenzaktivierung konfiguriert."
+        activation_requested = license_action_value == "activate"
+        if activation_requested:
+            if not LEMON_ACTIVATION_ENABLED:
+                activation_error = "Lizenzaktivierungen sind deaktiviert."
+            elif new_activation_id:
+                activation_error = "Lizenz ist bereits aktiviert."
+            elif not validation.get("valid"):
+                activation_error = "Lizenz kann erst nach erfolgreicher Prüfung aktiviert werden."
             else:
-                try:
-                    activation_feedback = await activate_license_key_remote(
-                        license_key_value,
-                        instance_name=instance_name_value,
-                        instance_id=str(instance_id_value),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    activation_error = _short_error_message(str(exc), 180)
+                instance_id_value = LEMON_INSTANCE_ID or str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
+                instance_name_value = LEMON_INSTANCE_NAME or settings.get("server_name") or "ts-connect"
+                if not instance_id_value:
+                    activation_error = "Keine Instance ID für die Lizenzaktivierung konfiguriert."
+                else:
+                    try:
+                        activation_feedback = await activate_license_key_remote(
+                            license_key_value,
+                            instance_name=instance_name_value,
+                            instance_id=str(instance_id_value),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        activation_error = _short_error_message(str(exc), 180)
+                if activation_feedback and activation_feedback.get("activated"):
+                    new_activation_id = activation_feedback.get("activation_id") or ""
+                    new_activation_at = activation_feedback.get("activated_at") or _now_utc_iso()
+                elif activation_feedback and activation_feedback.get("message") and not activation_error:
+                    activation_error = str(activation_feedback.get("message"))
 
         conn = get_db()
         conn.execute(
             """
             UPDATE settings
-            SET license_key=?, license_tier=?, retention_days=?, license_status=?, license_valid_until=?, license_last_checked=?, license_customer_email=?
+            SET license_key=?, license_tier=?, retention_days=?, license_status=?, license_valid_until=?, license_last_checked=?,
+                license_customer_email=?, license_activation_id=?, license_activated_at=?
             WHERE id=1
             """,
             (
@@ -2253,10 +2381,14 @@ async def save(
                 expires_at_norm,
                 last_checked,
                 validation.get("customer_email"),
+                new_activation_id,
+                new_activation_at,
             ),
         )
         conn.commit()
         conn.close()
+
+        store_license_key(license_key_value)
 
         if settings.get("offline_buffer_enabled") and secrets_data.get("backup_pg_password"):
             try:
@@ -2272,14 +2404,16 @@ async def save(
             except Exception as exc:  # noqa: BLE001
                 prune_error = f"Backup-Bereinigung nach Lizenz-Update fehlgeschlagen: {exc}"
 
+        updated_settings = fetch_settings()
+        await update_remote_replication_state(_license_is_active(updated_settings))
+
         message_parts = [f"Plan: {plan.capitalize()}"]
         if expires_at_norm:
             message_parts.append(f"gültig bis {expires_at_norm}")
-        if activation_feedback and activation_feedback.get("activated"):
+        if new_activation_id:
             message_parts.append("Lizenz aktiviert")
-        elif activation_feedback and activation_feedback.get("message"):
-            message_parts.append(str(activation_feedback.get("message")))
         message = " | ".join(message_parts)
+
         if validation.get("valid"):
             request.session["flash_message"] = f"Lizenz erfolgreich geprüft. {message}"
             if prune_error:
@@ -2288,6 +2422,10 @@ async def save(
                 extra = request.session.get("error_message")
                 activation_msg = f"Lizenzaktivierung fehlgeschlagen: {activation_error}"
                 request.session["error_message"] = f"{extra} | {activation_msg}" if extra else activation_msg
+            elif activation_requested and new_activation_id:
+                extra = request.session.get("flash_message")
+                activation_msg = "Lizenz erfolgreich aktiviert."
+                request.session["flash_message"] = f"{extra} {activation_msg}" if extra else activation_msg
         else:
             reason = validation.get("message") or validation.get("error") or "Lizenz ungültig."
             full_reason = f"Lizenz ungültig: {reason} ({message})"
