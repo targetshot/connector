@@ -52,6 +52,7 @@ DEFAULT_BACKUP_HOST = os.getenv("TS_CONNECT_BACKUP_HOST", "backup-db")
 DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
 DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
 DEFAULT_BACKUP_USER = os.getenv("TS_CONNECT_BACKUP_USER", "targetshot")
+DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mysql")
 LEMON_LICENSE_API_URL = os.getenv(
     "TS_LICENSE_API_URL",
     "https://api.lemonsqueezy.com/v1/licenses/validate",
@@ -987,7 +988,7 @@ def get_db():
                 "YOUR-API-KEY",
                 os.getenv("TS_CONNECT_DEFAULT_TOPIC_PREFIX", "413067"),
                 int(os.getenv("TS_CONNECT_DEFAULT_SERVER_ID", "413067")),
-                os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mysql"),
+                DEFAULT_SERVER_NAME,
                 1,
                 DEFAULT_LICENSE_TIER,
                 DEFAULT_RETENTION_DAYS,
@@ -1692,6 +1693,9 @@ def build_index_context(request: Request) -> dict:
         "status_raw": status_raw,
     }
 
+    verein_identifier = str(data.get("topic_prefix") or data.get("server_id") or "").strip()
+    data["verein_id"] = verein_identifier
+
     return {
         "request": request,
         "data": data,
@@ -1705,6 +1709,7 @@ def build_index_context(request: Request) -> dict:
         "docs_url": DOCS_URL,
         "db_password_placeholder": PASSWORD_PLACEHOLDER if db_password_saved else "",
         "db_password_saved": db_password_saved,
+        "default_server_name": DEFAULT_SERVER_NAME,
         "license": license_info,
     }
 
@@ -2049,6 +2054,7 @@ async def save(
     topic_prefix: str | None = Form(default=None),
     server_id: int | None = Form(default=None),
     server_name: str | None = Form(default=None),
+    verein_id: str | None = Form(default=None),
     license_key: str | None = Form(default=None),
     new_admin_password: str = Form(default=""),
     confirm_admin_password: str = Form(default=""),
@@ -2258,13 +2264,26 @@ async def save(
     if section_key == "confluent":
         confluent_sasl_username = (confluent_sasl_username or "").strip()
         confluent_sasl_password = (confluent_sasl_password or "").strip()
-        topic_prefix = (topic_prefix or "").strip()
-        server_name = (server_name or "").strip()
         bootstrap_value = (confluent_bootstrap or settings["confluent_bootstrap"] or CONFLUENT_BOOTSTRAP_DEFAULT).strip()
 
         if not confluent_sasl_username or not confluent_sasl_password:
             request.session["error_message"] = "Bitte API Key und Secret für Confluent ausfüllen."
             return RedirectResponse("/", status_code=303)
+
+        verein_id_value = (verein_id or topic_prefix or "").strip()
+        if not verein_id_value:
+            request.session["error_message"] = "Bitte die VereinsID angeben."
+            return RedirectResponse("/", status_code=303)
+        if not verein_id_value.isdigit():
+            request.session["error_message"] = "Die VereinsID darf nur Ziffern enthalten."
+            return RedirectResponse("/", status_code=303)
+        try:
+            server_id_value = int(verein_id_value)
+        except ValueError:
+            request.session["error_message"] = "Die VereinsID muss eine gültige Zahl sein."
+            return RedirectResponse("/", status_code=303)
+        topic_prefix_value = verein_id_value
+        server_name_value = (settings.get("server_name") or DEFAULT_SERVER_NAME).strip() or DEFAULT_SERVER_NAME
 
         conn = get_db()
         conn.execute(
@@ -2277,9 +2296,9 @@ async def save(
             (
                 bootstrap_value,
                 confluent_sasl_username,
-                topic_prefix,
-                server_id if server_id is not None else settings["server_id"],
-                server_name or settings["server_name"],
+                topic_prefix_value,
+                server_id_value,
+                server_name_value,
             ),
         )
         conn.commit()

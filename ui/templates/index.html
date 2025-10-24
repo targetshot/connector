@@ -304,7 +304,7 @@
             <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
               <input type="hidden" name="section" value="db" />
               <div>
-                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">MariaDB-Verbindung</h2>
+                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">MeytonDB-Verbindung</h2>
                 <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zugangsdaten deiner Vereinsdatenbank für den Debezium-Connector.</p>
               </div>
               <div class="grid gap-6 md:grid-cols-2">
@@ -346,42 +346,31 @@
                 <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Confluent Cloud</h2>
                   <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Konfiguration des Ziel-Clusters für den Datenstrom.</p>
                 </div>
-                <div class="rounded-2xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-accent-dark shadow-sm dark:border-accent/30 dark:bg-accent/20 dark:text-white/90">
-                  <div class="font-semibold">Standard-Cluster</div>
-                  <div class="mt-1 flex flex-col gap-1 text-xs text-zinc-700 dark:text-zinc-200">
-                    <span>{{ confluent_cluster_url }}</span>
-                    <span>Cluster ID: {{ confluent_cluster_id }}</span>
-                  </div>
+              <div class="rounded-2xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-accent-dark shadow-sm dark:border-accent/30 dark:bg-accent/20 dark:text-white/90">
+                <div class="font-semibold">Standard-Cluster</div>
+                <div class="mt-1 flex flex-col gap-1 text-xs text-zinc-700 dark:text-zinc-200">
+                  <span>{{ confluent_cluster_url }}</span>
+                  <span>Cluster ID: {{ confluent_cluster_id }}</span>
                 </div>
               </div>
+              <input type="hidden" id="confluent_bootstrap" name="confluent_bootstrap" value="{{ data.confluent_bootstrap }}" />
+            </div>
+            <div>
+              <label class="input-label" for="verein_id">VereinsID</label>
+              <input id="verein_id" name="verein_id" class="ts-input" value="{{ data.verein_id }}" required />
+              <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                Wird als Topic Prefix und Server ID genutzt. Server Name bleibt {{ data.server_name or default_server_name }}.
+              </p>
+            </div>
+            <div class="grid gap-6 md:grid-cols-2">
               <div>
-                <label class="input-label" for="confluent_bootstrap">Confluent Bootstrap</label>
-                <input id="confluent_bootstrap" name="confluent_bootstrap" class="ts-input" value="{{ data.confluent_bootstrap }}" placeholder="pkc-w7d6j.germanywestcentral.azure.confluent.cloud:9092" readonly />
-                <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Host:Port des Kafka-Clusters. Anpassungen erfolgen in der Infrastruktur-Konfiguration.</p>
+                <label class="input-label" for="confluent_sasl_username">Confluent API Key (Username)</label>
+                <input id="confluent_sasl_username" name="confluent_sasl_username" class="ts-input" value="{{ data.confluent_sasl_username }}" required />
               </div>
-              <div class="grid gap-6 md:grid-cols-2">
-                <div>
-                  <label class="input-label" for="confluent_sasl_username">Confluent API Key (Username)</label>
-                  <input id="confluent_sasl_username" name="confluent_sasl_username" class="ts-input" value="{{ data.confluent_sasl_username }}" required />
-                </div>
                 <div>
                   <label class="input-label" for="confluent_sasl_password">Confluent API Secret (Passwort)</label>
                   <input id="confluent_sasl_password" name="confluent_sasl_password" type="password" class="ts-input" placeholder="••••••••" required />
                 </div>
-              </div>
-              <div class="grid gap-6 md:grid-cols-2">
-                <div>
-                  <label class="input-label" for="topic_prefix">Topic Prefix</label>
-                  <input id="topic_prefix" name="topic_prefix" class="ts-input" value="{{ data.topic_prefix }}" />
-                </div>
-                <div>
-                  <label class="input-label" for="server_name">Server Name</label>
-                  <input id="server_name" name="server_name" class="ts-input" value="{{ data.server_name }}" />
-                </div>
-              </div>
-              <div>
-                <label class="input-label" for="server_id">Server ID</label>
-                <input id="server_id" name="server_id" type="number" class="ts-input" value="{{ data.server_id }}" />
               </div>
               <div class="flex flex-wrap items-center gap-3 pt-1">
                 <button type="button" id="btnTestCflt" class="btn-secondary">Test Confluent</button>
