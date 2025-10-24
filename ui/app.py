@@ -1892,6 +1892,7 @@ def build_index_context(request: Request) -> dict:
     activation_display: str | None = None
     if activation_dt:
         activation_display = activation_dt.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    license_meta = read_license_meta()
     license_info = {
         "key": data.get("license_key", ""),
         "status": data.get("license_status", "unknown"),
@@ -1907,6 +1908,7 @@ def build_index_context(request: Request) -> dict:
         "activation_id": activation_id,
         "activation_at": activation_iso,
         "activation_at_display": activation_display,
+        "meta": license_meta,
     }
 
     verein_identifier = str(data.get("topic_prefix") or data.get("server_id") or "").strip()
@@ -2332,6 +2334,7 @@ async def save(
             conn.commit()
             conn.close()
             store_license_key("")
+            write_license_meta({})
             if settings.get("offline_buffer_enabled") and secrets_data.get("backup_pg_password"):
                 try:
                     updated_settings = fetch_settings()
@@ -2358,6 +2361,7 @@ async def save(
         except Exception as exc:  # noqa: BLE001
             request.session["error_message"] = f"Lizenzprüfung fehlgeschlagen: {exc}"
             return RedirectResponse("/", status_code=303)
+        write_license_meta(validation)
 
         plan = validation.get("plan") or DEFAULT_LICENSE_TIER
         if not validation.get("valid"):
@@ -2428,6 +2432,7 @@ async def save(
         conn.close()
 
         store_license_key(license_key_value)
+        write_license_meta(validation)
 
         if settings.get("offline_buffer_enabled") and secrets_data.get("backup_pg_password"):
             try:
