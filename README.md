@@ -34,14 +34,16 @@ docker compose up -d
 - UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `compose.env` for localhost-only access.
 
 ### Offline-Puffer konfigurieren
-- Die UI bietet im Bereich *Offline-Puffer & Backup* einen Schalter, um den lokalen Buffer zu aktivieren. Dabei landet jeder Debezium-Event zusätzlich in der Postgres-Datenbank `buffer_events`.
-- MirrorMaker 2 repliziert die lokal gepufferten Topics nach Confluent, sobald eine Verbindung besteht. Die benötigten Zugangsdaten werden weiterhin über `secrets.properties` verwaltet.
+- Der Offline-Puffer ist dauerhaft aktiv. Alle Debezium-Events werden lokal in der Postgres-Datenbank `buffer_events` zwischengespeichert und bei verfügbarer Verbindung automatisch hochgeladen.
+- MirrorMaker 2 repliziert die lokal gepufferten Topics nach Confluent, sobald eine Verbindung besteht. Die benötigten Zugangsdaten bleiben in `secrets.properties` hinterlegt.
+- Das Backup-Passwort wird beim ersten Start zufällig generiert und intern verwaltet. Optional kann ein initialer Wert über `TS_CONNECT_BACKUP_PASSWORD` gesetzt werden.
+- Über den Button *Backup exportieren* in der UI lässt sich ein NDJSON-Dump der Tabelle `buffer_events` herunterladen.
 - Die Aufbewahrungszeit richtet sich nach der Lizenz:
   - **Basic**: 14 Tage
   - **Plus**: 30 Tage
   - **Pro**: 90 Tage
-- Standard-Credentials für den Postgres-Puffer können über `TS_CONNECT_BACKUP_DB/USER/PASSWORD/PORT` im `compose.env` angepasst werden.
-- Beim ersten Aktivieren legt die UI automatisch die Tabelle `buffer_events` an und rotiert Einträge gemäß Lizenz.
+- Standard-Credentials für den Postgres-Puffer können über `TS_CONNECT_BACKUP_DB/USER/PORT` im `compose.env` angepasst werden.
+- Die UI legt die Tabelle `buffer_events` automatisch an und entfernt alte Einträge gemäß Lizenzlaufzeit.
 
 ### Lizenzprüfung (Lemon Squeezy)
 - Hinterlege deinen Lemon-Squeezy-Lizenzschlüssel im neuen Abschnitt *Lizenzverwaltung*. Die UI prüft den Schlüssel gegen die Lemon-Squeezy-API und zeigt Status, Laufzeit und den zugehörigen Plan an.

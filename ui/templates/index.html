@@ -444,17 +444,17 @@
               </p>
             </form>
 
-          <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
-            <input type="hidden" name="section" value="offline" />
+          <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
             <div class="space-y-4">
               <div>
                 <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Offline-Puffer &amp; Backup</h2>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Schreibt alle Debezium-Events in eine lokale Postgres-Datenbank und spiegelt sie später in die Cloud.</p>
+                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
+                  Der Offline-Puffer ist dauerhaft aktiv. Alle Debezium-Events werden lokal zwischengespeichert und bei verfügbarer Verbindung automatisch synchronisiert.
+                </p>
+                <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  Zugangsdaten und Passwort der Backup-Datenbank werden intern zufällig verwaltet und müssen nicht manuell gepflegt werden.
+                </p>
               </div>
-              <label class="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-200">
-                <input id="offline_enabled" type="checkbox" name="offline_enabled" value="1" class="h-4 w-4 rounded border-zinc-300 text-accent focus:ring-accent" {% if data.offline_buffer_enabled %}checked{% endif %} />
-                <span>Offline-Puffer aktivieren</span>
-              </label>
             </div>
             <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
               <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Plan &amp; Aufbewahrung</p>
@@ -464,44 +464,15 @@
               <p class="mt-2 text-xs text-amber-600 dark:text-amber-300">Keine Lizenz hinterlegt – es gilt automatisch der Basisplan.</p>
               {% endif %}
             </div>
-            <div class="grid gap-6 md:grid-cols-2">
-              <div>
-                <label class="input-label" for="backup_pg_host">Postgres Host</label>
-                <input id="backup_pg_host" name="backup_pg_host" class="ts-input" value="{{ data.backup_pg_host }}" required />
-              </div>
-              <div>
-                <label class="input-label" for="backup_pg_port">Postgres Port</label>
-                <input id="backup_pg_port" name="backup_pg_port" type="number" class="ts-input" value="{{ data.backup_pg_port }}" required />
-              </div>
-            </div>
-            <div class="grid gap-6 md:grid-cols-2">
-              <div>
-                <label class="input-label" for="backup_pg_db">Datenbankname</label>
-                <input id="backup_pg_db" name="backup_pg_db" class="ts-input" value="{{ data.backup_pg_db }}" required />
-              </div>
-              <div>
-                <label class="input-label" for="backup_pg_user">Datenbank-Benutzer</label>
-                <input id="backup_pg_user" name="backup_pg_user" class="ts-input" value="{{ data.backup_pg_user }}" required />
-              </div>
-            </div>
-            <div>
-              <label class="input-label" for="backup_pg_password">Datenbank-Passwort</label>
-              <input id="backup_pg_password" name="backup_pg_password" type="password" class="ts-input" placeholder="••••••••" value="{{ backup_pg_password_placeholder }}" autocomplete="new-password" {% if data.offline_buffer_enabled %}required{% endif %} />
-              {% if backup_pg_password_saved %}
-              <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Gespeichertes Passwort wird aus Sicherheitsgründen nur als Platzhalter angezeigt.</p>
-              {% endif %}
-            </div>
             <div class="flex flex-wrap items-center gap-3 pt-1">
-              <button type="button" id="btnTestBackup" class="btn-secondary">Test Backup</button>
+              <button type="button" id="btnTestBackup" class="btn-secondary">Verbindung testen</button>
+              <button type="button" id="btnExportBackup" class="btn-secondary">Backup exportieren</button>
               <span id="backupBadge" class="badge">…</span>
             </div>
-            <div class="flex flex-wrap gap-3 pt-2">
-              <button type="submit" class="primary-button">Backup speichern</button>
-            </div>
             <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-              Die Lizenzstufe legt die Vorhaltezeit fest (Basic 14 Tage, Plus 30 Tage, Pro 90 Tage). Die Daten werden in <code>buffer_events</code> gespeichert und bei verfügbarer Verbindung automatisch in die Cloud gespiegelt.
+              Die Lizenzstufe legt die Vorhaltezeit fest (Basic 14 Tage, Plus 30 Tage, Pro 90 Tage). Der Export liefert eine <code>.ndjson</code>-Datei mit allen Einträgen der Tabelle <code>buffer_events</code>.
             </p>
-          </form>
+          </section>
 
         </div>
 
@@ -859,19 +830,59 @@
       const j = await r.json();
       setBadge(document.getElementById('cfltBadge'), j.ok, j.msg);
     };
+    const backupBadgeEl = document.getElementById('backupBadge');
     const btnTestBackup = document.getElementById('btnTestBackup');
-    if (btnTestBackup) {
+    if (btnTestBackup && backupBadgeEl) {
       btnTestBackup.onclick = async () => {
-        const qs = new URLSearchParams({
-          host: document.getElementById('backup_pg_host').value,
-          port: document.getElementById('backup_pg_port').value,
-          database: document.getElementById('backup_pg_db').value,
-          user: document.getElementById('backup_pg_user').value,
-          password: document.getElementById('backup_pg_password').value
-        });
-        const r = await fetch('/api/test/backup-db?' + qs.toString());
-        const j = await r.json();
-        setBadge(document.getElementById('backupBadge'), j.ok, j.msg);
+        setBadge(backupBadgeEl, 'pending', 'Prüfe Verbindung…');
+        try {
+          const r = await fetch('/api/test/backup-db');
+          const j = await r.json();
+          setBadge(backupBadgeEl, j.ok, j.msg);
+        } catch (err) {
+          setBadge(backupBadgeEl, false, err?.message || 'Serverfehler');
+        }
+      };
+    }
+    const btnExportBackup = document.getElementById('btnExportBackup');
+    if (btnExportBackup && backupBadgeEl) {
+      btnExportBackup.onclick = async () => {
+        setBadge(backupBadgeEl, 'pending', 'Export läuft…');
+        try {
+          const r = await fetch('/api/backup/export');
+          if (!r.ok) {
+            let msg = 'Export fehlgeschlagen';
+            try {
+              const err = await r.json();
+              msg = err?.detail || msg;
+            } catch (_) {
+              const text = await r.text();
+              if (text) msg = text;
+            }
+            setBadge(backupBadgeEl, false, msg);
+            return;
+          }
+          const blob = await r.blob();
+          let filename = 'backup.ndjson';
+          const disposition = r.headers.get('Content-Disposition');
+          if (disposition) {
+            const match = disposition.match(/filename="?([^";]+)"?/i);
+            if (match && match[1]) {
+              filename = match[1];
+            }
+          }
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(url);
+          setBadge(backupBadgeEl, true, 'Export heruntergeladen');
+        } catch (err) {
+          setBadge(backupBadgeEl, false, err?.message || 'Export fehlgeschlagen');
+        }
       };
     }
     async function connectorAction(action) {

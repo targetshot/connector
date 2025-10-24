@@ -16,8 +16,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import psycopg2
+from psycopg2 import sql
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
+from starlette.background import BackgroundTask
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -986,7 +988,7 @@ def get_db():
                 os.getenv("TS_CONNECT_DEFAULT_TOPIC_PREFIX", "413067"),
                 int(os.getenv("TS_CONNECT_DEFAULT_SERVER_ID", "413067")),
                 os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mysql"),
-                0,
+                1,
                 DEFAULT_LICENSE_TIER,
                 DEFAULT_RETENTION_DAYS,
                 "",
@@ -1037,7 +1039,7 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
         """
         UPDATE settings
         SET
-            offline_buffer_enabled = COALESCE(offline_buffer_enabled, 0),
+            offline_buffer_enabled = 1,
             license_tier = ?,
             retention_days = ?,
             license_key = COALESCE(license_key, ''),
@@ -1267,7 +1269,7 @@ def fetch_settings() -> dict:
         "topic_prefix": row["topic_prefix"],
         "server_id": row["server_id"],
         "server_name": row["server_name"],
-        "offline_buffer_enabled": bool(row["offline_buffer_enabled"]),
+        "offline_buffer_enabled": True,
         "license_tier": license_tier,
         "retention_days": retention_days,
         "license_key": row["license_key"] or "",
@@ -1302,6 +1304,94 @@ def read_secrets_file() -> dict:
         key, value = line.split("=", 1)
         data[key.strip()] = value.strip()
     return data
+
+
+def _rotate_backup_password(*, settings: dict, current_password: str, new_password: str) -> None:
+    try:
+        with psycopg2.connect(
+            host=settings["backup_pg_host"],
+            port=settings["backup_pg_port"],
+            dbname=settings["backup_pg_db"],
+            user=settings["backup_pg_user"],
+            password=current_password,
+            connect_timeout=5,
+        ) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cur:
+                cur.execute(
+                    sql.SQL("ALTER ROLE {} WITH PASSWORD %s").format(
+                        sql.Identifier(settings["backup_pg_user"])
+                    ),
+                    (new_password,),
+                )
+    except psycopg2.Error as exc:  # noqa: BLE001
+        raise RuntimeError(f"Backup-Passwort konnte nicht gesetzt werden: {exc}") from exc
+
+
+def _ensure_backup_password(settings: dict, secrets_data: dict) -> tuple[str, dict]:
+    password = (secrets_data.get("backup_pg_password") or "").strip()
+    if password:
+        return password, secrets_data
+    fallback_candidates = [
+        (os.getenv("TS_CONNECT_BACKUP_PASSWORD") or "").strip(),
+        (os.getenv("POSTGRES_PASSWORD") or "").strip(),
+        "targetshot",
+    ]
+    new_password = secrets.token_urlsafe(32)
+    last_error: Exception | None = None
+    for candidate in fallback_candidates:
+        if not candidate:
+            continue
+        try:
+            _rotate_backup_password(settings=settings, current_password=candidate, new_password=new_password)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+        secrets_data["backup_pg_password"] = new_password
+        write_secrets_file(secrets_data)
+        return new_password, secrets_data
+    raise RuntimeError("Backup-Passwort konnte nicht initialisiert werden") from last_error
+
+
+async def ensure_offline_buffer_ready() -> None:
+    conn = get_db()
+    conn.execute("UPDATE settings SET offline_buffer_enabled=1 WHERE id=1")
+    conn.commit()
+    conn.close()
+
+    settings = fetch_settings()
+    secrets_data = read_secrets_file()
+    try:
+        password, secrets_data = _ensure_backup_password(settings, secrets_data)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Offline-Puffer Passwort-Initialisierung fehlgeschlagen: %s", exc)
+        return
+
+    try:
+        await asyncio.to_thread(
+            ensure_backup_schema,
+            host=settings["backup_pg_host"],
+            port=settings["backup_pg_port"],
+            database=settings["backup_pg_db"],
+            user=settings["backup_pg_user"],
+            password=password,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Offline-Puffer Schema-Initialisierung fehlgeschlagen: %s", exc)
+        return
+
+    try:
+        await asyncio.to_thread(
+            prune_backup_data,
+            days=settings["retention_days"],
+            host=settings["backup_pg_host"],
+            port=settings["backup_pg_port"],
+            database=settings["backup_pg_db"],
+            user=settings["backup_pg_user"],
+            password=password,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Offline-Puffer Aufbewahrungsbereinigung fehlgeschlagen: %s", exc)
 
 
 def _hash_admin_password(plain: str, salt_hex: str | None = None) -> tuple[str, str]:
@@ -1351,6 +1441,7 @@ def verify_admin_password(candidate: str) -> bool:
 @app.on_event("startup")
 async def init_admin_password() -> None:
     ensure_admin_password_file()
+    await ensure_offline_buffer_ready()
     await configure_git_safety()
     await ensure_update_state()
     state = await get_update_state_snapshot()
@@ -1470,9 +1561,10 @@ async def _delete_connector_if_exists(
 
 
 async def apply_connector_config(*, allow_defer: bool = True) -> None:
+    await ensure_offline_buffer_ready()
     settings = fetch_settings()
     secrets = read_secrets_file()
-    offline_enabled = settings.get("offline_buffer_enabled", False)
+    offline_enabled = True
 
     required = {
         "db_password": "DB-Passwort",
@@ -1563,7 +1655,6 @@ def build_index_context(request: Request) -> dict:
 
     has_secrets = SECRETS_PATH.exists()
     db_password_saved = bool(secrets_data.get("db_password"))
-    backup_pg_password_saved = bool(secrets_data.get("backup_pg_password"))
     flash_message = request.session.pop("flash_message", None)
     error_message = request.session.pop("error_message", None)
     license_valid_iso = data.get("license_valid_until")
@@ -1614,8 +1705,6 @@ def build_index_context(request: Request) -> dict:
         "docs_url": DOCS_URL,
         "db_password_placeholder": PASSWORD_PLACEHOLDER if db_password_saved else "",
         "db_password_saved": db_password_saved,
-        "backup_pg_password_placeholder": PASSWORD_PLACEHOLDER if backup_pg_password_saved else "",
-        "backup_pg_password_saved": backup_pg_password_saved,
         "license": license_info,
     }
 
@@ -1690,23 +1779,116 @@ async def test_confluent(bootstrap: str):
 
 
 @app.get("/api/test/backup-db", dependencies=[Depends(require_session)])
-async def test_backup_db(host: str, port: int, database: str, user: str, password: str):
+async def test_backup_db():
+    await ensure_offline_buffer_ready()
+    settings = fetch_settings()
     secrets_data = read_secrets_file()
-    if password == PASSWORD_PLACEHOLDER and secrets_data.get("backup_pg_password"):
-        password = secrets_data["backup_pg_password"]
+    password = secrets_data.get("backup_pg_password")
+    if not password:
+        return {"ok": False, "msg": "Kein Backup-Passwort gespeichert"}
     try:
         await asyncio.to_thread(
             _probe_backup_connection,
-            host=host,
-            port=int(port),
-            database=database,
-            user=user,
+            host=settings["backup_pg_host"],
+            port=int(settings["backup_pg_port"]),
+            database=settings["backup_pg_db"],
+            user=settings["backup_pg_user"],
             password=password,
             timeout=3,
         )
         return {"ok": True, "msg": "Backup-DB OK"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "msg": str(exc)}
+
+
+@app.get("/api/backup/export", dependencies=[Depends(require_session)])
+async def export_backup():
+    await ensure_offline_buffer_ready()
+    settings = fetch_settings()
+    secrets_data = read_secrets_file()
+    password = secrets_data.get("backup_pg_password")
+    if not password:
+        raise HTTPException(status_code=400, detail="Kein Backup-Passwort gespeichert.")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    export_path = DATA_DIR / f"backup-export-{timestamp}-{secrets.token_hex(4)}.ndjson"
+
+    try:
+        with export_path.open("w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "meta": {
+                            "exported_at": _now_utc_iso(),
+                            "host": settings["backup_pg_host"],
+                            "database": settings["backup_pg_db"],
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            try:
+                with psycopg2.connect(
+                    host=settings["backup_pg_host"],
+                    port=settings["backup_pg_port"],
+                    dbname=settings["backup_pg_db"],
+                    user=settings["backup_pg_user"],
+                    password=password,
+                    connect_timeout=5,
+                ) as connection:
+                    connection.autocommit = True
+                    with connection.cursor(name="buffer_export") as cur:
+                        cur.itersize = 1000
+                        cur.execute(
+                            """
+                            SELECT id, topic, payload, created_at
+                            FROM buffer_events
+                            ORDER BY id
+                            """
+                        )
+                        for row in cur:
+                            payload_value = row[2]
+                            if isinstance(payload_value, (bytes, bytearray, memoryview)):
+                                payload_bytes = payload_value.tobytes() if isinstance(payload_value, memoryview) else bytes(payload_value)
+                                try:
+                                    payload_value = json.loads(payload_bytes.decode("utf-8"))
+                                except Exception:  # noqa: BLE001
+                                    payload_value = payload_bytes.decode("utf-8", errors="ignore")
+                            elif isinstance(payload_value, str):
+                                try:
+                                    payload_value = json.loads(payload_value)
+                                except Exception:  # noqa: BLE001
+                                    # leave as raw string
+                                    pass
+                            created_at = row[3]
+                            if isinstance(created_at, datetime):
+                                created_at = created_at.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                            handle.write(
+                                json.dumps(
+                                    {
+                                        "id": row[0],
+                                        "topic": row[1],
+                                        "payload": payload_value,
+                                        "created_at": created_at,
+                                    },
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
+                            )
+            except psycopg2.Error as exc:  # noqa: BLE001
+                raise HTTPException(status_code=503, detail=f"Backup-Export fehlgeschlagen: {exc}") from exc
+    except Exception:
+        if export_path.exists():
+            export_path.unlink(missing_ok=True)
+        raise
+
+    return FileResponse(
+        export_path,
+        media_type="application/x-ndjson",
+        filename=export_path.name,
+        background=BackgroundTask(export_path.unlink),
+    )
 
 
 async def _check_database_health() -> dict[str, str]:
@@ -1758,8 +1940,6 @@ async def _check_confluent_health() -> dict[str, str]:
 
 async def _check_backup_health() -> dict[str, str]:
     settings = fetch_settings()
-    if not settings.get("offline_buffer_enabled"):
-        return {"status": "skipped", "message": "Offline-Puffer deaktiviert"}
     secrets = read_secrets_file()
     password = secrets.get("backup_pg_password")
     if not password:
@@ -1870,12 +2050,6 @@ async def save(
     server_id: int | None = Form(default=None),
     server_name: str | None = Form(default=None),
     license_key: str | None = Form(default=None),
-    offline_enabled: str | None = Form(default=None),
-    backup_pg_host: str | None = Form(default=None),
-    backup_pg_port: int | None = Form(default=None),
-    backup_pg_db: str | None = Form(default=None),
-    backup_pg_user: str | None = Form(default=None),
-    backup_pg_password: str | None = Form(default=None),
     new_admin_password: str = Form(default=""),
     confirm_admin_password: str = Form(default=""),
 ):
@@ -2067,99 +2241,18 @@ async def save(
         return RedirectResponse("/", status_code=303)
 
     if section_key == "offline":
-        enabled = _parse_bool(offline_enabled, default=settings.get("offline_buffer_enabled", False))
-        plan = _normalize_license_tier(settings.get("license_tier"))
-        retention_days = LICENSE_RETENTION_DAYS[plan]
-        pg_host = (backup_pg_host or settings.get("backup_pg_host") or DEFAULT_BACKUP_HOST).strip()
-        pg_port_value_raw = backup_pg_port if backup_pg_port is not None else settings.get("backup_pg_port", DEFAULT_BACKUP_PORT)
-        try:
-            pg_port_value = int(pg_port_value_raw)
-        except (TypeError, ValueError):
-            request.session["error_message"] = "Bitte eine gültige Portnummer für die Backup-Datenbank angeben."
-            return RedirectResponse("/", status_code=303)
-        if pg_port_value <= 0 or pg_port_value > 65535:
-            request.session["error_message"] = "Backup-Datenbank Port muss zwischen 1 und 65535 liegen."
-            return RedirectResponse("/", status_code=303)
-
-        pg_db = (backup_pg_db or settings.get("backup_pg_db") or DEFAULT_BACKUP_DB).strip()
-        pg_user_value = (backup_pg_user or settings.get("backup_pg_user") or DEFAULT_BACKUP_USER).strip()
-        submitted_backup_pw = (backup_pg_password or "").strip() if backup_pg_password is not None else ""
-        existing_backup_pw = secrets_data.get("backup_pg_password", "")
-        if submitted_backup_pw == PASSWORD_PLACEHOLDER and existing_backup_pw:
-            backup_pw_value = existing_backup_pw
-        else:
-            backup_pw_value = submitted_backup_pw
-
-        if enabled and not backup_pw_value:
-            request.session["error_message"] = "Bitte ein Passwort für die Backup-Datenbank hinterlegen."
-            return RedirectResponse("/", status_code=303)
-        if not pg_host or not pg_db or not pg_user_value:
-            request.session["error_message"] = "Bitte Host, Datenbank und Benutzer für die Backup-Datenbank angeben."
-            return RedirectResponse("/", status_code=303)
-
-        conn = get_db()
-        conn.execute(
-            """
-            UPDATE settings
-            SET offline_buffer_enabled=?, license_tier=?, retention_days=?,
-                backup_pg_host=?, backup_pg_port=?, backup_pg_db=?, backup_pg_user=?
-            WHERE id=1
-            """,
-            (
-                1 if enabled else 0,
-                plan,
-                retention_days,
-                pg_host,
-                pg_port_value,
-                pg_db,
-                pg_user_value,
-            ),
-        )
-        conn.commit()
-        conn.close()
-
-        secrets_data.update(
-            {
-                "backup_pg_password": backup_pw_value,
-            }
-        )
-        write_secrets_file(secrets_data)
-
-        try:
-            if enabled and backup_pw_value:
-                ensure_backup_schema(
-                    host=pg_host,
-                    port=pg_port_value,
-                    database=pg_db,
-                    user=pg_user_value,
-                    password=backup_pw_value,
-                )
-                prune_backup_data(
-                    days=retention_days,
-                    host=pg_host,
-                    port=pg_port_value,
-                    database=pg_db,
-                    user=pg_user_value,
-                    password=backup_pw_value,
-                )
-        except Exception as exc:  # noqa: BLE001
-            request.session["error_message"] = f"Offline-Puffer konnte nicht vorbereitet werden: {exc}"
-            return RedirectResponse("/", status_code=303)
-
+        await ensure_offline_buffer_ready()
         try:
             await apply_connector_config()
         except DeferredApplyError as exc:
             request.session["flash_message"] = (
-                "Offline-Puffer gespeichert. Connector-Update wird automatisch erneut versucht, "
-                "sobald die Vereinsdatenbank erreichbar ist. "
+                "Offline-Puffer wird erneut angewendet, sobald die Vereinsdatenbank erreichbar ist. "
                 f"Letzter Fehler: {exc}"
             )
-            return RedirectResponse("/", status_code=303)
         except Exception as exc:  # noqa: BLE001
-            request.session["error_message"] = f"Connector-Update fehlgeschlagen: {exc}"
-            return RedirectResponse("/", status_code=303)
-
-        request.session["flash_message"] = "Offline-Puffer Einstellungen gespeichert."
+            request.session["error_message"] = f"Offline-Puffer Aktualisierung fehlgeschlagen: {exc}"
+        else:
+            request.session["flash_message"] = "Offline-Puffer ist aktiv und wurde aktualisiert."
         return RedirectResponse("/", status_code=303)
 
     if section_key == "confluent":
