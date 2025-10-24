@@ -131,6 +131,19 @@ def build_connector_config(settings: dict, *, offline_mode: bool = False) -> dic
                 "value.converter.schemas.enable": "false",
             }
         )
+        for key in (
+            "key.converter.schema.registry.url",
+            "value.converter.schema.registry.url",
+            "key.converter.basic.auth.credentials.source",
+            "value.converter.basic.auth.credentials.source",
+            "key.converter.basic.auth.user.info",
+            "value.converter.basic.auth.user.info",
+            "producer.override.bootstrap.servers",
+            "producer.override.security.protocol",
+            "producer.override.sasl.mechanism",
+            "producer.override.sasl.jaas.config",
+        ):
+            cfg.pop(key, None)
     else:
         cfg.update(
             {
