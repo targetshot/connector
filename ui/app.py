@@ -40,6 +40,7 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
 WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
+LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
 
 LICENSE_RETENTION_DAYS = {
     "basic": 14,
@@ -595,18 +596,29 @@ def _parse_bool(value: Any, default: bool = False) -> bool:
         return default
 
 
+def _now_local() -> datetime:
+    return datetime.now(timezone.utc).astimezone(LOCAL_TIMEZONE)
+
+
+def _to_local(dt: datetime | None) -> datetime | None:
+    if not dt:
+        return None
+    return dt.astimezone(LOCAL_TIMEZONE)
+
+
 def _calculate_next_auto_run(hour: int, last_run_iso: str | None) -> datetime:
     hour = _sanitize_hour(hour)
-    now = datetime.now(timezone.utc)
-    base = now
+    now_local = _now_local()
+    base_local = now_local
     if last_run_iso:
         last_dt = _parse_iso8601(last_run_iso)
-        if last_dt and last_dt > base:
-            base = last_dt
-    candidate = base.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if candidate <= base:
-        candidate += timedelta(days=1)
-    return candidate
+        last_local = _to_local(last_dt)
+        if last_local and last_local > base_local:
+            base_local = last_local
+    candidate_local = base_local.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if candidate_local <= base_local:
+        candidate_local += timedelta(days=1)
+    return candidate_local.astimezone(timezone.utc)
 
 
 async def _ensure_git_safe_directory() -> None:
@@ -940,12 +952,13 @@ async def _auto_update_worker() -> None:
             if state.get("auto_update_enabled"):
                 auto_hour = _sanitize_hour(state.get("auto_update_hour"))
                 last_run_iso = state.get("auto_update_last_run")
-                now = datetime.now(timezone.utc)
-                today_run = now.replace(hour=auto_hour, minute=0, second=0, microsecond=0)
+                now_local = _now_local()
+                today_run_local = now_local.replace(hour=auto_hour, minute=0, second=0, microsecond=0)
                 last_run_dt = _parse_iso8601(last_run_iso)
-                already_today = last_run_dt and last_run_dt.date() == now.date()
-                if now >= today_run and not already_today:
-                    logger.info("Auto-Update: Starte geplanten Lauf für %s", today_run.isoformat())
+                last_run_local = _to_local(last_run_dt)
+                already_today = last_run_local and last_run_local.date() == now_local.date()
+                if now_local >= today_run_local and not already_today:
+                    logger.info("Auto-Update: Starte geplanten Lauf für %s", today_run_local.isoformat())
                     result = await _launch_update_job(
                         target_ref=None,
                         initiated_by="auto",
