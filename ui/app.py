@@ -1,15 +1,17 @@
 import asyncio
+import html
+import ipaddress
 import json
+import hashlib
 import logging
 import os
-import socket
-import ssl
-import ipaddress
-import stat
-import sqlite3
-import hashlib
+import re
 import secrets
 import shutil
+import socket
+import sqlite3
+import ssl
+import stat
 import time
 from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta, timezone
@@ -279,6 +281,19 @@ def _short_error_message(raw: str, max_len: int = 180) -> str:
         if len(message) > max_len:
             message = message[: max_len - 1] + "…"
     return message
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html_tags(value: str) -> str:
+    if not value:
+        return ""
+    if "<" not in value:
+        return value.strip()
+    text = _HTML_TAG_RE.sub(" ", value)
+    text = html.unescape(text)
+    return " ".join(text.split())
 
 
 def _parse_iso8601(timestamp: str | None) -> datetime | None:
@@ -1674,16 +1689,25 @@ async def init_admin_password() -> None:
 
 
 def _extract_error_message(resp: httpx.Response) -> str:
+    fallback = f"{resp.status_code} {getattr(resp, 'reason_phrase', '')}".strip()
+
+    def _clean(value: str) -> str:
+        cleaned = _strip_html_tags(str(value))
+        if not cleaned:
+            return fallback
+        shortened = _short_error_message(cleaned, 160)
+        return shortened or fallback
+
     try:
         payload = resp.json()
     except Exception:  # noqa: BLE001
-        return resp.text
+        return _clean(resp.text)
     if isinstance(payload, dict):
         for key in ("message", "error", "detail", "trace"):
             value = payload.get(key)
             if value:
-                return str(value)
-    return resp.text
+                return _clean(str(value))
+    return _clean(resp.text)
 
 
 async def _connect_request(
@@ -2276,6 +2300,11 @@ async def _check_connector_health() -> dict[str, str]:
         try:
             overview = await client.get(f"{CONNECT_BASE_URL}/connectors")
             if overview.status_code != 200:
+                if overview.status_code == 404:
+                    return {
+                        "status": "error",
+                        "message": "Kafka Connect REST (/connectors) antwortet mit 404 – läuft der Connect-Container?",
+                    }
                 return {
                     "status": "error",
                     "message": _extract_error_message(overview),

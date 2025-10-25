@@ -453,13 +453,24 @@
               <div class="grid gap-4 md:grid-cols-3">
                 <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
                   <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Status</p>
-                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">{{ license.status_label }}</p>
-                  {% if license.days_remaining is not none %}
-                  {% if license.days_remaining >= 0 %}
-                  <p class="mt-1 text-[0.75rem] text-zinc-500 dark:text-zinc-400">{{ license.days_remaining }} Tage verbleiben</p>
-                  {% else %}
-                  <p class="mt-1 text-[0.75rem] text-amber-600 dark:text-amber-300">Abgelaufen seit {{ license.days_remaining | abs }} Tagen</p>
+                  {% set license_days = license.days_remaining %}
+                  {% if license_days is not none %}
+                  {% set status_color = 'text-emerald-600 dark:text-emerald-300' %}
+                  {% if license_days < 0 %}
+                    {% set status_color = 'text-rose-600 dark:text-rose-300' %}
+                  {% elif license_days <= 14 %}
+                    {% set status_color = 'text-amber-600 dark:text-amber-300' %}
                   {% endif %}
+                  {% endif %}
+                  <p class="mt-1 text-sm font-semibold {{ status_color if license_days is not none else 'text-zinc-800 dark:text-white' }}">
+                    {{ license.status_label }}
+                  </p>
+                  {% if license_days is not none %}
+                    {% if license_days >= 0 %}
+                    <p class="mt-1 text-[0.75rem] {{ status_color }}">{{ license_days }} Tage verbleiben</p>
+                    {% else %}
+                    <p class="mt-1 text-[0.75rem] {{ status_color }}">Abgelaufen seit {{ license_days | abs }} Tagen</p>
+                    {% endif %}
                   {% endif %}
                 </div>
                 <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
