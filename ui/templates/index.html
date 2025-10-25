@@ -828,6 +828,9 @@
       if (event.key === 'Escape' && passwordResolver) {
         resolvePasswordModal(null);
       }
+      if (event.key === 'Escape' && confirmResolver) {
+        resolveConfirmModal(false);
+      }
       if (event.key === 'Escape' && !infoModal.classList.contains('hidden')) {
         closeInfoModal(true);
       }
@@ -985,7 +988,8 @@
     document.getElementById('btnResume').onclick = () => connectorAction('resume');
     document.getElementById('btnRestart').onclick = () => connectorAction('restart');
     document.getElementById('btnResnapshot').onclick = async () => {
-      if (!confirm('Connector zurücksetzen und komplette Datenaufnahme neu starten? Dieser Vorgang löscht den aktuellen Debezium-Status.')) return;
+      const confirmed = await showConfirmModal('Connector zurücksetzen und komplette Datenaufnahme neu starten? Dieser Vorgang löscht den aktuellen Debezium-Status.');
+      if (!confirmed) return;
       const pw = await askAdminPassword();
       if (!pw) return;
       const fd = new FormData();
@@ -1413,7 +1417,8 @@
     if (btnRunUpdate) {
       btnRunUpdate.onclick = async () => {
         if (btnRunUpdate.disabled) return;
-        if (!confirm('Docker-Compose Stack jetzt aktualisieren? Die Dienste werden kurzzeitig neu gestartet.')) return;
+        const confirmed = await showConfirmModal('Docker-Compose Stack jetzt aktualisieren? Die Dienste werden kurzzeitig neu gestartet.');
+        if (!confirmed) return;
         const pw = await askAdminPassword();
         if (!pw) return;
         const fd = new FormData();
