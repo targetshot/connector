@@ -141,6 +141,19 @@
       font-size: 0.85rem;
       font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, SFMono, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     }
+    @keyframes update-progress {
+      0% { transform: translateX(-60%); }
+      100% { transform: translateX(160%); }
+    }
+    .update-progress-strip {
+      width: 45%;
+      min-width: 120px;
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(10, 165, 255, 0.85), rgba(124, 58, 237, 0.85));
+      animation: update-progress 1.35s ease-in-out infinite;
+      box-shadow: 0 0 16px rgba(99, 102, 241, 0.25);
+    }
     @media (prefers-color-scheme: dark) {
       .input-label { color: #e2e8f0; }
       .ts-input {
@@ -579,7 +592,6 @@
                 <button type="button" id="btnRunUpdate" class="btn-secondary">Update starten</button>
                 <span id="updateStatusHint" class="text-xs text-zinc-500 dark:text-zinc-400"></span>
               </div>
-              <pre id="updateLog" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl bg-black/80 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
             </section>
             </div>
           </div>
@@ -617,6 +629,23 @@
         <div id="infoModalActions" class="mt-6 flex justify-end">
           <button type="button" id="infoModalClose" class="btn-secondary !bg-white/70 !text-zinc-700 hover:!bg-white dark:!bg-white/20 dark:!text-white">Schließen</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="updateModal" class="fixed inset-0 z-50 hidden bg-black/70 backdrop-blur-sm">
+    <div class="absolute inset-0 flex items-center justify-center p-4">
+      <div class="w-full max-w-2xl rounded-[32px] border border-white/10 bg-white/95 p-6 shadow-2xl shadow-cyan-500/10 dark:bg-ink-900/95 dark:text-white">
+        <div class="flex items-center gap-3">
+          <span class="inline-flex h-3 w-3 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.6)]"></span>
+          <h3 class="brand-sub text-lg font-semibold text-zinc-900 dark:text-white">Update wird ausgeführt</h3>
+        </div>
+        <p id="updateModalStatus" class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Docker Compose aktualisiert das System. Bitte diese Ansicht geöffnet lassen.</p>
+        <p class="text-xs text-zinc-500 dark:text-zinc-400">Dieses Fenster schließt sich automatisch, sobald das Update abgeschlossen ist.</p>
+        <div class="mt-4 h-2 overflow-hidden rounded-full bg-zinc-200/80 dark:bg-white/10">
+          <div class="update-progress-strip"></div>
+        </div>
+        <pre id="updateModalLog" role="log" aria-live="polite" class="mt-4 max-h-80 overflow-auto whitespace-pre-wrap rounded-2xl bg-black/85 p-4 font-mono text-[0.78rem] text-indigo-200 dark:bg-black/60">Noch keine Update-Logs.</pre>
       </div>
     </div>
   </div>
@@ -991,7 +1020,9 @@
     const updateStatusText = document.getElementById('updateStatusText');
     const updateVersionInfo = document.getElementById('updateVersionInfo');
     const updatePrereqHint = document.getElementById('updatePrereqHint');
-    const updateLog = document.getElementById('updateLog');
+    const updateModal = document.getElementById('updateModal');
+    const updateModalStatus = document.getElementById('updateModalStatus');
+    const updateModalLog = document.getElementById('updateModalLog');
     const btnCheckUpdate = document.getElementById('btnCheckUpdate');
     const btnRunUpdate = document.getElementById('btnRunUpdate');
     const updateStatusHint = document.getElementById('updateStatusHint');
@@ -1009,6 +1040,7 @@
     const autoUpdateLast = document.getElementById('autoUpdateLast');
     const btnSaveAuto = document.getElementById('btnSaveAuto');
     let updatePollTimer = null;
+    let updateModalVisible = false;
 
     function escapeHtml(value) {
       return value.replace(/[&<>"']/g, function (match) {
@@ -1022,6 +1054,51 @@
       const date = new Date(iso);
       if (Number.isNaN(date.getTime())) return iso;
       return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    function openUpdateProgressModal(statusText) {
+      if (!updateModal) return;
+      if (statusText && updateModalStatus) {
+        updateModalStatus.textContent = statusText;
+      }
+      updateModal.classList.remove('hidden');
+      updateModalVisible = true;
+    }
+
+    function closeUpdateProgressModal() {
+      if (!updateModalVisible || !updateModal) return;
+      updateModal.classList.add('hidden');
+      updateModalVisible = false;
+      if (updateModalLog) {
+        updateModalLog.textContent = 'Noch keine Update-Logs.';
+        updateModalLog.scrollTop = 0;
+      }
+    }
+
+    function setUpdateModalLogContent(lines) {
+      if (!updateModalLog) return;
+      if (Array.isArray(lines) && lines.length) {
+        updateModalLog.textContent = lines.join('\n');
+        updateModalLog.scrollTop = updateModalLog.scrollHeight;
+      } else {
+        updateModalLog.textContent = 'Noch keine Update-Logs.';
+        updateModalLog.scrollTop = 0;
+      }
+    }
+
+    function syncUpdateModal(state) {
+      if (!updateModal) return;
+      const running = state && state.status === 'running';
+      if (running) {
+        if (!updateModalVisible) {
+          openUpdateProgressModal(state?.current_action || 'Update wird vorbereitet…');
+        } else if (state?.current_action && updateModalStatus) {
+          updateModalStatus.textContent = state.current_action;
+        }
+        setUpdateModalLogContent(state?.log);
+      } else if (updateModalVisible) {
+        closeUpdateProgressModal();
+      }
     }
 
     function setUpdateBadge(state, currentAction, lastError) {
@@ -1215,13 +1292,7 @@
           btnSaveAuto.classList.toggle('opacity-60', disabled);
           btnSaveAuto.classList.toggle('cursor-not-allowed', disabled);
         }
-        if (updateLog) {
-          if (Array.isArray(data.log) && data.log.length) {
-            updateLog.textContent = data.log.join('\n');
-          } else {
-            updateLog.textContent = 'Noch keine Update-Logs.';
-          }
-        }
+        syncUpdateModal(data);
         loadHealthSummary(false).catch(() => {});
         if (data.status === 'running') {
           updatePollTimer = setTimeout(() => {
@@ -1231,8 +1302,8 @@
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setUpdateBadge('error', 'Status kann nicht abgerufen werden', message);
-        if (updateLog) {
-          updateLog.textContent = 'Fehler beim Laden des Update-Status: ' + message;
+        if (updateModalVisible) {
+          setUpdateModalLogContent(['Fehler beim Laden des Update-Status: ' + message, 'Neuer Versuch läuft automatisch…']);
         }
       }
     }
@@ -1267,7 +1338,11 @@
             showInfoModal('Update fehlgeschlagen', detail ? String(detail) : 'Update konnte nicht gestartet werden.', 'error');
             return;
           }
-          showInfoModal('Update gestartet', 'Die UI wird kurz neu gestartet, sobald docker compose neu gebaut wurde.', 'info', { closable: false, loading: true });
+          openUpdateProgressModal('Update wird vorbereitet…');
+          setUpdateModalLogContent([
+            'Update-Runner wird gestartet…',
+            'Docker Compose wird neu gebaut. Bitte diese Ansicht geöffnet lassen.'
+          ]);
           scheduleUpdateReload();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
