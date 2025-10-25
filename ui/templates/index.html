@@ -83,6 +83,23 @@
       color: #991b1b;
       box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.25);
     }
+    .status-detail {
+      display: none;
+      margin-top: 0.35rem;
+      font-size: 0.72rem;
+      line-height: 1.1rem;
+      color: #4b5563;
+    }
+    .status-detail.is-visible {
+      display: block;
+    }
+    .status-detail.status-ok { color: #047857; }
+    .status-detail.status-warn { color: #b45309; }
+    .status-detail.status-error { color: #dc2626; }
+    .dark .status-detail { color: rgba(226, 232, 240, 0.85); }
+    .dark .status-detail.status-ok { color: #6ee7b7; }
+    .dark .status-detail.status-warn { color: #facc15; }
+    .dark .status-detail.status-error { color: #fda4af; }
     .btn-secondary {
       display: inline-flex;
       align-items: center;
@@ -212,7 +229,7 @@
             <span class="brand-sub text-lg font-semibold">TargetShot Connect</span>
           </a>
           <div class="flex flex-col items-start gap-3 text-sm text-zinc-500 dark:text-zinc-400 sm:flex-row sm:items-center sm:gap-4">
-            <p>Debezium Worker · MariaDB → Confluent Kafka</p>
+            <p>Debezium Worker · MeytonDB → Confluent Kafka</p>
             <span class="inline-flex items-center gap-2 rounded-full border border-white/40 bg-white/90 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-zinc-800 shadow-sm shadow-cyan-500/10 supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-white/10 dark:text-white/90">
               <span>Version {{ connect_version }}</span>
               <span class="h-1 w-1 rounded-full bg-accent/80 dark:bg-accent"></span>
@@ -245,7 +262,7 @@
               <div class="flex items-start gap-3">
                 <span class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/15 font-semibold text-accent-dark dark:bg-accent/25 dark:text-white">1</span>
                 <div>
-                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">MariaDB verbinden</h2>
+                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">MeytonDB verbinden</h2>
                   <p>Trage Host, Port und Zugangsdaten deines Vereinsservers ein, damit Debezium alle Ereignisse erfassen kann.</p>
                 </div>
               </div>
@@ -272,28 +289,46 @@
             </div>
           <div class="mt-4 grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
-              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">MariaDB</p>
-              <div class="mt-2"><span id="dbStatusBadge" class="badge">…</span></div>
+              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">MeytonDB</p>
+              <div class="mt-2 space-y-1">
+                <span id="dbStatusBadge" class="badge" aria-live="polite">…</span>
+                <p id="dbStatusMessage" class="status-detail"></p>
+              </div>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
                 <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Confluent</p>
-                <div class="mt-2"><span id="confluentStatusBadge" class="badge">…</span></div>
+                <div class="mt-2 space-y-1">
+                  <span id="confluentStatusBadge" class="badge" aria-live="polite">…</span>
+                  <p id="confluentStatusMessage" class="status-detail"></p>
+                </div>
               </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Debezium Connector</p>
-              <div class="mt-2"><span id="connectorStatusBadge" class="badge">…</span></div>
+              <div class="mt-2 space-y-1">
+                <span id="connectorStatusBadge" class="badge" aria-live="polite">…</span>
+                <p id="connectorStatusMessage" class="status-detail"></p>
+              </div>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Backup-Puffer</p>
-              <div class="mt-2"><span id="backupStatusBadge" class="badge">…</span></div>
+              <div class="mt-2 space-y-1">
+                <span id="backupStatusBadge" class="badge" aria-live="polite">…</span>
+                <p id="backupStatusMessage" class="status-detail"></p>
+              </div>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Lizenz</p>
-              <div class="mt-2"><span id="licenseStatusBadge" class="badge">…</span></div>
+              <div class="mt-2 space-y-1">
+                <span id="licenseStatusBadge" class="badge" aria-live="polite">…</span>
+                <p id="licenseStatusMessage" class="status-detail"></p>
+              </div>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Elastic Agent</p>
-              <div class="mt-2"><span id="elasticAgentStatusBadge" class="badge">…</span></div>
+              <div class="mt-2 space-y-1">
+                <span id="elasticAgentStatusBadge" class="badge" aria-live="polite">…</span>
+                <p id="elasticAgentStatusMessage" class="status-detail"></p>
+              </div>
             </div>
           </div>
           </section>
@@ -1027,11 +1062,17 @@
     const btnRunUpdate = document.getElementById('btnRunUpdate');
     const updateStatusHint = document.getElementById('updateStatusHint');
     const dbStatusBadge = document.getElementById('dbStatusBadge');
+    const dbStatusMessage = document.getElementById('dbStatusMessage');
     const confluentStatusBadge = document.getElementById('confluentStatusBadge');
+    const confluentStatusMessage = document.getElementById('confluentStatusMessage');
     const connectorStatusBadge = document.getElementById('connectorStatusBadge');
+    const connectorStatusMessage = document.getElementById('connectorStatusMessage');
     const backupStatusBadge = document.getElementById('backupStatusBadge');
+    const backupStatusMessage = document.getElementById('backupStatusMessage');
     const licenseStatusBadge = document.getElementById('licenseStatusBadge');
+    const licenseStatusMessage = document.getElementById('licenseStatusMessage');
     const elasticAgentStatusBadge = document.getElementById('elasticAgentStatusBadge');
+    const elasticAgentStatusMessage = document.getElementById('elasticAgentStatusMessage');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     let updateReloadTimer = null;
@@ -1170,20 +1211,43 @@
       updateReloadTimer = setTimeout(probe, 4000);
     }
 
-    function setHealthBadge(el, summary) {
-      if (!el || !summary) return;
-      const status = summary.status || 'unknown';
-      const message = summary.message || '';
+    function updateStatusDetail(el, status, message) {
+      if (!el) return;
+      el.textContent = message || '';
+      el.classList.remove('is-visible', 'status-ok', 'status-warn', 'status-error');
+      if (message) {
+        el.classList.add('is-visible');
+        if (status === 'ok') {
+          el.classList.add('status-ok');
+        } else if (status === 'warn' || status === 'pending' || status === 'skipped') {
+          el.classList.add('status-warn');
+        } else if (status === 'error') {
+          el.classList.add('status-error');
+        }
+      }
+    }
+
+    function setHealthBadge(el, summary, detailEl) {
+      if (!el) return;
+      const status = summary && summary.status ? summary.status : 'unknown';
+      const message = summary && summary.message ? summary.message : '';
+      updateStatusDetail(detailEl, status, message);
+      const detailAwareMessage = detailEl ? '' : (message || '');
       if (status === 'ok') {
-        setBadge(el, true, message);
+        setBadge(el, true, detailAwareMessage);
       } else if (status === 'error') {
-        setBadge(el, false, message);
+        setBadge(el, false, detailAwareMessage || 'Fehler');
       } else if (status === 'warn') {
-        setBadge(el, 'warn', message || 'Warnung');
+        setBadge(el, 'warn', detailAwareMessage || 'Warnung');
       } else if (status === 'skipped') {
-        setBadge(el, 'pending', message || 'Deaktiviert');
+        setBadge(el, 'pending', detailAwareMessage || 'Deaktiviert');
       } else {
-        setBadge(el, 'pending', message || 'Unbekannt');
+        setBadge(el, 'pending', detailAwareMessage || 'Unbekannt');
+      }
+      if (detailEl && message) {
+        el.setAttribute('title', message);
+      } else {
+        el.removeAttribute('title');
       }
     }
 
@@ -1195,23 +1259,23 @@
           const detail = data.detail || response.statusText || response.status;
           throw new Error(String(detail));
         }
-        setHealthBadge(dbStatusBadge, data.database);
-        setHealthBadge(confluentStatusBadge, data.confluent);
-        setHealthBadge(connectorStatusBadge, data.connector);
-        setHealthBadge(backupStatusBadge, data.backup);
-        setHealthBadge(licenseStatusBadge, data.license);
-        setHealthBadge(elasticAgentStatusBadge, data.elastic_agent);
+        setHealthBadge(dbStatusBadge, data.database, dbStatusMessage);
+        setHealthBadge(confluentStatusBadge, data.confluent, confluentStatusMessage);
+        setHealthBadge(connectorStatusBadge, data.connector, connectorStatusMessage);
+        setHealthBadge(backupStatusBadge, data.backup, backupStatusMessage);
+        setHealthBadge(licenseStatusBadge, data.license, licenseStatusMessage);
+        setHealthBadge(elasticAgentStatusBadge, data.elastic_agent, elasticAgentStatusMessage);
       } catch (error) {
         if (showError) {
           const message = error instanceof Error ? error.message : String(error);
           showInfoModal('Statusfehler', message, 'error');
         }
-        setHealthBadge(dbStatusBadge, { status: 'error', message: '' });
-        setHealthBadge(confluentStatusBadge, { status: 'error', message: '' });
-        setHealthBadge(connectorStatusBadge, { status: 'error', message: '' });
-        setHealthBadge(backupStatusBadge, { status: 'error', message: '' });
-        setHealthBadge(licenseStatusBadge, { status: 'error', message: '' });
-        setHealthBadge(elasticAgentStatusBadge, { status: 'error', message: '' });
+        setHealthBadge(dbStatusBadge, { status: 'error', message: '' }, dbStatusMessage);
+        setHealthBadge(confluentStatusBadge, { status: 'error', message: '' }, confluentStatusMessage);
+        setHealthBadge(connectorStatusBadge, { status: 'error', message: '' }, connectorStatusMessage);
+        setHealthBadge(backupStatusBadge, { status: 'error', message: '' }, backupStatusMessage);
+        setHealthBadge(licenseStatusBadge, { status: 'error', message: '' }, licenseStatusMessage);
+        setHealthBadge(elasticAgentStatusBadge, { status: 'error', message: '' }, elasticAgentStatusMessage);
       }
     }
 

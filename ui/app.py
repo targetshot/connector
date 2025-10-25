@@ -2124,6 +2124,27 @@ async def export_backup():
     )
 
 
+def _friendly_meyton_error(exc: Exception, host: str | None = None) -> str:
+    message = str(exc)
+    lowered = message.lower()
+    args = getattr(exc, "args", ())
+    code: int | None = None
+    if isinstance(args, (tuple, list)) and args:
+        first = args[0]
+        if isinstance(first, int):
+            code = first
+    host_hint = f" ({host})" if host else ""
+    if code == 2003 or "can't connect" in lowered or "timed out" in lowered:
+        return f"Keine Antwort von der MeytonDB{host_hint}. Netzwerk oder IP prüfen."
+    if code == 2005 or "getaddrinfo failed" in lowered or "name or service not known" in lowered:
+        return f"MeytonDB-Host{host_hint} nicht gefunden. Adresse kontrollieren."
+    if code == 1045 or "access denied" in lowered:
+        return "MeytonDB-Anmeldung abgelehnt. Benutzer oder Passwort prüfen."
+    if "unknown database" in lowered:
+        return "MeytonDB-Datenbank nicht gefunden. Datenbanknamen prüfen."
+    return f"MeytonDB-Fehler: {_short_error_message(message, 120)}"
+
+
 async def _check_database_health() -> dict[str, str]:
     settings = fetch_settings()
     host = settings.get("db_host")
@@ -2157,7 +2178,7 @@ async def _check_database_health() -> dict[str, str]:
         await asyncio.to_thread(_connect)
         return {"status": "ok", "message": "Verbindung aktiv"}
     except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "message": _short_error_message(str(exc), 140)}
+        return {"status": "error", "message": _friendly_meyton_error(exc, host)}
 
 
 async def _check_confluent_health() -> dict[str, str]:
@@ -2489,7 +2510,7 @@ async def save(
 
     if section_key == "db":
         if not all([db_host, db_port is not None, db_user]):
-            request.session["error_message"] = "Bitte alle MariaDB-Felder ausfüllen."
+            request.session["error_message"] = "Bitte alle MeytonDB-Felder ausfüllen."
             return RedirectResponse("/", status_code=303)
 
         db_host = db_host.strip()
@@ -2501,7 +2522,7 @@ async def save(
         else:
             db_password_value = submitted_password
         if not db_password_value:
-            request.session["error_message"] = "Bitte das MariaDB-Passwort angeben."
+            request.session["error_message"] = "Bitte das MeytonDB-Passwort angeben."
             return RedirectResponse("/", status_code=303)
 
         conn = get_db()
@@ -2529,16 +2550,16 @@ async def save(
 
         try:
             await apply_connector_config()
-            request.session["flash_message"] = "MariaDB-Einstellungen gespeichert & Connector aktualisiert."
+            request.session["flash_message"] = "MeytonDB-Einstellungen gespeichert & Connector aktualisiert."
         except DeferredApplyError as exc:
             request.session["flash_message"] = (
-                "MariaDB-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
+                "MeytonDB-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
                 "sobald die Vereinsdatenbank erreichbar ist. "
                 f"Letzter Fehler: {exc}"
             )
         except ValueError as exc:
             request.session["flash_message"] = (
-                "MariaDB-Einstellungen gespeichert. Connector-Update übersprungen: "
+                "MeytonDB-Einstellungen gespeichert. Connector-Update übersprungen: "
                 f"{exc}"
             )
         except Exception as exc:
@@ -2612,7 +2633,7 @@ async def save(
         else:
             db_password_val = secrets_data.get("db_password")
         if not db_password_val:
-            request.session["error_message"] = "Bitte zuerst die MariaDB-Zugangsdaten speichern (DB-Passwort fehlt)."
+            request.session["error_message"] = "Bitte zuerst die MeytonDB-Zugangsdaten speichern (DB-Passwort fehlt)."
             return RedirectResponse("/", status_code=303)
 
         secrets_data.update(
