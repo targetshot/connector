@@ -1879,8 +1879,14 @@ def build_index_context(request: Request) -> dict:
     license_valid_display: str | None = None
     license_days_remaining: int | None = None
     if license_valid_dt:
-        license_valid_display = license_valid_dt.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        license_valid_display = license_valid_dt.astimezone(timezone.utc).strftime("%d.%m.%Y")
         license_days_remaining = (license_valid_dt.date() - datetime.now(timezone.utc).date()).days
+    license_last_checked_iso = data.get("license_last_checked")
+    license_last_checked_display: str | None = None
+    if license_last_checked_iso:
+        last_checked_dt = _parse_iso8601(license_last_checked_iso)
+        if last_checked_dt:
+            license_last_checked_display = last_checked_dt.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M Uhr")
     status_raw = (data.get("license_status") or "unknown").lower()
     status_labels = {
         "active": "Aktiv",
@@ -1911,7 +1917,8 @@ def build_index_context(request: Request) -> dict:
         "valid_until": license_valid_iso,
         "valid_until_display": license_valid_display,
         "days_remaining": license_days_remaining,
-        "last_checked": data.get("license_last_checked"),
+        "last_checked": license_last_checked_iso,
+        "last_checked_display": license_last_checked_display,
         "customer_email": data.get("license_customer_email"),
         "status_raw": status_raw,
         "activation_id": activation_id,
