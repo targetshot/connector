@@ -1883,10 +1883,15 @@ def build_index_context(request: Request) -> dict:
         license_days_remaining = (license_valid_dt.date() - datetime.now(timezone.utc).date()).days
     license_last_checked_iso = data.get("license_last_checked")
     license_last_checked_display: str | None = None
+    license_last_checked_date_display: str | None = None
+    license_last_checked_time_display: str | None = None
     if license_last_checked_iso:
         last_checked_dt = _parse_iso8601(license_last_checked_iso)
         if last_checked_dt:
-            license_last_checked_display = last_checked_dt.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M Uhr")
+            last_checked_utc = last_checked_dt.astimezone(timezone.utc)
+            license_last_checked_display = last_checked_utc.strftime("%d.%m.%Y %H:%M Uhr")
+            license_last_checked_date_display = last_checked_utc.strftime("%d.%m.%Y")
+            license_last_checked_time_display = last_checked_utc.strftime("%H:%M Uhr")
     status_raw = (data.get("license_status") or "unknown").lower()
     status_labels = {
         "active": "Aktiv",
@@ -1919,6 +1924,8 @@ def build_index_context(request: Request) -> dict:
         "days_remaining": license_days_remaining,
         "last_checked": license_last_checked_iso,
         "last_checked_display": license_last_checked_display,
+        "last_checked_date_display": license_last_checked_date_display,
+        "last_checked_time_display": license_last_checked_time_display,
         "customer_email": data.get("license_customer_email"),
         "status_raw": status_raw,
         "activation_id": activation_id,
