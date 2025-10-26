@@ -496,25 +496,47 @@
                   {% if shooter_error and shooter_count is none %}
                   <p class="mt-1 text-sm font-medium text-rose-600 dark:text-rose-300">{{ shooter_error }}</p>
                   {% else %}
-                  <p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-white">{{ shooter_count if shooter_count is not none else '–' }}</p>
-                  <p class="text-xs text-zinc-500 dark:text-zinc-400">VereinsID {{ shooter_stats.verein_id or '–' }}</p>
-                  <p class="mt-2 text-[0.7rem] text-zinc-500 dark:text-zinc-400">{{ license.shooter_limit_label }}</p>
+                  <p class="mt-1 text-4xl font-semibold text-zinc-900 dark:text-white leading-none">{{ shooter_count if shooter_count is not none else '–' }}</p>
                   {% if shooter_stats.source == 'cache' %}
-                  <p class="text-[0.62rem] text-amber-600 dark:text-amber-300">Hinweis: Anzeige aus Cache (Offline-Puffer nicht erreichbar).</p>
+                  <p class="mt-2 text-[0.65rem] text-amber-600 dark:text-amber-300">Hinweis: Anzeige aus Cache (Offline-Puffer nicht erreichbar).</p>
                   {% elif shooter_error %}
-                  <p class="text-[0.62rem] text-amber-600 dark:text-amber-300">{{ shooter_error }}</p>
+                  <p class="mt-2 text-[0.65rem] text-amber-600 dark:text-amber-300">{{ shooter_error }}</p>
                   {% endif %}
-                  {% if shooter_stats.checked_at %}
-                  <p class="mt-1 text-[0.62rem] text-zinc-500 dark:text-zinc-400">Stand: <span id="shooterStatsChecked" data-iso="{{ shooter_stats.checked_at }}">{{ shooter_stats.checked_at }}</span></p>
                   {% endif %}
-                  {% if shooter_count is not none %}
-                    {% if license.shooter_plan_ok %}
-                    <p class="mt-1 text-xs text-emerald-600 dark:text-emerald-300">Plan {{ license.plan_label }} deckt {{ shooter_count }} Schützen ab.</p>
+                </div>
+              </div>
+              <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <div>
+                    <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">VereinsID</p>
+                    <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">{{ shooter_stats.verein_id or '–' }}</p>
+                  </div>
+                  <div>
+                    <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Planlimit</p>
+                    <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">{{ license.shooter_limit_label }}</p>
+                  </div>
+                  <div>
+                    <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Stand</p>
+                    <p class="mt-1 text-sm text-zinc-800 dark:text-white">
+                      {% if shooter_stats.checked_at %}
+                      <span id="shooterStatsChecked" data-iso="{{ shooter_stats.checked_at }}">{{ shooter_stats.checked_at }}</span>
+                      {% else %}
+                      –
+                      {% endif %}
+                    </p>
+                  </div>
+                  <div>
+                    <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Planabdeckung</p>
+                    {% if shooter_stats.count is not none %}
+                      {% if license.shooter_plan_ok %}
+                      <p class="mt-1 text-sm font-semibold text-emerald-600 dark:text-emerald-300">Plan {{ license.plan_label }} deckt {{ shooter_stats.count }} Schützen ab.</p>
+                      {% else %}
+                      <p class="mt-1 text-sm font-semibold text-rose-600 dark:text-rose-300">Plan {{ license.plan_label }} reicht nicht. Benötigt mindestens: {{ license.shooter_required_plan_label }}.</p>
+                      {% endif %}
                     {% else %}
-                    <p class="mt-1 text-xs text-rose-600 dark:text-rose-300">Plan {{ license.plan_label }} reicht nicht. Benötigt mindestens: {{ license.shooter_required_plan_label }}.</p>
+                      <p class="mt-1 text-sm text-zinc-800 dark:text-white">Keine Daten</p>
                     {% endif %}
-                  {% endif %}
-                  {% endif %}
+                  </div>
                 </div>
               </div>
               <div class="flex flex-wrap gap-3 pt-2">
