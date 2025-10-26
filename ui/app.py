@@ -348,6 +348,15 @@ def _should_refresh_os_updates(state: dict) -> bool:
     return (datetime.now(timezone.utc) - last_check) >= timedelta(seconds=OS_UPDATE_MAX_AGE_SECONDS)
 
 
+def _ensure_ubuntu_host() -> None:
+    os_release = Path("/etc/os-release")
+    if not os_release.exists():
+        raise RuntimeError("Betriebssystem konnte nicht erkannt werden (nur Ubuntu LTS wird unterstützt).")
+    data = os_release.read_text(encoding="utf-8", errors="ignore").lower()
+    if "id=ubuntu" not in data:
+        raise RuntimeError("Dieses System wird nicht unterstützt. Bitte Ubuntu LTS für Betriebssystem-Updates verwenden.")
+
+
 def _short_error_message(raw: str, max_len: int = 180) -> str:
     if not raw:
         return ""
@@ -1028,6 +1037,7 @@ async def _refresh_os_updates_state(*, force: bool = False) -> dict:
         )
     start_ts = _now_utc_iso()
     try:
+        _ensure_ubuntu_host()
         await _run_os_command_logged(
             "apt-get update",
             ["bash", "-lc", "DEBIAN_FRONTEND=noninteractive apt-get update -qq"],
@@ -1061,6 +1071,7 @@ async def _refresh_os_updates_state(*, force: bool = False) -> dict:
             last_check=start_ts,
             last_check_error=message,
         )
+        return await get_os_update_state()
     return await get_os_update_state()
 
 
@@ -1073,6 +1084,7 @@ async def _run_os_updates_job() -> None:
     )
     start_ts = _now_utc_iso()
     try:
+        _ensure_ubuntu_host()
         await _run_os_command_logged(
             "apt-get update",
             ["bash", "-lc", "DEBIAN_FRONTEND=noninteractive apt-get update -qq"],
