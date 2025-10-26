@@ -229,7 +229,7 @@
             <span class="brand-sub text-lg font-semibold">TargetShot Connect</span>
           </a>
           <div class="flex flex-col items-start gap-3 text-sm text-zinc-500 dark:text-zinc-400 sm:flex-row sm:items-center sm:gap-4">
-            <p>Debezium Worker · MeytonDB → Confluent Kafka</p>
+            <p>Daten-Sync (Debezium) · MeytonDB → Cloud-Kafka (Confluent)</p>
             <span class="inline-flex items-center gap-2 rounded-full border border-white/40 bg-white/90 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-zinc-800 shadow-sm shadow-cyan-500/10 supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-white/10 dark:text-white/90">
               <span>Version {{ connect_version }}</span>
               <span class="h-1 w-1 rounded-full bg-accent/80 dark:bg-accent"></span>
@@ -263,14 +263,14 @@
                 <span class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/15 font-semibold text-accent-dark dark:bg-accent/25 dark:text-white">1</span>
                 <div>
                   <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">MeytonDB verbinden</h2>
-                  <p>Trage Host, Port und Zugangsdaten deines Vereinsservers ein, damit Debezium alle Ereignisse erfassen kann.</p>
+                  <p>Trage Host, Port und Zugangsdaten deines Vereinsservers ein, damit der Daten-Sync alle Ereignisse erfassen kann.</p>
                 </div>
               </div>
               <div class="flex items-start gap-3">
                 <span class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/15 font-semibold text-accent-dark dark:bg-accent/25 dark:text-white">2</span>
                 <div>
-                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">Confluent &amp; Topics prüfen</h2>
-                  <p>Hinterlege VereinsID sowie Confluent API Key &amp; Secret – Bootstrap &amp; Topics setzt das System automatisch.</p>
+                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">Cloud-Ziel &amp; Topics prüfen</h2>
+                  <p>Hinterlege VereinsID sowie Cloud-API-Key &amp; Secret – Bootstrap &amp; Topics setzt das System automatisch.</p>
                 </div>
               </div>
               <div class="flex items-start gap-3">
@@ -285,7 +285,7 @@
             <div class="flex flex-wrap items-center gap-3">
               <button type="button" id="btnWorker" class="btn-secondary">Worker-Status</button>
               <span id="statusBadge" class="badge">…</span>
-              <span class="text-xs text-zinc-500 dark:text-zinc-400">Live-Abfrage des aktuellen Debezium Connectors</span>
+              <span class="text-xs text-zinc-500 dark:text-zinc-400">Live-Abfrage des aktuellen Sync-Connectors</span>
             </div>
           <div class="mt-4 grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
@@ -296,14 +296,14 @@
               </div>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
-                <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Confluent</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Cloud-Ziel</p>
                 <div class="mt-2 space-y-1">
                   <span id="confluentStatusBadge" class="badge" aria-live="polite">…</span>
                   <p id="confluentStatusMessage" class="status-detail"></p>
                 </div>
               </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
-              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Debezium Connector</p>
+              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Sync-Connector</p>
               <div class="mt-2 space-y-1">
                 <span id="connectorStatusBadge" class="badge" aria-live="polite">…</span>
                 <p id="connectorStatusMessage" class="status-detail"></p>
@@ -324,7 +324,7 @@
               </div>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
-              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Elastic Agent</p>
+              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Monitoring Agent (Elastic)</p>
               <div class="mt-2 space-y-1">
                 <span id="elasticAgentStatusBadge" class="badge" aria-live="polite">…</span>
                 <p id="elasticAgentStatusMessage" class="status-detail"></p>
@@ -353,7 +353,7 @@
               <input type="hidden" name="section" value="db" />
               <div>
                 <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">MeytonDB-Verbindung</h2>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zugangsdaten deiner Vereinsdatenbank für den Debezium-Connector.</p>
+                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zugangsdaten deiner Vereinsdatenbank für den Sync-Connector.</p>
               </div>
               <div class="grid gap-6 md:grid-cols-2">
                 <div>
@@ -391,8 +391,8 @@
             <input type="hidden" name="section" value="confluent" />
             <div class="space-y-4">
               <div>
-                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Confluent Cloud</h2>
-                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">VereinsID plus API Key &amp; Secret genügen – Bootstrap, Topics &amp; Prefix werden automatisch verwaltet.</p>
+                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Cloud-Ziel (Confluent)</h2>
+                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">VereinsID plus Cloud-API-Key &amp; Secret genügen – Bootstrap, Topics &amp; Prefix werden automatisch verwaltet.</p>
                 </div>
               <div class="rounded-2xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-accent-dark shadow-sm dark:border-accent/30 dark:bg-accent/20 dark:text-white/90">
                 <div class="font-semibold">Standard-Cluster</div>
@@ -412,20 +412,20 @@
             </div>
             <div class="grid gap-6 md:grid-cols-2">
               <div>
-                <label class="input-label" for="confluent_sasl_username">Confluent API Key (Username)</label>
+                <label class="input-label" for="confluent_sasl_username">Cloud-API Key (Confluent)</label>
                 <input id="confluent_sasl_username" name="confluent_sasl_username" class="ts-input" value="{{ data.confluent_sasl_username }}" required />
               </div>
                 <div>
-                  <label class="input-label" for="confluent_sasl_password">Confluent API Secret (Passwort)</label>
+                  <label class="input-label" for="confluent_sasl_password">Cloud-API Secret (Confluent)</label>
                   <input id="confluent_sasl_password" name="confluent_sasl_password" type="password" class="ts-input" placeholder="••••••••" required />
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-3 pt-1">
-                <button type="button" id="btnTestCflt" class="btn-secondary">Test Confluent</button>
+                <button type="button" id="btnTestCflt" class="btn-secondary">Cloud-Verbindung testen</button>
                 <span id="cfltBadge" class="badge">…</span>
               </div>
               <div class="flex flex-wrap gap-3 pt-2">
-                <button type="submit" class="primary-button">Confluent speichern</button>
+                <button type="submit" class="primary-button">Cloud-Zugang speichern</button>
               </div>
             </form>
 
@@ -511,7 +511,7 @@
               <div>
                 <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Offline-Puffer &amp; Backup</h2>
                 <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
-                  Der Offline-Puffer ist dauerhaft aktiv. Alle Debezium-Events werden lokal zwischengespeichert und bei verfügbarer Verbindung automatisch synchronisiert.
+                  Der Offline-Puffer ist dauerhaft aktiv. Alle Sync-Ereignisse werden lokal zwischengespeichert und bei verfügbarer Verbindung automatisch synchronisiert.
                 </p>
                 <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
                   Zugangsdaten und Passwort der Backup-Datenbank werden intern zufällig verwaltet und müssen nicht manuell gepflegt werden.
@@ -541,7 +541,7 @@
         <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
             <div>
               <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Connector-Steuerung</h2>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Starte, pausiere oder prüfe den Debezium Worker direkt aus der UI.</p>
+                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Starte, pausiere oder prüfe den Daten-Sync Worker direkt aus der UI.</p>
               </div>
               <div class="flex flex-wrap gap-3">
                 <button type="button" id="btnPause" class="btn-secondary">Pause</button>
@@ -566,7 +566,7 @@
                   <span>{{ 'secrets.properties vorhanden' if has_secrets else 'secrets.properties wird nach dem ersten Speichern erstellt' }}</span>
                 </div>
                 <p class="rounded-2xl border border-amber-200/70 bg-amber-100/70 px-3 py-2 text-amber-800 shadow-inner dark:border-amber-300/40 dark:bg-amber-500/10 dark:text-amber-200">
-                  <strong>Reset &amp; Re-Snapshot:</strong> Löscht den bestehenden Connector und erstellt ihn neu. Dadurch startet Debezium eine Vollaufnahme der Vereinsdatenbank.
+                  <strong>Reset &amp; Re-Snapshot:</strong> Löscht den bestehenden Connector und erstellt ihn neu. Dadurch startet der Daten-Sync eine Vollaufnahme der Vereinsdatenbank.
                   Benutzer sollten dies nur durchführen, wenn Postgres leer ist oder eine komplette Aktualisierung benötigt wird.
                 </p>
               </div>
@@ -988,7 +988,7 @@
     document.getElementById('btnResume').onclick = () => connectorAction('resume');
     document.getElementById('btnRestart').onclick = () => connectorAction('restart');
     document.getElementById('btnResnapshot').onclick = async () => {
-      const confirmed = await showConfirmModal('Connector zurücksetzen und komplette Datenaufnahme neu starten? Dieser Vorgang löscht den aktuellen Debezium-Status.');
+      const confirmed = await showConfirmModal('Connector zurücksetzen und komplette Datenaufnahme neu starten? Dieser Vorgang löscht den aktuellen Sync-Status.');
       if (!confirmed) return;
       const pw = await askAdminPassword();
       if (!pw) return;
@@ -1000,7 +1000,7 @@
         if (j.pending) {
           alert(j.message || 'Connector-Neuanlage wartet auf die Vereinsdatenbank und wird automatisch fortgesetzt.');
         } else {
-          alert('Connector wurde neu erstellt. Debezium startet jetzt eine Vollaufnahme.');
+          alert('Connector wurde neu erstellt. Der Daten-Sync startet jetzt eine Vollaufnahme.');
         }
       } else {
         alert('Fehler beim Reset: ' + (j.detail || j.error || r.status));

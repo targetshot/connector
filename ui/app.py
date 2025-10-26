@@ -284,6 +284,37 @@ def _short_error_message(raw: str, max_len: int = 180) -> str:
     return message
 
 
+_HTTP_ERROR_PREFIX_RE = re.compile(r"^(GET|POST|PUT|DELETE)\s+\S+\s*->\s*\d{3}:\s*", re.IGNORECASE)
+_APPLY_ERROR_HINTS = (
+    (
+        ("communications link failure", "unable to connect", "jdbc:mysql"),
+        "Keine Verbindung zur Vereinsdatenbank (MySQL). Bitte Host, Port, VPN oder Firewall prüfen.",
+    ),
+    (
+        ("connection refused",),
+        "Die Vereinsdatenbank lehnt Verbindungen ab. Ist der Dienst gestartet und der Port freigegeben?",
+    ),
+    (
+        ("connect timed out", "connection timed out", "timeout"),
+        "Zeitüberschreitung bei der Verbindung zur Vereinsdatenbank. Netzwerkpfad prüfen.",
+    ),
+)
+
+
+def _format_apply_error(raw: str, *, max_len: int = 280) -> str:
+    cleaned = _short_error_message(raw, max_len)
+    cleaned = _HTTP_ERROR_PREFIX_RE.sub("", cleaned).strip(" -")
+    if not cleaned:
+        return _short_error_message(raw, max_len)
+    lowered = cleaned.lower()
+    for markers, hint in _APPLY_ERROR_HINTS:
+        if any(marker in lowered for marker in markers):
+            if hint.lower() in lowered:
+                return cleaned
+            return f"{hint} ({cleaned})"
+    return cleaned
+
+
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -1015,7 +1046,7 @@ def _is_transient_request_error(exc: httpx.RequestError) -> bool:
 
 
 async def _schedule_retry(err_msg: str) -> None:
-    message = _short_error_message(err_msg, 300)
+    message = _format_apply_error(err_msg)
     await merge_apply_state(
         pending=True,
         last_error=message,
@@ -1048,7 +1079,7 @@ async def _connector_retry_worker() -> None:
             except Exception as exc:  # noqa: BLE001
                 await merge_apply_state(
                     pending=True,
-                    last_error=_short_error_message(str(exc), 300),
+                    last_error=_format_apply_error(str(exc)),
                     last_attempt=_now_utc_iso(),
                     next_retry=_next_retry_iso(),
                 )
