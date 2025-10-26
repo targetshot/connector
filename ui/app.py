@@ -200,6 +200,10 @@ AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
 PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
+OS_UPDATE_STATE_PATH = DATA_DIR / "os_update_state.json"
+OS_UPDATE_MAX_AGE_SECONDS = int(os.getenv("TS_CONNECT_OS_UPDATE_MAX_AGE", "21600"))
+OS_UPDATE_LOG_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_LOG_LIMIT", "400"))
+OS_UPDATE_PACKAGE_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_PACKAGE_LIMIT", "80"))
 
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
 
@@ -207,6 +211,9 @@ _update_state_lock = asyncio.Lock()
 _update_job_lock = asyncio.Lock()
 _cached_repo_slug: str | None = None
 _auto_update_task: asyncio.Task | None = None
+_os_update_state_lock = asyncio.Lock()
+_os_update_refresh_lock = asyncio.Lock()
+_os_update_task: asyncio.Task | None = None
 _git_safe_configured = False
 
 logger = logging.getLogger("ts-connect-ui")
@@ -265,6 +272,82 @@ def _next_retry_iso() -> str | None:
     return (datetime.utcnow() + timedelta(seconds=APPLY_RETRY_SECONDS)).replace(microsecond=0).isoformat() + "Z"
 
 
+def _default_os_update_state() -> dict:
+    return {
+        "check_in_progress": False,
+        "update_in_progress": False,
+        "current_action": None,
+        "last_check": None,
+        "last_check_error": None,
+        "last_update": None,
+        "last_update_error": None,
+        "packages": [],
+        "packages_total": 0,
+        "pending_count": 0,
+        "security_count": 0,
+        "log": [],
+    }
+
+
+def _read_os_update_state_unlocked() -> dict:
+    if OS_UPDATE_STATE_PATH.exists():
+        try:
+            data = json.loads(OS_UPDATE_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return _default_os_update_state()
+        state = _default_os_update_state()
+        state.update({k: data.get(k) for k in state.keys()})
+        if not isinstance(state.get("log"), list):
+            state["log"] = []
+        if not isinstance(state.get("packages"), list):
+            state["packages"] = []
+        return state
+    return _default_os_update_state()
+
+
+async def get_os_update_state() -> dict:
+    async with _os_update_state_lock:
+        return _read_os_update_state_unlocked()
+
+
+async def merge_os_update_state(
+    *,
+    log_append: list[str] | None = None,
+    log_reset: bool = False,
+    **updates: Any,
+) -> dict:
+    async with _os_update_state_lock:
+        state = _read_os_update_state_unlocked()
+        if log_reset:
+            state["log"] = []
+        if log_append:
+            log = state.get("log")
+            if not isinstance(log, list):
+                log = []
+            for line in log_append:
+                if not isinstance(line, str):
+                    continue
+                log.append(line)
+            if len(log) > OS_UPDATE_LOG_LIMIT:
+                log = log[-OS_UPDATE_LOG_LIMIT :]
+            state["log"] = log
+        for key, value in updates.items():
+            state[key] = value
+        OS_UPDATE_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8")
+        return state
+
+
+def _should_refresh_os_updates(state: dict) -> bool:
+    if state.get("check_in_progress") or state.get("update_in_progress"):
+        return False
+    last_check = _parse_iso8601(state.get("last_check"))
+    if not last_check:
+        return True
+    if OS_UPDATE_MAX_AGE_SECONDS <= 0:
+        return False
+    return (datetime.now(timezone.utc) - last_check) >= timedelta(seconds=OS_UPDATE_MAX_AGE_SECONDS)
+
+
 def _short_error_message(raw: str, max_len: int = 180) -> str:
     if not raw:
         return ""
@@ -313,6 +396,52 @@ def _format_apply_error(raw: str, *, max_len: int = 280) -> str:
                 return cleaned
             return f"{hint} ({cleaned})"
     return cleaned
+
+
+_APT_LIST_LINE_RE = re.compile(
+    r"^(?P<name>[^/]+)/(?P<section>\S+)\s+(?P<version>\S+)\s+(?P<arch>\S+)\s+\[upgradable from: (?P<current>[^\]]+)\]",
+    re.IGNORECASE,
+)
+
+
+def _parse_upgradable_list(output: str) -> list[dict[str, Any]]:
+    packages: list[dict[str, Any]] = []
+    if not output:
+        return packages
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("listing"):
+            continue
+        match = _APT_LIST_LINE_RE.match(line)
+        if match:
+            data = match.groupdict()
+            name = data.get("name") or line
+            section = data.get("section") or ""
+            version = data.get("version") or ""
+            current = data.get("current") or ""
+            packages.append(
+                {
+                    "name": name,
+                    "section": section,
+                    "version": version,
+                    "current": current,
+                    "arch": data.get("arch") or "",
+                    "security": "security" in section.lower(),
+                }
+            )
+            continue
+        first_token = line.split()[0]
+        packages.append(
+            {
+                "name": first_token,
+                "section": "",
+                "version": "",
+                "current": "",
+                "arch": "",
+                "security": False,
+            }
+        )
+    return packages
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -864,6 +993,124 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         },
     }
     return status
+
+
+def _os_cmd_to_str(cmd: list[str]) -> str:
+    return " ".join(cmd)
+
+
+async def _run_os_command_logged(label: str, cmd: list[str], *, timeout: float | None = None) -> str:
+    await merge_os_update_state(log_append=[f"{label}: {_os_cmd_to_str(cmd)}"])
+    code, stdout, stderr = await _run_command_capture(cmd, timeout=timeout)
+    output = stdout.strip()
+    error_output = stderr.strip()
+    if output:
+        await merge_os_update_state(log_append=output.splitlines())
+    if code != 0:
+        message = error_output or output or f"Exit {code}"
+        raise RuntimeError(f"{label} fehlgeschlagen: {message}")
+    if error_output:
+        await merge_os_update_state(log_append=error_output.splitlines())
+    return output
+
+
+async def _refresh_os_updates_state(*, force: bool = False) -> dict:
+    async with _os_update_refresh_lock:
+        state = await get_os_update_state()
+        if state.get("check_in_progress"):
+            return state
+        if not force and not _should_refresh_os_updates(state):
+            return state
+        await merge_os_update_state(
+            check_in_progress=True,
+            current_action="Paketquellen prüfen",
+            last_check_error=None,
+        )
+    start_ts = _now_utc_iso()
+    try:
+        await _run_os_command_logged(
+            "apt-get update",
+            ["bash", "-lc", "DEBIAN_FRONTEND=noninteractive apt-get update -qq"],
+            timeout=600,
+        )
+        list_output = await _run_os_command_logged(
+            "apt list --upgradable",
+            ["bash", "-lc", "set -o pipefail; apt list --upgradable 2>/dev/null || true"],
+            timeout=180,
+        )
+        packages = _parse_upgradable_list(list_output)
+        packages.sort(key=lambda item: (not item.get("security"), item.get("name", "")))
+        total = len(packages)
+        security_total = sum(1 for pkg in packages if pkg.get("security"))
+        limited = packages[:OS_UPDATE_PACKAGE_LIMIT]
+        await merge_os_update_state(
+            check_in_progress=False,
+            current_action=None,
+            last_check=start_ts,
+            last_check_error=None,
+            packages=limited,
+            packages_total=total,
+            pending_count=total,
+            security_count=security_total,
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = _short_error_message(str(exc), 240)
+        await merge_os_update_state(
+            check_in_progress=False,
+            current_action=None,
+            last_check=start_ts,
+            last_check_error=message,
+        )
+    return await get_os_update_state()
+
+
+async def _run_os_updates_job() -> None:
+    await merge_os_update_state(
+        update_in_progress=True,
+        last_update_error=None,
+        current_action="Systemupdate gestartet",
+        log_reset=True,
+    )
+    start_ts = _now_utc_iso()
+    try:
+        await _run_os_command_logged(
+            "apt-get update",
+            ["bash", "-lc", "DEBIAN_FRONTEND=noninteractive apt-get update -qq"],
+            timeout=600,
+        )
+        await _run_os_command_logged(
+            "apt-get upgrade -y",
+            ["bash", "-lc", "DEBIAN_FRONTEND=noninteractive apt-get -y upgrade"],
+            timeout=1800,
+        )
+        await _run_os_command_logged(
+            "apt-get autoremove -y",
+            ["bash", "-lc", "DEBIAN_FRONTEND=noninteractive apt-get -y autoremove"],
+            timeout=900,
+        )
+        await merge_os_update_state(
+            update_in_progress=False,
+            current_action=None,
+            last_update=start_ts,
+            last_update_error=None,
+        )
+        await _refresh_os_updates_state(force=True)
+    except Exception as exc:  # noqa: BLE001
+        message = _short_error_message(str(exc), 240)
+        await merge_os_update_state(
+            update_in_progress=False,
+            current_action=None,
+            last_update_error=message,
+        )
+
+
+def _os_update_task_done(task: asyncio.Task) -> None:
+    global _os_update_task
+    _os_update_task = None
+    try:
+        task.result()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Systemupdate Hintergrundtask fehlgeschlagen: %s", exc)
 
 
 async def _start_update_runner(target_ref: str | None, repo_slug: str | None, compose_env: bool) -> str:
@@ -2917,6 +3164,30 @@ async def trigger_update(pw: str = Form(...), target: str | None = Form(None)):
     if not result.get("ok"):
         raise HTTPException(status_code=result.get("code", 500), detail=result.get("error"))
     return result
+
+
+@app.get("/api/os-updates/status", dependencies=[Depends(require_session)])
+async def os_updates_status(refresh: bool = False):
+    if refresh:
+        return await _refresh_os_updates_state(force=True)
+    state = await get_os_update_state()
+    if _should_refresh_os_updates(state):
+        return await _refresh_os_updates_state(force=False)
+    return state
+
+
+@app.post("/api/os-updates/apply", dependencies=[Depends(require_session)])
+async def os_updates_apply(pw: str = Form(...)):
+    require_admin(pw)
+    state = await get_os_update_state()
+    if state.get("update_in_progress"):
+        raise HTTPException(status_code=409, detail="Systemupdate läuft bereits.")
+    global _os_update_task
+    if _os_update_task and not _os_update_task.done():
+        raise HTTPException(status_code=409, detail="Systemupdate läuft bereits.")
+    _os_update_task = asyncio.create_task(_run_os_updates_job())
+    _os_update_task.add_done_callback(_os_update_task_done)
+    return {"ok": True}
 
 if __name__ == "__main__":
     import uvicorn

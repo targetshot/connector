@@ -642,6 +642,34 @@
                 <button type="button" id="btnRunUpdate" class="btn-secondary">Update starten</button>
                 <span id="updateStatusHint" class="text-xs text-zinc-500 dark:text-zinc-400"></span>
               </div>
+              <div class="rounded-2xl border border-zinc-200/70 bg-white/70 p-5 text-sm shadow-inner dark:border-white/10 dark:bg-white/5">
+                <div class="flex flex-wrap items-center gap-3">
+                  <span id="osUpdateBadge" class="badge">…</span>
+                  <div>
+                    <p class="font-semibold text-zinc-800 dark:text-white">Betriebssystem-Pakete</p>
+                    <p id="osUpdateSummary" class="text-xs text-zinc-500 dark:text-zinc-400">Status wird geladen…</p>
+                  </div>
+                </div>
+                <div class="mt-4 grid gap-3 text-xs text-zinc-600 dark:text-zinc-300 md:grid-cols-2">
+                  <div>
+                    <p class="font-semibold text-zinc-700 dark:text-zinc-200">Letzte Prüfung</p>
+                    <p id="osUpdateLastChecked">–</p>
+                  </div>
+                  <div>
+                    <p class="font-semibold text-zinc-700 dark:text-zinc-200">Letzte Installation</p>
+                    <p id="osUpdateLastApplied">–</p>
+                  </div>
+                </div>
+                <div id="osUpdateSecurityNotice" class="mt-3 hidden rounded-2xl border border-amber-200/70 bg-amber-50/80 px-3 py-2 text-xs font-medium text-amber-700 shadow-sm dark:border-amber-300/40 dark:bg-amber-900/30 dark:text-amber-100"></div>
+                <ul id="osUpdateList" class="mt-3 space-y-1 text-xs text-zinc-600 dark:text-zinc-300">
+                  <li class="text-zinc-500 dark:text-zinc-400">Pakete werden geladen…</li>
+                </ul>
+                <pre id="osUpdateLog" class="mt-3 hidden max-h-44 overflow-auto whitespace-pre-wrap rounded-2xl bg-black/85 p-3 text-[0.72rem] text-emerald-200 dark:bg-black/60"></pre>
+                <div class="mt-4 flex flex-wrap gap-3">
+                  <button type="button" id="btnCheckOsUpdates" class="btn-secondary">Systemcheck</button>
+                  <button type="button" id="btnApplyOsUpdates" class="btn-secondary">Pakete aktualisieren</button>
+                </div>
+              </div>
             </section>
             </div>
           </div>
@@ -1079,6 +1107,8 @@
     const updateModalLog = document.getElementById('updateModalLog');
     const btnCheckUpdate = document.getElementById('btnCheckUpdate');
     const btnRunUpdate = document.getElementById('btnRunUpdate');
+    const btnCheckOsUpdates = document.getElementById('btnCheckOsUpdates');
+    const btnApplyOsUpdates = document.getElementById('btnApplyOsUpdates');
     const updateStatusHint = document.getElementById('updateStatusHint');
     const dbStatusBadge = document.getElementById('dbStatusBadge');
     const dbStatusMessage = document.getElementById('dbStatusMessage');
@@ -1093,6 +1123,8 @@
     const elasticAgentStatusBadge = document.getElementById('elasticAgentStatusBadge');
     const elasticAgentStatusMessage = document.getElementById('elasticAgentStatusMessage');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
+    const btnCheckOsDefaultText = btnCheckOsUpdates ? btnCheckOsUpdates.textContent : '';
+    const btnApplyOsDefaultText = btnApplyOsUpdates ? btnApplyOsUpdates.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     let updateReloadTimer = null;
     const autoUpdateHour = document.getElementById('autoUpdateHour');
@@ -1101,6 +1133,14 @@
     const btnSaveAuto = document.getElementById('btnSaveAuto');
     let updatePollTimer = null;
     let updateModalVisible = false;
+    const osUpdateBadge = document.getElementById('osUpdateBadge');
+    const osUpdateSummary = document.getElementById('osUpdateSummary');
+    const osUpdateList = document.getElementById('osUpdateList');
+    const osUpdateLastChecked = document.getElementById('osUpdateLastChecked');
+    const osUpdateLastApplied = document.getElementById('osUpdateLastApplied');
+    const osUpdateSecurityNotice = document.getElementById('osUpdateSecurityNotice');
+    const osUpdateLog = document.getElementById('osUpdateLog');
+    let osUpdatePollTimer = null;
 
     function escapeHtml(value) {
       return value.replace(/[&<>"']/g, function (match) {
@@ -1298,6 +1338,170 @@
       }
     }
 
+    function renderOsUpdateState(data) {
+      if (!osUpdateBadge) return;
+      const packages = Array.isArray(data?.packages) ? data.packages : [];
+      const pending = Number(data?.pending_count || 0);
+      const security = Number(data?.security_count || 0);
+      const checkRunning = !!data?.check_in_progress;
+      const updateRunning = !!data?.update_in_progress;
+      const summaryParts = [];
+      if (updateRunning) {
+        summaryParts.push('Installation läuft…');
+      } else if (checkRunning) {
+        summaryParts.push('Prüfung läuft…');
+      } else if (pending > 0) {
+        summaryParts.push(`${pending} Update${pending === 1 ? '' : 's'} verfügbar`);
+      } else {
+        summaryParts.push('Alle Pakete aktuell');
+      }
+      if (security > 0) {
+        summaryParts.push(`${security} Sicherheitsupdate${security === 1 ? '' : 's'}`);
+      }
+      if (data?.last_check_error) {
+        summaryParts.push(`Check-Fehler: ${data.last_check_error}`);
+      }
+      if (data?.last_update_error) {
+        summaryParts.push(`Update-Fehler: ${data.last_update_error}`);
+      }
+      if (osUpdateSummary) {
+        osUpdateSummary.textContent = summaryParts.join(' · ');
+      }
+      if (updateRunning) {
+        setBadge(osUpdateBadge, 'pending', 'Installation läuft…');
+      } else if (checkRunning) {
+        setBadge(osUpdateBadge, 'pending', 'Prüfung läuft…');
+      } else if (pending === 0) {
+        setBadge(osUpdateBadge, true, 'Aktuell');
+      } else {
+        setBadge(osUpdateBadge, 'warn', `${pending} offen`);
+      }
+      if (osUpdateLastChecked) {
+        osUpdateLastChecked.textContent = formatIso(data?.last_check);
+      }
+      if (osUpdateLastApplied) {
+        osUpdateLastApplied.textContent = formatIso(data?.last_update);
+      }
+      if (osUpdateSecurityNotice) {
+        if (security > 0) {
+          osUpdateSecurityNotice.classList.remove('hidden');
+          osUpdateSecurityNotice.textContent = `${security} Sicherheitsupdate${security === 1 ? '' : 's'} warten auf Installation.`;
+        } else {
+          osUpdateSecurityNotice.classList.add('hidden');
+          osUpdateSecurityNotice.textContent = '';
+        }
+      }
+      if (osUpdateList) {
+        const maxEntries = 6;
+        if (!packages.length) {
+          osUpdateList.innerHTML = '<li class="text-zinc-500 dark:text-zinc-400">Keine Updates offen.</li>';
+        } else {
+          const rows = packages.slice(0, maxEntries).map((pkg) => {
+            const name = escapeHtml(pkg?.name || 'paket');
+            const targetVersion = pkg?.version ? escapeHtml(pkg.version) : '';
+            const currentVersion = pkg?.current ? escapeHtml(pkg.current) : '';
+            const versionInfo = targetVersion
+              ? (currentVersion ? `${currentVersion} → ${targetVersion}` : `Version ${targetVersion}`)
+              : (currentVersion ? `Installiert: ${currentVersion}` : '');
+            const badgeClass = pkg?.security
+              ? 'bg-amber-100/80 text-amber-800 dark:bg-amber-900/40 dark:text-amber-100'
+              : 'bg-zinc-200/60 text-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-200';
+            const badgeLabel = pkg?.security
+              ? 'Security'
+              : escapeHtml(pkg?.section || 'Stable');
+            return `<li class="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-white/80 px-3 py-1.5 text-[0.72rem] shadow-sm dark:border-white/10 dark:bg-white/5">
+              <span class="flex flex-col">
+                <span class="font-semibold text-zinc-800 dark:text-white">${name}</span>
+                <span class="text-[0.65rem] text-zinc-500 dark:text-zinc-300">${versionInfo}</span>
+              </span>
+              <span class="rounded-full px-2 py-0.5 text-[0.6rem] font-semibold ${badgeClass}">${badgeLabel}</span>
+            </li>`;
+          });
+          const totalPackages = Number(data?.packages_total || packages.length);
+          if (totalPackages > maxEntries) {
+            rows.push(`<li class="text-[0.7rem] text-zinc-500 dark:text-zinc-400">+${totalPackages - maxEntries} weitere Pakete…</li>`);
+          }
+          osUpdateList.innerHTML = rows.join('');
+        }
+      }
+      if (osUpdateLog) {
+        const logLines = Array.isArray(data?.log) ? data.log : [];
+        const hasLog =
+          (updateRunning || checkRunning || logLines.length > 0) &&
+          logLines.some((line) => typeof line === 'string' && line.trim().length > 0);
+        if (hasLog) {
+          osUpdateLog.classList.remove('hidden');
+          osUpdateLog.textContent = logLines.join('\n') || 'Keine Logausgaben.';
+        } else {
+          osUpdateLog.classList.add('hidden');
+          osUpdateLog.textContent = '';
+        }
+      }
+      if (btnCheckOsUpdates) {
+        const disabled = checkRunning || updateRunning;
+        btnCheckOsUpdates.disabled = disabled;
+        btnCheckOsUpdates.classList.toggle('opacity-60', disabled);
+        btnCheckOsUpdates.classList.toggle('cursor-not-allowed', disabled);
+        if (!disabled && btnCheckOsDefaultText) {
+          btnCheckOsUpdates.textContent = btnCheckOsDefaultText;
+        }
+      }
+      if (btnApplyOsUpdates) {
+        const disabled = updateRunning || pending === 0;
+        btnApplyOsUpdates.disabled = disabled;
+        btnApplyOsUpdates.classList.toggle('opacity-60', disabled);
+        btnApplyOsUpdates.classList.toggle('cursor-not-allowed', disabled);
+        if (!disabled && btnApplyOsDefaultText) {
+          btnApplyOsUpdates.textContent = btnApplyOsDefaultText;
+        }
+      }
+    }
+
+    async function loadOsUpdateStatus(force) {
+      if (!osUpdateBadge) return;
+      if (osUpdatePollTimer) {
+        clearTimeout(osUpdatePollTimer);
+        osUpdatePollTimer = null;
+      }
+      try {
+        const url = force ? '/api/os-updates/status?refresh=1' : '/api/os-updates/status';
+        const response = await fetch(url);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = data.detail || response.statusText || response.status;
+          throw new Error(String(detail));
+        }
+        renderOsUpdateState(data);
+        if (data.update_in_progress || data.check_in_progress) {
+          osUpdatePollTimer = setTimeout(() => {
+            loadOsUpdateStatus(false).catch(() => {});
+          }, 5000);
+        }
+      } catch (error) {
+        if (osUpdateSummary) {
+          osUpdateSummary.textContent = error instanceof Error ? error.message : String(error);
+        }
+        if (osUpdateBadge) {
+          setBadge(osUpdateBadge, false, 'Fehler');
+        }
+        if (btnCheckOsUpdates) {
+          btnCheckOsUpdates.disabled = false;
+          btnCheckOsUpdates.classList.remove('opacity-60', 'cursor-not-allowed');
+          btnCheckOsUpdates.textContent = btnCheckOsDefaultText || 'Systemcheck';
+        }
+        if (btnApplyOsUpdates) {
+          btnApplyOsUpdates.disabled = false;
+          btnApplyOsUpdates.classList.remove('opacity-60', 'cursor-not-allowed');
+          btnApplyOsUpdates.textContent = btnApplyOsDefaultText || 'Pakete aktualisieren';
+        }
+        if (!osUpdatePollTimer) {
+          osUpdatePollTimer = setTimeout(() => {
+            loadOsUpdateStatus(false).catch(() => {});
+          }, 15000);
+        }
+      }
+    }
+
     async function loadUpdateStatus(force) {
       if (!updateStatusBadge) return;
       if (updatePollTimer) {
@@ -1447,6 +1651,45 @@
       };
     }
 
+    if (btnCheckOsUpdates) {
+      btnCheckOsUpdates.onclick = async () => {
+        if (btnCheckOsUpdates.disabled) return;
+        btnCheckOsUpdates.disabled = true;
+        btnCheckOsUpdates.classList.add('opacity-60', 'cursor-not-allowed');
+        btnCheckOsUpdates.textContent = 'Prüfe Pakete…';
+        await loadOsUpdateStatus(true);
+      };
+    }
+
+    if (btnApplyOsUpdates) {
+      btnApplyOsUpdates.onclick = async () => {
+        if (btnApplyOsUpdates.disabled) return;
+        const confirmed = await showConfirmModal('Verfügbare Systemupdates jetzt installieren? Der Vorgang kann einige Minuten dauern.');
+        if (!confirmed) return;
+        const pw = await askAdminPassword();
+        if (!pw) return;
+        const fd = new FormData();
+        fd.append('pw', pw);
+        btnApplyOsUpdates.disabled = true;
+        btnApplyOsUpdates.classList.add('opacity-60', 'cursor-not-allowed');
+        btnApplyOsUpdates.textContent = 'Installation läuft…';
+        try {
+          const response = await fetch('/api/os-updates/apply', { method: 'POST', body: fd });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || !data.ok) {
+            const detail = data.detail || data.error || response.statusText || response.status;
+            throw new Error(detail ? String(detail) : 'Systemupdate konnte nicht gestartet werden.');
+          }
+          showInfoModal('Systemupdate gestartet', 'Pakete werden im Hintergrund aktualisiert. Dieser Vorgang kann einige Minuten dauern.');
+          await loadOsUpdateStatus(true);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          showInfoModal('Systemupdate fehlgeschlagen', message, 'error');
+          await loadOsUpdateStatus(false);
+        }
+      };
+    }
+
     if (btnSaveAuto) {
       btnSaveAuto.onclick = async () => {
         if (btnSaveAuto.disabled) return;
@@ -1474,6 +1717,7 @@
       };
     }
 
+    loadOsUpdateStatus(false).catch(() => {});
     loadUpdateStatus(false).catch(() => {});
     loadHealthSummary(false).catch(() => {});
   </script>
