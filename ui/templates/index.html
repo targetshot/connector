@@ -488,17 +488,28 @@
                     <span id="licenseLastCheckedTime">{{ license.last_checked_time_display or '' }}</span>
                   </p>
                 </div>
+                {% set shooter_stats = license.shooter_stats or {} %}
                 <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
                   <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Vereins-Schützen</p>
-                  {% if license.shooter_stats.error %}
-                  <p class="mt-1 text-sm font-medium text-rose-600 dark:text-rose-300">{{ license.shooter_stats.error }}</p>
+                  {% set shooter_error = shooter_stats.error %}
+                  {% set shooter_count = shooter_stats.count %}
+                  {% if shooter_error and shooter_count is none %}
+                  <p class="mt-1 text-sm font-medium text-rose-600 dark:text-rose-300">{{ shooter_error }}</p>
                   {% else %}
-                  <p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-white">{{ license.shooter_stats.count if license.shooter_stats.count is not none else '–' }}</p>
-                  <p class="text-xs text-zinc-500 dark:text-zinc-400">VereinsID {{ license.shooter_stats.verein_id or '–' }}</p>
+                  <p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-white">{{ shooter_count if shooter_count is not none else '–' }}</p>
+                  <p class="text-xs text-zinc-500 dark:text-zinc-400">VereinsID {{ shooter_stats.verein_id or '–' }}</p>
                   <p class="mt-2 text-[0.7rem] text-zinc-500 dark:text-zinc-400">{{ license.shooter_limit_label }}</p>
-                  {% if license.shooter_stats.count is not none %}
+                  {% if shooter_stats.source == 'cache' %}
+                  <p class="text-[0.62rem] text-amber-600 dark:text-amber-300">Hinweis: Anzeige aus Cache (Offline-Puffer nicht erreichbar).</p>
+                  {% elif shooter_error %}
+                  <p class="text-[0.62rem] text-amber-600 dark:text-amber-300">{{ shooter_error }}</p>
+                  {% endif %}
+                  {% if shooter_stats.checked_at %}
+                  <p class="mt-1 text-[0.62rem] text-zinc-500 dark:text-zinc-400">Stand: <span id="shooterStatsChecked" data-iso="{{ shooter_stats.checked_at }}">{{ shooter_stats.checked_at }}</span></p>
+                  {% endif %}
+                  {% if shooter_count is not none %}
                     {% if license.shooter_plan_ok %}
-                    <p class="mt-1 text-xs text-emerald-600 dark:text-emerald-300">Plan {{ license.plan_label }} deckt {{ license.shooter_stats.count }} Schützen ab.</p>
+                    <p class="mt-1 text-xs text-emerald-600 dark:text-emerald-300">Plan {{ license.plan_label }} deckt {{ shooter_count }} Schützen ab.</p>
                     {% else %}
                     <p class="mt-1 text-xs text-rose-600 dark:text-rose-300">Plan {{ license.plan_label }} reicht nicht. Benötigt: {{ license.shooter_required_plan_label }}.</p>
                     {% endif %}
@@ -1135,6 +1146,7 @@
     const updateStatusHint = document.getElementById('updateStatusHint');
     const licenseLastCheckedDateEl = document.getElementById('licenseLastCheckedDate');
     const licenseLastCheckedTimeEl = document.getElementById('licenseLastCheckedTime');
+    const shooterStatsCheckedEl = document.getElementById('shooterStatsChecked');
     const dbStatusBadge = document.getElementById('dbStatusBadge');
     const dbStatusMessage = document.getElementById('dbStatusMessage');
     const confluentStatusBadge = document.getElementById('confluentStatusBadge');
@@ -1197,6 +1209,20 @@
       if (licenseLastCheckedTimeEl) {
         licenseLastCheckedTimeEl.textContent = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) + ' Uhr';
       }
+    }
+
+    function hydrateShooterTimestamp() {
+      if (!shooterStatsCheckedEl) return;
+      const iso = shooterStatsCheckedEl.dataset.iso;
+      if (!iso) {
+        shooterStatsCheckedEl.textContent = '–';
+        return;
+      }
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) {
+        return;
+      }
+      shooterStatsCheckedEl.textContent = date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     }
 
     function openUpdateProgressModal(statusText) {
@@ -1765,6 +1791,7 @@
     }
 
     hydrateLicenseTimestamp();
+    hydrateShooterTimestamp();
     loadOsUpdateStatus(false).catch(() => {});
     loadUpdateStatus(false).catch(() => {});
     loadHealthSummary(false).catch(() => {});

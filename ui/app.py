@@ -1523,6 +1523,8 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
     add_column("backup_pg_port", "backup_pg_port INTEGER")
     add_column("backup_pg_db", "backup_pg_db TEXT")
     add_column("backup_pg_user", "backup_pg_user TEXT")
+    add_column("shooter_count_cached", "shooter_count_cached INTEGER")
+    add_column("shooter_count_checked_at", "shooter_count_checked_at TEXT")
     conn.commit()
 
     cur = conn.execute("SELECT COUNT(*) as cnt FROM settings")
@@ -1787,7 +1789,8 @@ def fetch_settings() -> dict:
                offline_buffer_enabled, license_tier, retention_days,
                license_key, license_status, license_valid_until, license_last_checked, license_customer_email,
                license_activation_id, license_activated_at,
-               backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
+               backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user,
+               shooter_count_cached, shooter_count_checked_at
         FROM settings WHERE id=1
         """
     )
@@ -1820,63 +1823,94 @@ def fetch_settings() -> dict:
         "backup_pg_port": row["backup_pg_port"] or DEFAULT_BACKUP_PORT,
         "backup_pg_db": row["backup_pg_db"] or DEFAULT_BACKUP_DB,
         "backup_pg_user": row["backup_pg_user"] or DEFAULT_BACKUP_USER,
+        "shooter_count_cached": row["shooter_count_cached"],
+        "shooter_count_checked_at": row["shooter_count_checked_at"],
     }
 
 
 def _collect_shooter_stats_sync(settings: dict, secrets: dict) -> dict[str, Any]:
     verein_id = str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
+    cached_count = settings.get("shooter_count_cached")
+    cached_checked = settings.get("shooter_count_checked_at")
     result: dict[str, Any] = {
         "verein_id": verein_id,
-        "count": None,
+        "count": cached_count,
         "ok": False,
         "error": None,
-        "checked_at": _now_utc_iso(),
+        "checked_at": cached_checked,
+        "source": "cache" if cached_count is not None else None,
     }
     if not verein_id:
         result["error"] = "VereinsID nicht gesetzt."
         return result
-    host = settings.get("db_host")
-    port = settings.get("db_port")
-    user = settings.get("db_user")
-    password = secrets.get("db_password")
-    if not host or not port or not user or not password:
-        result["error"] = "Meyton-Zugangsdaten unvollständig."
+    password = secrets.get("backup_pg_password")
+    if not password:
+        result["error"] = "Offline-Puffer Passwort fehlt."
         return result
+    host = settings.get("backup_pg_host") or DEFAULT_BACKUP_HOST
+    port = int(settings.get("backup_pg_port") or DEFAULT_BACKUP_PORT)
+    database = settings.get("backup_pg_db") or DEFAULT_BACKUP_DB
+    user = settings.get("backup_pg_user") or DEFAULT_BACKUP_USER
 
     def _query() -> int:
-        import pymysql  # local import
-
-        conn = pymysql.connect(
+        with psycopg2.connect(
             host=host,
-            port=int(port),
+            port=port,
+            dbname=database,
             user=user,
             password=password,
             connect_timeout=5,
-            read_timeout=5,
-            write_timeout=5,
-        )
-        try:
-            query = """
-                SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(SportpassID), ''), CONCAT('ID:', SchuetzeID))) AS shooter_count
-                FROM SMDB.Schuetze
-                WHERE VereinsID = %s
-            """
-            with conn.cursor() as cur:
-                cur.execute(query, (verein_id,))
+        ) as connection:
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(
+                        DISTINCT COALESCE(
+                            NULLIF(TRIM(payload -> 'after' ->> 'SportpassID'), ''),
+                            CONCAT('ID:', payload -> 'after' ->> 'SchuetzeID')
+                        )
+                    )
+                    FROM buffer_events
+                    WHERE topic = 'ts.raw.schuetze'
+                      AND payload ? 'after'
+                      AND COALESCE(payload -> 'after' ->> 'VereinsID', '') = %s
+                    """,
+                    (verein_id,),
+                )
                 row = cur.fetchone()
-        finally:
-            conn.close()
         value = row[0] if row else 0
         return int(value or 0)
 
     try:
         count = _query()
     except Exception as exc:  # noqa: BLE001
-        result["error"] = _friendly_meyton_error(exc, host)
+        err = f"Offline-Puffer nicht erreichbar: {_short_error_message(str(exc), 160)}"
+        result["error"] = err
+        if cached_count is not None:
+            result["ok"] = True
+            result["source"] = "cache"
         return result
-    result["count"] = count
-    result["ok"] = True
-    result["checked_at"] = _now_utc_iso()
+
+    checked_at = _now_utc_iso()
+    result.update(
+        {
+            "count": count,
+            "ok": True,
+            "error": None,
+            "checked_at": checked_at,
+            "source": "buffer",
+        }
+    )
+    try:
+        conn = get_db()
+        conn.execute(
+            "UPDATE settings SET shooter_count_cached=?, shooter_count_checked_at=? WHERE id=1",
+            (count, checked_at),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 
@@ -2897,7 +2931,7 @@ async def save(
         shooter_stats = await asyncio.to_thread(_collect_shooter_stats_sync, settings, secrets_data)
         shooter_error = shooter_stats.get("error")
         shooter_count = shooter_stats.get("count")
-        if shooter_error:
+        if shooter_error and shooter_count is None:
             request.session["error_message"] = f"Schützenprüfung fehlgeschlagen: {shooter_error}"
             return RedirectResponse("/", status_code=303)
         if shooter_count is not None and not _plan_allows_shooter_count(plan, shooter_count):
