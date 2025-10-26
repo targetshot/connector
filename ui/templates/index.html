@@ -1573,11 +1573,15 @@
         }
         if (autoUpdateNext) {
           const auto = data.auto_update || {};
-          autoUpdateNext.textContent = auto.enabled && auto.next_run ? formatIso(auto.next_run) : '–';
+          if (auto.enabled) {
+            autoUpdateNext.textContent = auto.next_run_local || (auto.next_run ? formatIso(auto.next_run) : '–');
+          } else {
+            autoUpdateNext.textContent = '–';
+          }
         }
         if (autoUpdateLast) {
           const auto = data.auto_update || {};
-          autoUpdateLast.textContent = auto.last_run ? formatIso(auto.last_run) : '–';
+          autoUpdateLast.textContent = auto.last_run_local || (auto.last_run ? formatIso(auto.last_run) : '–');
         }
         if (btnSaveAuto) {
           const disabled = data.status === 'running';

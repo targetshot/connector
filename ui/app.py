@@ -477,6 +477,15 @@ def _parse_iso8601(timestamp: str | None) -> datetime | None:
         return None
 
 
+def _format_local_timestamp(dt: datetime | None) -> str | None:
+    if not dt:
+        return None
+    local_dt = _to_local(dt)
+    if not local_dt:
+        return None
+    return local_dt.strftime("%d.%m.%Y, %H:%M Uhr")
+
+
 async def configure_git_safety() -> None:
     try:
         await _ensure_git_safe_directory()
@@ -973,8 +982,15 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
     auto_hour = _sanitize_hour(state.get("auto_update_hour"))
     auto_last_run = state.get("auto_update_last_run")
     next_auto_run_iso = None
+    auto_last_run_local_display: str | None = None
+    if auto_last_run:
+        last_run_dt = _parse_iso8601(auto_last_run)
+        auto_last_run_local_display = _format_local_timestamp(last_run_dt)
+    next_auto_run_local_display: str | None = None
     if auto_enabled:
-        next_auto_run_iso = _calculate_next_auto_run(auto_hour, auto_last_run).isoformat().replace("+00:00", "Z")
+        next_dt_utc = _calculate_next_auto_run(auto_hour, auto_last_run)
+        next_auto_run_iso = next_dt_utc.isoformat().replace("+00:00", "Z")
+        next_auto_run_local_display = _format_local_timestamp(next_dt_utc)
     status: dict[str, Any] = {
         "ok": True,
         "status": state.get("status", "idle"),
@@ -998,7 +1014,9 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
             "enabled": auto_enabled,
             "hour": auto_hour,
             "last_run": auto_last_run,
+            "last_run_local": auto_last_run_local_display,
             "next_run": next_auto_run_iso,
+            "next_run_local": next_auto_run_local_display,
         },
     }
     return status
@@ -2215,10 +2233,11 @@ def build_index_context(request: Request) -> dict:
     if license_last_checked_iso:
         last_checked_dt = _parse_iso8601(license_last_checked_iso)
         if last_checked_dt:
-            last_checked_utc = last_checked_dt.astimezone(timezone.utc)
-            license_last_checked_display = last_checked_utc.strftime("%d.%m.%Y %H:%M Uhr")
-            license_last_checked_date_display = last_checked_utc.strftime("%d.%m.%Y")
-            license_last_checked_time_display = last_checked_utc.strftime("%H:%M Uhr")
+            last_checked_local = _to_local(last_checked_dt)
+            if last_checked_local:
+                license_last_checked_display = last_checked_local.strftime("%d.%m.%Y, %H:%M Uhr")
+                license_last_checked_date_display = last_checked_local.strftime("%d.%m.%Y")
+                license_last_checked_time_display = last_checked_local.strftime("%H:%M Uhr")
     status_raw = (data.get("license_status") or "unknown").lower()
     status_labels = {
         "active": "Aktiv",
