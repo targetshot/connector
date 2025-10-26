@@ -47,6 +47,12 @@ LICENSE_RETENTION_DAYS = {
     "plus": 30,
     "pro": 90,
 }
+LICENSE_PLAN_RULES = {
+    "basic": {"min": 0, "max": 29, "label": "Bis 29 Schützen"},
+    "plus": {"min": 30, "max": 89, "label": "30 – 89 Schützen"},
+    "pro": {"min": 90, "max": None, "label": "Ab 90 Schützen"},
+}
+LICENSE_PLAN_ORDER = ["basic", "plus", "pro"]
 DEFAULT_LICENSE_TIER = os.getenv("TS_CONNECT_DEFAULT_LICENSE_TIER", "basic").strip().lower()
 if DEFAULT_LICENSE_TIER not in LICENSE_RETENTION_DAYS:
     DEFAULT_LICENSE_TIER = "basic"
@@ -146,6 +152,50 @@ _DEFAULT_VARIANT_MAP = {
     "1056379": "pro",
 }
 LEMON_VARIANT_PLAN_MAP = _parse_variant_plan_map(LEMON_VARIANT_PLAN_MAP_RAW)
+
+
+def _plan_display_name(plan: str | None) -> str:
+    if not plan:
+        return "Unbekannt"
+    return _normalize_license_tier(plan).capitalize()
+
+
+def _plan_limit_label(plan: str) -> str:
+    plan = _normalize_license_tier(plan)
+    info = LICENSE_PLAN_RULES.get(plan, LICENSE_PLAN_RULES["basic"])
+    min_value = info.get("min")
+    max_value = info.get("max")
+    label = info.get("label")
+    if label:
+        return label
+    if max_value is None and min_value is not None:
+        return f"Ab {min_value} Schützen"
+    if min_value is None and max_value is not None:
+        return f"Bis {max_value} Schützen"
+    if min_value is not None and max_value is not None:
+        return f"{min_value} – {max_value} Schützen"
+    return "Schützenlimit unbekannt"
+
+
+def _plan_allows_shooter_count(plan: str, count: int | None) -> bool:
+    if count is None:
+        return True
+    info = LICENSE_PLAN_RULES.get(_normalize_license_tier(plan), LICENSE_PLAN_RULES["basic"])
+    min_value = info.get("min")
+    max_value = info.get("max")
+    if min_value is not None and count < min_value:
+        return False
+    if max_value is not None and count > max_value:
+        return False
+    return True
+
+
+def _required_plan_for_shooter_count(count: int | None) -> str:
+    if count is None or count <= 29:
+        return "basic"
+    if count <= 89:
+        return "plus"
+    return "pro"
 
 
 def _write_json_log(filename: str, payload: dict) -> None:
@@ -1773,6 +1823,63 @@ def fetch_settings() -> dict:
     }
 
 
+def _collect_shooter_stats_sync(settings: dict, secrets: dict) -> dict[str, Any]:
+    verein_id = str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
+    result: dict[str, Any] = {
+        "verein_id": verein_id,
+        "count": None,
+        "ok": False,
+        "error": None,
+        "checked_at": _now_utc_iso(),
+    }
+    if not verein_id:
+        result["error"] = "VereinsID nicht gesetzt."
+        return result
+    host = settings.get("db_host")
+    port = settings.get("db_port")
+    user = settings.get("db_user")
+    password = secrets.get("db_password")
+    if not host or not port or not user or not password:
+        result["error"] = "Meyton-Zugangsdaten unvollständig."
+        return result
+
+    def _query() -> int:
+        import pymysql  # local import
+
+        conn = pymysql.connect(
+            host=host,
+            port=int(port),
+            user=user,
+            password=password,
+            connect_timeout=5,
+            read_timeout=5,
+            write_timeout=5,
+        )
+        try:
+            query = """
+                SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(SportpassID), ''), CONCAT('ID:', SchuetzeID))) AS shooter_count
+                FROM SMDB.Schuetze
+                WHERE VereinsID = %s
+            """
+            with conn.cursor() as cur:
+                cur.execute(query, (verein_id,))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        value = row[0] if row else 0
+        return int(value or 0)
+
+    try:
+        count = _query()
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = _friendly_meyton_error(exc, host)
+        return result
+    result["count"] = count
+    result["ok"] = True
+    result["checked_at"] = _now_utc_iso()
+    return result
+
+
 def write_secrets_file(values: dict[str, str]) -> None:
     if not values:
         if SECRETS_PATH.exists():
@@ -2283,6 +2390,20 @@ def build_index_context(request: Request) -> dict:
     verein_identifier = str(data.get("topic_prefix") or data.get("server_id") or "").strip()
     data["verein_id"] = verein_identifier
 
+    shooter_stats = _collect_shooter_stats_sync(data, secrets_data)
+    shooter_count = shooter_stats.get("count")
+    required_plan = _required_plan_for_shooter_count(shooter_count)
+    plan_ok = _plan_allows_shooter_count(license_info["plan"], shooter_count)
+    license_info.update(
+        {
+            "shooter_stats": shooter_stats,
+            "shooter_plan_ok": plan_ok,
+            "shooter_required_plan": required_plan,
+            "shooter_required_plan_label": _plan_display_name(required_plan) if required_plan else None,
+            "shooter_limit_label": _plan_limit_label(license_info["plan"]),
+        }
+    )
+
     return {
         "request": request,
         "data": data,
@@ -2772,6 +2893,22 @@ async def save(
         if license_key_value != current_license:
             new_activation_id = ""
             new_activation_at = None
+
+        shooter_stats = await asyncio.to_thread(_collect_shooter_stats_sync, settings, secrets_data)
+        shooter_error = shooter_stats.get("error")
+        shooter_count = shooter_stats.get("count")
+        if shooter_error:
+            request.session["error_message"] = f"Schützenprüfung fehlgeschlagen: {shooter_error}"
+            return RedirectResponse("/", status_code=303)
+        if shooter_count is not None and not _plan_allows_shooter_count(plan, shooter_count):
+            required_plan = _required_plan_for_shooter_count(shooter_count)
+            required_label = _plan_display_name(required_plan)
+            limit_label = _plan_limit_label(plan)
+            request.session["error_message"] = (
+                f"Plan {plan.capitalize()} erlaubt nur {limit_label}. "
+                f"Für {shooter_count} Schützen wird mindestens der Plan {required_label} benötigt."
+            )
+            return RedirectResponse("/", status_code=303)
 
         activation_feedback: dict[str, Any] | None = None
         activation_error: str | None = None

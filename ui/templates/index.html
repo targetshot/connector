@@ -450,7 +450,7 @@
                 </div>
               </div>
               <input type="hidden" name="license_action" id="license_action" value="validate" />
-              <div class="grid gap-4 md:grid-cols-3">
+              <div class="grid gap-4 md:grid-cols-4">
                 <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
                   <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Status</p>
                   {% set license_days = license.days_remaining %}
@@ -487,6 +487,23 @@
                   <p class="text-xs text-zinc-500 dark:text-zinc-400">
                     <span id="licenseLastCheckedTime">{{ license.last_checked_time_display or '' }}</span>
                   </p>
+                </div>
+                <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200">
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Vereins-Schützen</p>
+                  {% if license.shooter_stats.error %}
+                  <p class="mt-1 text-sm font-medium text-rose-600 dark:text-rose-300">{{ license.shooter_stats.error }}</p>
+                  {% else %}
+                  <p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-white">{{ license.shooter_stats.count if license.shooter_stats.count is not none else '–' }}</p>
+                  <p class="text-xs text-zinc-500 dark:text-zinc-400">VereinsID {{ license.shooter_stats.verein_id or '–' }}</p>
+                  <p class="mt-2 text-[0.7rem] text-zinc-500 dark:text-zinc-400">{{ license.shooter_limit_label }}</p>
+                  {% if license.shooter_stats.count is not none %}
+                    {% if license.shooter_plan_ok %}
+                    <p class="mt-1 text-xs text-emerald-600 dark:text-emerald-300">Plan {{ license.plan_label }} deckt {{ license.shooter_stats.count }} Schützen ab.</p>
+                    {% else %}
+                    <p class="mt-1 text-xs text-rose-600 dark:text-rose-300">Plan {{ license.plan_label }} reicht nicht. Benötigt: {{ license.shooter_required_plan_label }}.</p>
+                    {% endif %}
+                  {% endif %}
+                  {% endif %}
                 </div>
               </div>
               <div class="flex flex-wrap gap-3 pt-2">
