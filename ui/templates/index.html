@@ -511,7 +511,7 @@
                     {% if license.shooter_plan_ok %}
                     <p class="mt-1 text-xs text-emerald-600 dark:text-emerald-300">Plan {{ license.plan_label }} deckt {{ shooter_count }} Schützen ab.</p>
                     {% else %}
-                    <p class="mt-1 text-xs text-rose-600 dark:text-rose-300">Plan {{ license.plan_label }} reicht nicht. Benötigt: {{ license.shooter_required_plan_label }}.</p>
+                    <p class="mt-1 text-xs text-rose-600 dark:text-rose-300">Plan {{ license.plan_label }} reicht nicht. Benötigt mindestens: {{ license.shooter_required_plan_label }}.</p>
                     {% endif %}
                   {% endif %}
                   {% endif %}

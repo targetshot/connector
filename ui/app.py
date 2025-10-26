@@ -180,14 +180,11 @@ def _plan_limit_label(plan: str) -> str:
 def _plan_allows_shooter_count(plan: str, count: int | None) -> bool:
     if count is None:
         return True
-    info = LICENSE_PLAN_RULES.get(_normalize_license_tier(plan), LICENSE_PLAN_RULES["basic"])
-    min_value = info.get("min")
-    max_value = info.get("max")
-    if min_value is not None and count < min_value:
-        return False
-    if max_value is not None and count > max_value:
-        return False
-    return True
+    plan = _normalize_license_tier(plan)
+    required_plan = _required_plan_for_shooter_count(count)
+    required_index = LICENSE_PLAN_ORDER.index(required_plan)
+    current_index = LICENSE_PLAN_ORDER.index(plan)
+    return current_index >= required_index
 
 
 def _required_plan_for_shooter_count(count: int | None) -> str:
@@ -2939,7 +2936,7 @@ async def save(
             required_label = _plan_display_name(required_plan)
             limit_label = _plan_limit_label(plan)
             request.session["error_message"] = (
-                f"Plan {plan.capitalize()} erlaubt nur {limit_label}. "
+                f"Plan {plan.capitalize()} reicht nicht aus (Limit: {limit_label}). "
                 f"Für {shooter_count} Schützen wird mindestens der Plan {required_label} benötigt."
             )
             return RedirectResponse("/", status_code=303)
