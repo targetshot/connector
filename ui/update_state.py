@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 import threading
@@ -25,6 +26,46 @@ def _default_state() -> dict[str, Any]:
     }
 
 
+def _tmp_path_for(path: Path) -> Path:
+    return path.with_name(f".{path.name}.tmp")
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        dir_fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def _atomic_write_text(path: Path, data: str, *, mode: int | None = None) -> None:
+    directory = path.parent
+    tmp_path = _tmp_path_for(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    if mode is not None:
+        os.chmod(path, mode)
+    _fsync_directory(directory)
+
+
 class UpdateStateManager:
     def __init__(self, path: Path, *, log_limit: int = 400) -> None:
         self.path = path
@@ -46,9 +87,7 @@ class UpdateStateManager:
         return state
 
     def write(self, state: dict[str, Any]) -> dict[str, Any]:
-        tmp_path = self.path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(self.path)
+        _atomic_write_text(self.path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
         return state
 
     def merge(self, *, log_append: list[str] | None = None, log_reset: bool = False, **updates: Any) -> dict[str, Any]:

@@ -309,7 +309,7 @@ async def merge_apply_state(**updates) -> dict:
     async with _apply_state_lock:
         state = _read_apply_state_unlocked()
         state.update(updates)
-        APPLY_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8")
+        _atomic_write_text(APPLY_STATE_PATH, json.dumps(state, ensure_ascii=False) + "\n")
         return state
 
 
@@ -380,7 +380,7 @@ async def merge_os_update_state(
             state["log"] = log
         for key, value in updates.items():
             state[key] = value
-        OS_UPDATE_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8")
+        _atomic_write_text(OS_UPDATE_STATE_PATH, json.dumps(state, ensure_ascii=False) + "\n")
         return state
 
 
@@ -1668,7 +1668,7 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         "emit.checkpoints.enabled = true",
         "refresh.topics.interval.seconds = 30",
     ]
-    MM2_CONFIG_PATH.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
+    _atomic_write_text(MM2_CONFIG_PATH, "\n".join(config_lines) + "\n")
 
 
 def _build_backup_sink_config(settings: dict, secrets: dict) -> dict:
@@ -1911,14 +1911,65 @@ def _collect_shooter_stats_sync(settings: dict, secrets: dict) -> dict[str, Any]
     return result
 
 
+def _fsync_directory(path: Path) -> None:
+    """Best effort fsync to persist metadata updates inside parent directory."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        dir_fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def _tmp_path_for(path: Path) -> Path:
+    return path.with_name(f".{path.name}.tmp")
+
+
+def _atomic_write_text(path: Path, data: str, *, mode: int | None = None) -> None:
+    directory = path.parent
+    tmp_path = _tmp_path_for(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    if mode is not None:
+        os.chmod(path, mode)
+    _fsync_directory(directory)
+
+
 def write_secrets_file(values: dict[str, str]) -> None:
+    secrets_dir = SECRETS_PATH.parent
+    tmp_path = _tmp_path_for(SECRETS_PATH)
     if not values:
         if SECRETS_PATH.exists():
             SECRETS_PATH.unlink()
+            _fsync_directory(secrets_dir)
+        if tmp_path.exists():
+            tmp_path.unlink()
         return
     lines = [f"{key}={value}" for key, value in sorted(values.items()) if value is not None]
-    SECRETS_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.chmod(SECRETS_PATH, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)  # 0644 allows read across containers
+    payload = "\n".join(lines) + "\n"
+
+    _atomic_write_text(
+        SECRETS_PATH,
+        payload,
+        mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
+    )
 
 
 def read_secrets_file() -> dict:
@@ -1936,10 +1987,18 @@ def read_secrets_file() -> dict:
 def store_license_key(value: str) -> None:
     value = (value or "").strip()
     if value:
-        LICENSE_KEY_FILE.write_text(value + "\n", encoding="utf-8")
-        os.chmod(LICENSE_KEY_FILE, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
-    elif LICENSE_KEY_FILE.exists():
+        _atomic_write_text(
+            LICENSE_KEY_FILE,
+            value + "\n",
+            mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
+        )
+        return
+    tmp_path = _tmp_path_for(LICENSE_KEY_FILE)
+    if LICENSE_KEY_FILE.exists():
         LICENSE_KEY_FILE.unlink()
+        _fsync_directory(LICENSE_KEY_FILE.parent)
+    if tmp_path.exists():
+        tmp_path.unlink()
 
 
 def _license_meta_path() -> Path:
@@ -1961,9 +2020,16 @@ def write_license_meta(data: dict[str, Any]) -> None:
     if not data:
         if path.exists():
             path.unlink()
+            _fsync_directory(path.parent)
+        tmp_path = _tmp_path_for(path)
+        if tmp_path.exists():
+            tmp_path.unlink()
         return
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    _atomic_write_text(
+        path,
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
+    )
 
 
 def _license_is_active(settings: dict) -> bool:
@@ -2096,8 +2162,11 @@ def _hash_admin_password(plain: str, salt_hex: str | None = None) -> tuple[str, 
 
 def set_admin_password(new_password: str) -> None:
     salt_hex, hash_hex = _hash_admin_password(new_password)
-    ADMIN_PASSWORD_FILE.write_text(f"{salt_hex}:{hash_hex}\n", encoding="utf-8")
-    os.chmod(ADMIN_PASSWORD_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    _atomic_write_text(
+        ADMIN_PASSWORD_FILE,
+        f"{salt_hex}:{hash_hex}\n",
+        mode=stat.S_IRUSR | stat.S_IWUSR,
+    )
 
 
 def _read_admin_password_record() -> str:
@@ -2582,7 +2651,10 @@ async def export_backup():
                     password=password,
                     connect_timeout=5,
                 ) as connection:
-                    connection.autocommit = True
+                    try:
+                        connection.set_session(readonly=True, autocommit=False)
+                    except Exception:  # noqa: BLE001
+                        pass
                     with connection.cursor(name="buffer_export") as cur:
                         cur.itersize = 1000
                         cur.execute(
