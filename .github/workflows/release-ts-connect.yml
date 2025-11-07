@@ -4,10 +4,6 @@ on:
   release:
     types: [published]
 
-permissions:
-  contents: read
-  id-token: write
-
 env:
   IMAGE_NAME: ts-connect
   ACR_NAME: ${{ secrets.AZURE_ACR_NAME }}
@@ -16,6 +12,9 @@ env:
 
 jobs:
   build-push-sign:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
