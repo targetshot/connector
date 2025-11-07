@@ -23,6 +23,40 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _registry_from_image(image: str | None) -> str | None:
+    if not image or "/" not in image:
+        return None
+    candidate = image.split("/", 1)[0]
+    if "." in candidate or ":" in candidate:
+        return candidate
+    return None
+
+
+def _docker_login(registry: str, username: str, password: str, *, cwd: Path, manager: UpdateStateManager) -> None:
+    if not registry or not username or not password:
+        return
+    manager.merge(log_append=[f"Docker Login bei {registry}"], current_action="Docker Login")
+    cmd = ["docker", "login", registry, "-u", username, "--password-stdin"]
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        text=True,
+        input=f"{password}\n",
+        capture_output=True,
+        env=_command_env(),
+        check=False,
+    )
+    lines: list[str] = []
+    if result.stdout:
+        lines.extend(line for line in result.stdout.splitlines() if line.strip())
+    if result.stderr:
+        lines.extend(line for line in result.stderr.splitlines() if line.strip())
+    if lines:
+        manager.merge(log_append=lines)
+    if result.returncode != 0:
+        raise CommandError("Docker-Login fehlgeschlagen")
+
+
 def _now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
@@ -235,6 +269,14 @@ def run_update() -> int:
             manager.merge(log_append=["Lade Container-Images"], current_action="docker compose pull")
         compose_cmd = _compose_base(compose_env)
         if not prefer_local_build:
+            registry = os.getenv("TS_CONNECT_ACR_REGISTRY") or _registry_from_image(os.getenv("TS_CONNECT_UI_IMAGE"))
+            username = os.getenv("TS_CONNECT_ACR_USERNAME", "").strip()
+            password = os.getenv("TS_CONNECT_ACR_PASSWORD", "")
+            if registry and username and password:
+                try:
+                    _docker_login(registry, username, password, cwd=workspace, manager=manager)
+                except CommandError as exc:  # noqa: PERF203
+                    raise RuntimeError(str(exc)) from exc
             _run_command(compose_cmd + ["pull"], cwd=workspace, manager=manager)
         manager.merge(log_append=["Stoppe Dienste"], current_action="docker compose down")
         _run_command(compose_cmd + ["down", "--remove-orphans"], cwd=workspace, manager=manager)
