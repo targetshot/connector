@@ -6,8 +6,8 @@ on:
 
 env:
   IMAGE_NAME: ts-connect
-  ACR_NAME: ${{ secrets.AZURE_ACR_NAME }}
-  REGISTRY: ${{ secrets.AZURE_ACR_NAME }}.azurecr.io
+  ACR_NAME: targetshot
+  REGISTRY: targetshot.azurecr.io
   VERSION: ${{ github.event.release.tag_name }}
 
 jobs:
@@ -56,20 +56,15 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Force correct subscription
-        run: az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+        run: az account set --subscription "e4d628f6-ede4-4af9-8310-b25724a71961"
 
-      - name: Verify Azure context (ACR reachable)
+      - name: Verify Azure context
         run: |
-          echo "ACR_NAME=${ACR_NAME}"
-          echo "REGISTRY=${REGISTRY}"
           az account show --query "{sub:id, name:name}" -o table
-          echo "Registries in this subscription:"
-          az acr list -o table
-          echo "Show target registry:"
-          az acr show -n "${ACR_NAME}" -o table
+          az acr show --subscription "e4d628f6-ede4-4af9-8310-b25724a71961" -n "${ACR_NAME}" -o table
 
       - name: Login to ACR
-        run: az acr login --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" --name "${ACR_NAME}"
+        run: az acr login --subscription "e4d628f6-ede4-4af9-8310-b25724a71961" --name "${ACR_NAME}"
 
       - name: Build and push multi-arch image
         id: build
@@ -97,7 +92,7 @@ jobs:
         run: |
           set -eux
           az acr import \
-            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --subscription "e4d628f6-ede4-4af9-8310-b25724a71961" \
             --name "${ACR_NAME}" \
             --source "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" \
             --image "${IMAGE_NAME}:beta" \
