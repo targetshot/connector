@@ -12,6 +12,7 @@ env:
 
 jobs:
   build-push-sign:
+    environment: release
     permissions:
       contents: read
       id-token: write
