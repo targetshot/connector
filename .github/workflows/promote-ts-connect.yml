@@ -64,11 +64,10 @@ jobs:
             DIGEST="${SOURCE}"
           else
             echo "Resolving digest for tag ${SOURCE}"
-            DIGEST=$(az acr repository show-manifest \
+            DIGEST=$(az acr repository show \
               --subscription "${AZURE_SUBSCRIPTION_ID}" \
               --name "${ACR_NAME}" \
-              --repository "${IMAGE_NAME}" \
-              --tag "${SOURCE}" \
+              --image "${IMAGE_NAME}:${SOURCE}" \
               --query digest -o tsv)
           fi
           if [ -z "${DIGEST}" ]; then
