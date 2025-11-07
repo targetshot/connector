@@ -140,6 +140,7 @@ services:
       TS_CONNECT_WORKSPACE: /workspace
       TS_CONNECT_DATA_DIR: /app/data
       TS_CONNECT_DOCKER_SOCKET: /var/run/docker.sock
+      ELASTIC_AGENT_ENABLED: ${ELASTIC_AGENT_ENABLED:-false}
     depends_on:
       - kafka-connect
     volumes:
@@ -150,6 +151,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
   elastic-agent:
+    profiles:
+      - elastic
     image: docker.elastic.co/beats/elastic-agent:8.15.3
     container_name: ts-elastic-agent
     restart: unless-stopped

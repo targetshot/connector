@@ -76,6 +76,7 @@ LEMON_VARIANT_PLAN_MAP_RAW = os.getenv("TS_LICENSE_VARIANT_PLAN_MAP", "")
 LEMON_INSTANCE_NAME = os.getenv("TS_LICENSE_INSTANCE_NAME", "").strip()
 LEMON_INSTANCE_ID = os.getenv("TS_LICENSE_INSTANCE_ID", "").strip()
 LEMON_ACTIVATION_ENABLED = os.getenv("TS_LICENSE_AUTO_ACTIVATE", "true").lower() in {"1", "true", "yes", "on"}
+ELASTIC_AGENT_ENABLED = os.getenv("ELASTIC_AGENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_license_tier(value: str | None) -> str:
@@ -2824,6 +2825,8 @@ async def _check_license_health() -> dict[str, str]:
 
 
 async def _check_elastic_agent_health() -> dict[str, str]:
+    if not ELASTIC_AGENT_ENABLED:
+        return {"status": "skipped", "message": "Deaktiviert"}
     try:
         code, status_output = await _run_command_text(
             ["docker", "ps", "--filter", "name=ts-elastic-agent", "--format", "{{.Status}}"],

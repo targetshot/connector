@@ -30,6 +30,7 @@ docker compose up -d
 - `mirror-maker`: Kafka MirrorMaker 2, spiegelt `ts.raw.*`-Topics in die Confluent Cloud sobald erreichbar
 - `streams-transform`: Kafka Streams Anwendung, die Vereins-Topics auf einheitliche Confluent-Topics mapped
 - `backup-db`: lokaler PostgreSQL-Puffer für Offline-Backups
+- *(optional)* `elastic-agent`: Elastic Fleet Client für Logs & Metriken (per `docker compose --profile elastic up -d` aktivieren)
 
 ### Notes
 - UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `compose.env` for localhost-only access.
@@ -64,6 +65,9 @@ docker compose up -d
 - Die Cloud-Replikation (MirrorMaker) startet erst, wenn die Lizenz aktiviert wurde; bis dahin verbleiben alle Events ausschließlich im lokalen Puffer.
 
 ### Zentrales Monitoring mit Elastic Agent
+- Standardmäßig bleibt der Elastic Agent deaktiviert (Health-Badge zeigt „Deaktiviert“).
+- Aktiviere ihn bei Bedarf mit `docker compose --profile elastic up -d` oder setze `COMPOSE_PROFILES=elastic`.
+- Setze zusätzlich `ELASTIC_AGENT_ENABLED=true`, damit die UI den Health-Check aktiviert.
 - `elastic-agent` joined automatisch deine Elastic-Fleet, sobald `ELASTIC_FLEET_URL` und `ELASTIC_FLEET_ENROLLMENT_TOKEN` gesetzt sind.
 - Der Agent läuft vollständig im Fleet-Modus (kein `inputs.d`). Konfiguriere Docker-, System- und Log-Integrationen direkt in Kibana → Fleet für deine Policy.
 - Persistenter Agent-State liegt unter `./elastic-agent/state`, damit Upgrades und Reboots sauber durchlaufen.
