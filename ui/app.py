@@ -967,21 +967,24 @@ async def _inspect_container_mounts() -> tuple[dict[str, str], str | None]:
 async def _fetch_latest_release(repo_slug: str) -> dict[str, Any] | None:
     if not repo_slug:
         return None
-    headers = {"Accept": "application/vnd.github+json"}
+    url = f"https://raw.githubusercontent.com/{repo_slug}/main/ts-connect/VERSION"
+    headers = {}
     if GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    url = f"https://api.github.com/repos/{repo_slug}/releases/latest"
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.get(url, headers=headers)
     if response.status_code == 404:
         return None
     response.raise_for_status()
-    payload = response.json()
+    version = (response.text or "").strip()
+    if not version:
+        return None
+    version_url = f"https://github.com/{repo_slug}/blob/main/ts-connect/VERSION"
     return {
-        "tag_name": payload.get("tag_name"),
-        "name": payload.get("name") or payload.get("tag_name"),
-        "published_at": payload.get("published_at"),
-        "html_url": payload.get("html_url"),
+        "tag_name": version,
+        "name": f"Version {version}",
+        "published_at": None,
+        "html_url": version_url,
     }
 
 

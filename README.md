@@ -31,6 +31,11 @@ docker compose up -d
   With Watchtower: `containrrr/watchtower --interval 900 --rolling-restart`.
 - Cosign signatures stay valid across promotions because tags all reference the same digest; verification tooling should pin to the digest rather than the floating channel tag.
 
+### Updates & Rollout
+- `compose.yml` references `${TS_CONNECT_UI_IMAGE:-targetshot.azurecr.io/ts-connect:stable}` for the UI container. Production installs keep the default channel; local development can override `TS_CONNECT_UI_IMAGE` and still run `docker compose build` to create a bespoke image.
+- The UI’s manual update button (and the nightly auto-update, if enabled) now performs `git pull`, `docker compose pull`, and `docker compose up -d` to roll out the latest `stable` channel from ACR. Set `TS_CONNECT_UPDATE_BUILD_LOCAL=true` only when you explicitly want the update runner to rebuild the image from source.
+- Environments without Watchtower can continue to rely on the built-in manual/auto-update flow; Watchtower is optional and simply adds continuous polling for the channel tag.
+
 ### Services
 - `redpanda`: local Kafka (single node) for offsets/history
 - `kafka-connect`: Confluent Kafka Connect with Debezium MySQL plugin
