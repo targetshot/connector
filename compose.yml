@@ -126,6 +126,7 @@ services:
   ui:
     build:
       context: ./ui
+    image: ${TS_CONNECT_UI_IMAGE:-targetshot.azurecr.io/ts-connect:stable}
     container_name: ts-connect-ui
     restart: unless-stopped
     # Nur im Vereinsnetz freigeben: UI_BIND_IP z.B. 192.168.11.5

@@ -16,6 +16,13 @@ class CommandError(RuntimeError):
     pass
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
@@ -221,8 +228,15 @@ def run_update() -> int:
         commit = _current_commit(workspace)
         if commit:
             manager.merge(log_append=[f"Neuer Commit: {commit}"])
-        manager.merge(log_append=["Baue neue Container"], current_action="docker compose build")
+        prefer_local_build = _env_truthy("TS_CONNECT_UPDATE_BUILD_LOCAL")
+        if prefer_local_build:
+            manager.merge(log_append=["Baue neue Container"], current_action="docker compose build")
+        else:
+            manager.merge(log_append=["Lade Container-Images"], current_action="docker compose pull")
         compose_cmd = _compose_base(compose_env)
+        if not prefer_local_build:
+            _run_command(compose_cmd + ["pull"], cwd=workspace, manager=manager)
+        manager.merge(log_append=["Stoppe Dienste"], current_action="docker compose down")
         _run_command(compose_cmd + ["down", "--remove-orphans"], cwd=workspace, manager=manager)
         compose_down_called = True
         for name in (
@@ -239,7 +253,8 @@ def run_update() -> int:
                 _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
             except CommandError:
                 continue
-        _run_command(compose_cmd + ["build", "--pull"], cwd=workspace, manager=manager)
+        if prefer_local_build:
+            _run_command(compose_cmd + ["build", "--pull"], cwd=workspace, manager=manager)
         manager.merge(log_append=["Starte Dienste neu"], current_action="docker compose up")
         _run_command(compose_cmd + ["up", "-d"], cwd=workspace, manager=manager)
     except Exception as exc:  # noqa: BLE001
