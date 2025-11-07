@@ -1,0 +1,88 @@
+name: Promote ts-connect image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Version tag or digest (sha256:...) to promote"
+        required: true
+      channel:
+        description: "Channel tag"
+        required: true
+        type: choice
+        default: stable
+        options:
+          - beta
+          - stable
+          - lts
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  IMAGE_NAME: ts-connect
+  ACR_NAME: ${{ secrets.AZURE_ACR_NAME }}
+  REGISTRY: ${{ secrets.AZURE_ACR_NAME }}.azurecr.io
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate registry settings
+        run: |
+          if [ -z "${ACR_NAME}" ]; then
+            echo "ACR_NAME secret not configured" >&2
+            exit 1
+          fi
+          if [ -z "${REGISTRY}" ]; then
+            echo "REGISTRY value missing" >&2
+            exit 1
+          fi
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve digest
+        id: resolve
+        env:
+          SOURCE: ${{ github.event.inputs.source }}
+        run: |
+          set -euo pipefail
+          if [[ "${SOURCE}" == sha256:* ]]; then
+            DIGEST="${SOURCE}"
+          else
+            echo "Resolving digest for tag ${SOURCE}"
+            DIGEST=$(az acr repository show-manifest \
+              --name "${ACR_NAME}" \
+              --repository "${IMAGE_NAME}" \
+              --tag "${SOURCE}" \
+              --query digest -o tsv)
+          fi
+          if [ -z "${DIGEST}" ]; then
+            echo "Unable to resolve digest for ${SOURCE}" >&2
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Promote to channel
+        env:
+          DIGEST: ${{ steps.resolve.outputs.digest }}
+          CHANNEL: ${{ github.event.inputs.channel }}
+        run: |
+          set -eux
+          az acr import \
+            --name "${ACR_NAME}" \
+            --source "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" \
+            --image "${IMAGE_NAME}:${CHANNEL}" \
+            --force
+          echo "Promoted ${DIGEST} to ${CHANNEL}"

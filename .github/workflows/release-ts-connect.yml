@@ -1,0 +1,90 @@
+name: Release ts-connect
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  IMAGE_NAME: ts-connect
+  ACR_NAME: ${{ secrets.AZURE_ACR_NAME }}
+  REGISTRY: ${{ secrets.AZURE_ACR_NAME }}.azurecr.io
+  VERSION: ${{ github.event.release.tag_name }}
+
+jobs:
+  build-push-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure version value
+        run: |
+          if [ -z "${VERSION}" ]; then
+            echo "Release tag missing" >&2
+            exit 1
+          fi
+          echo "Building version ${VERSION}"
+
+      - name: Validate registry settings
+        run: |
+          if [ -z "${ACR_NAME}" ]; then
+            echo "ACR_NAME secret not configured" >&2
+            exit 1
+          fi
+          if [ -z "${REGISTRY}" ]; then
+            echo "REGISTRY value missing" >&2
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${ACR_NAME}
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ts-connect/ui
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image digest
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes ${IMAGE_REF}
+
+      - name: Tag release as beta
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -eux
+          az acr import \
+            --name "${ACR_NAME}" \
+            --source "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" \
+            --image "${IMAGE_NAME}:beta" \
+            --force
