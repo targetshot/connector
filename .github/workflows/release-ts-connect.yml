@@ -22,23 +22,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Debug repo/ref
-        run: |
-          git config --get remote.origin.url
-          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
-          echo "GITHUB_REPOSITORY_OWNER=$GITHUB_REPOSITORY_OWNER"
-          echo "GITHUB_REF=$GITHUB_REF"
-
-      - name: Show OIDC claims (iss/aud/sub)
-        run: |
-          set -euo pipefail
-          TOKEN_JSON=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange")
-          TOKEN=$(echo "$TOKEN_JSON" | jq -r .value)
-          IFS='.' read -r HEADER PAYLOAD SIGNATURE <<< "$TOKEN"
-          echo "claims:"
-          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq '{iss, aud, sub}'
-
       - name: Ensure version value
         run: |
           if [ -z "${VERSION}" ]; then
