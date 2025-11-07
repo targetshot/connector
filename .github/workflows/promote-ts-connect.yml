@@ -22,11 +22,16 @@ permissions:
 
 env:
   IMAGE_NAME: ts-connect
-  ACR_NAME: ${{ secrets.AZURE_ACR_NAME }}
-  REGISTRY: ${{ secrets.AZURE_ACR_NAME }}.azurecr.io
+  ACR_NAME: targetshot
+  REGISTRY: targetshot.azurecr.io
+  AZURE_SUBSCRIPTION_ID: e4d628f6-ede4-4af9-8310-b25724a71961
 
 jobs:
   promote:
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,23 +39,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate registry settings
-        run: |
-          if [ -z "${ACR_NAME}" ]; then
-            echo "ACR_NAME secret not configured" >&2
-            exit 1
-          fi
-          if [ -z "${REGISTRY}" ]; then
-            echo "REGISTRY value missing" >&2
-            exit 1
-          fi
-
       - name: Azure login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Force correct subscription
+        run: az account set --subscription "${{ env.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Verify Azure context
+        run: |
+          az account show --query "{sub:id, name:name}" -o table
+          az acr show --subscription "${{ env.AZURE_SUBSCRIPTION_ID }}" -n "${ACR_NAME}" -o table
 
       - name: Resolve digest
         id: resolve
@@ -63,6 +65,7 @@ jobs:
           else
             echo "Resolving digest for tag ${SOURCE}"
             DIGEST=$(az acr repository show-manifest \
+              --subscription "${AZURE_SUBSCRIPTION_ID}" \
               --name "${ACR_NAME}" \
               --repository "${IMAGE_NAME}" \
               --tag "${SOURCE}" \
@@ -81,6 +84,7 @@ jobs:
         run: |
           set -eux
           az acr import \
+            --subscription "${AZURE_SUBSCRIPTION_ID}" \
             --name "${ACR_NAME}" \
             --source "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" \
             --image "${IMAGE_NAME}:${CHANNEL}" \
