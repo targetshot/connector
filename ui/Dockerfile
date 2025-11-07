@@ -4,15 +4,23 @@ WORKDIR /app
 # Systemdeps schlank halten, Docker CLI & Compose manuell installieren
 ARG DOCKER_CLI_VERSION=26.1.3
 ARG DOCKER_COMPOSE_VERSION=2.29.7
-RUN apt-get update \
+ARG TARGETOS
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) DOCKER_RELEASE_ARCH="x86_64" ;; \
+      arm64) DOCKER_RELEASE_ARCH="aarch64" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates tar \
-    && curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker-cli.tgz \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_RELEASE_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker-cli.tgz \
     && tar -xzf /tmp/docker-cli.tgz -C /tmp docker/docker \
     && mv /tmp/docker/docker /usr/bin/docker \
     && chmod +x /usr/bin/docker \
     && rm -rf /tmp/docker /tmp/docker-cli.tgz \
     && mkdir -p /usr/lib/docker/cli-plugins \
-    && curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" -o /usr/lib/docker/cli-plugins/docker-compose \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${DOCKER_RELEASE_ARCH}" -o /usr/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/lib/docker/cli-plugins/docker-compose \
     && git config --global --add safe.directory /workspace \
     && rm -rf /var/lib/apt/lists/*

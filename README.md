@@ -21,6 +21,14 @@ docker compose up -d
 - If you need to run `docker compose` from another directory (e.g. via systemd), set `TS_CONNECT_WORKSPACE_HOST=/absolute/path/to/connector` in `.env` or `compose.env`. Otherwise the default bind `.:/workspace` (relative to `compose.yml`) is used.
 - To automate the release workflow (commit + tag + GitHub release), run `./scripts/create_release.sh` from within `ts-connect/` after bumping the version. It reads `VERSION`, creates a `chore(release): <version>` commit, tags it, pushes, and invokes `gh release create`.
 - The release script expects only `VERSION` (and optionally `RELEASE`) to be modified and requires `gh` CLI to be authenticated (`gh auth login`).
+- Publishing a GitHub release automatically triggers the `release-ts-connect` workflow, which builds a multi-arch image for `ts-connect/ui`, signs it via Cosign (keyless OIDC flow), and pushes it to `targetshot.azurecr.io/ts-connect:<tag>` (tag derived from the GitHub release).
+
+### Container Images & Channels
+- The release workflow logs into Azure using repository-level OIDC credentials (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_ACR_NAME`) and builds AMD64/ARM64 images via Buildx.
+- After a release build succeeds, the image digest is re-tagged as `targetshot.azurecr.io/ts-connect:beta`. No rebuild occurs—`az acr import ... --source <digest>` simply points the channel tag at the published manifest.
+- Promotions (beta → stable → lts) are handled by the manual GitHub Action `Promote ts-connect image`. Provide either a semantic version tag (e.g. `v1.4.0`) or a raw digest (`sha256:...`) and choose the target channel. The workflow re-tags the digest inside ACR without pushing layers again.
+- Rollbacks reuse the same promotion workflow: re-run it with the desired older tag/digest and channel to move pointers back instantly.
+- Cosign signatures stay valid across promotions because tags all reference the same digest; verification tooling should pin to the digest rather than the floating channel tag.
 
 ### Services
 - `redpanda`: local Kafka (single node) for offsets/history
