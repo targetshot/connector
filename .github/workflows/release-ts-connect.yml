@@ -55,8 +55,21 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Force correct subscription
+        run: az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Verify Azure context (ACR reachable)
+        run: |
+          echo "ACR_NAME=${ACR_NAME}"
+          echo "REGISTRY=${REGISTRY}"
+          az account show --query "{sub:id, name:name}" -o table
+          echo "Registries in this subscription:"
+          az acr list -o table
+          echo "Show target registry:"
+          az acr show -n "${ACR_NAME}" -o table
+
       - name: Login to ACR
-        run: az acr login --name ${ACR_NAME}
+        run: az acr login --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" --name "${ACR_NAME}"
 
       - name: Build and push multi-arch image
         id: build
@@ -84,6 +97,7 @@ jobs:
         run: |
           set -eux
           az acr import \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
             --name "${ACR_NAME}" \
             --source "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" \
             --image "${IMAGE_NAME}:beta" \
