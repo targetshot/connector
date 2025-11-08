@@ -12,7 +12,7 @@ import socket
 import sqlite3
 import ssl
 import stat
-import time
+import string
 from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,36 +27,168 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 import httpx
 from connector_config import CONNECT_SECRETS_PATH, build_connector_config
+from file_utils import atomic_write_text as _atomic_write_text
+from file_utils import fsync_directory as _fsync_directory
+from file_utils import tmp_path_for as _tmp_path_for
+from licenses import (
+    DEFAULT_LICENSE_TIER,
+    DEFAULT_RETENTION_DAYS,
+    LICENSE_RETENTION_DAYS,
+    normalize_license_tier,
+    plan_allows_shooter_count,
+    plan_display_name,
+    plan_limit_label,
+    required_plan_for_shooter_count,
+    retention_for_license,
+)
+from update_agent_utils import get_update_agent_token
 from update_state import UpdateStateManager
+
+logger = logging.getLogger("ts-connect-ui")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
 DEFAULT_CONNECTOR_NAME = os.getenv("DEFAULT_CONNECTOR_NAME", "targetshot-debezium")
 BACKUP_CONNECTOR_NAME = os.getenv("BACKUP_CONNECTOR_NAME", f"{DEFAULT_CONNECTOR_NAME}-backup-sink")
-ADMIN_PASSWORD = os.getenv("UI_ADMIN_PASSWORD", "change-me")
+DEFAULT_ADMIN_PASSWORD = "change-me"
 PASSWORD_PLACEHOLDER = "********"
+DEFAULT_SESSION_SECRET = "targetshot-connect-ui-secret"
 TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
 WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
+DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
+ADMIN_PASSWORD_GENERATED_FILE = DATA_DIR / "admin_password.generated"
+SESSION_SECRET_FILE = DATA_DIR / "session_secret"
+UPDATE_AGENT_URL = os.getenv("TS_CONNECT_UPDATE_AGENT_URL", "http://update-agent:9000").rstrip("/")
+UPDATE_AGENT_TOKEN = get_update_agent_token(DATA_DIR)
 
-LICENSE_RETENTION_DAYS = {
-    "basic": 14,
-    "plus": 30,
-    "pro": 90,
-}
-LICENSE_PLAN_RULES = {
-    "basic": {"min": 0, "max": 29, "label": "Bis 29 Schützen"},
-    "plus": {"min": 30, "max": 89, "label": "30 – 89 Schützen"},
-    "pro": {"min": 90, "max": None, "label": "Ab 90 Schützen"},
-}
-LICENSE_PLAN_ORDER = ["basic", "plus", "pro"]
-DEFAULT_LICENSE_TIER = os.getenv("TS_CONNECT_DEFAULT_LICENSE_TIER", "basic").strip().lower()
-if DEFAULT_LICENSE_TIER not in LICENSE_RETENTION_DAYS:
-    DEFAULT_LICENSE_TIER = "basic"
-DEFAULT_RETENTION_DAYS = LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER]
+
+def _generate_admin_password(length: int = 24) -> str:
+    alphabet = string.ascii_letters + string.digits + "-_"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _resolve_env_admin_password() -> str | None:
+    value = os.getenv("UI_ADMIN_PASSWORD")
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed or trimmed == DEFAULT_ADMIN_PASSWORD:
+        return None
+    return trimmed
+
+
+def _read_generated_admin_password() -> str | None:
+    if not ADMIN_PASSWORD_GENERATED_FILE.exists():
+        return None
+    try:
+        data = ADMIN_PASSWORD_GENERATED_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return data or None
+
+
+def _remember_generated_admin_password(password: str) -> None:
+    _atomic_write_text(
+        ADMIN_PASSWORD_GENERATED_FILE,
+        password + "\n",
+        mode=stat.S_IRUSR | stat.S_IWUSR,
+    )
+
+
+def _clear_generated_admin_password_file() -> None:
+    if ADMIN_PASSWORD_GENERATED_FILE.exists():
+        try:
+            ADMIN_PASSWORD_GENERATED_FILE.unlink()
+        except OSError:
+            pass
+        else:
+            _fsync_directory(ADMIN_PASSWORD_GENERATED_FILE.parent)
+
+
+def _resolve_session_secret() -> str:
+    env_secret = os.getenv("UI_SESSION_SECRET", "").strip()
+    if env_secret and env_secret != DEFAULT_SESSION_SECRET:
+        return env_secret
+    try:
+        stored = SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        stored = ""
+    except OSError:
+        stored = ""
+    if stored:
+        return stored
+    generated = secrets.token_urlsafe(48)
+    try:
+        _atomic_write_text(
+            SESSION_SECRET_FILE,
+            generated + "\n",
+            mode=stat.S_IRUSR | stat.S_IWUSR,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Session-Secret konnte nicht persistiert werden: %s", exc)
+    else:
+        logger.warning(
+            "UI_SESSION_SECRET nicht gesetzt – zufälliges Secret wurde in %s hinterlegt.",
+            SESSION_SECRET_FILE,
+        )
+    return generated
+
+
+async def _update_agent_request(
+    method: str,
+    path: str,
+    *,
+    json_payload: dict | None = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    if not UPDATE_AGENT_URL:
+        raise RuntimeError("Update-Agent URL nicht konfiguriert")
+    url = f"{UPDATE_AGENT_URL}{path}"
+    headers: dict[str, str] = {}
+    if UPDATE_AGENT_TOKEN:
+        headers["X-Update-Agent-Token"] = UPDATE_AGENT_TOKEN
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(method, url, json=json_payload, headers=headers)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Update-Agent nicht erreichbar: {_short_error_message(str(exc), 140)}") from exc
+    if response.status_code >= 400:
+        text = _short_error_message(response.text, 200)
+        raise RuntimeError(f"Update-Agent {response.status_code}: {text}")
+    if response.headers.get("content-type", "").startswith("application/json"):
+        return response.json()
+    return {"ok": True, "body": response.text}
+
+
+async def _ping_update_agent(timeout: float = 3.0) -> bool:
+    try:
+        result = await _update_agent_request("GET", "/api/v1/health", timeout=timeout)
+    except Exception:
+        return False
+    return bool(result.get("ok"))
+
+
+async def _container_status(name: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    return await _update_agent_request("GET", f"/api/v1/containers/{name}/status", timeout=timeout)
+
+
+async def _restart_container(name: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    return await _update_agent_request("POST", f"/api/v1/containers/{name}/restart", timeout=timeout)
+
+
+async def _stop_container(name: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    return await _update_agent_request("POST", f"/api/v1/containers/{name}/stop", timeout=timeout)
+
 DEFAULT_BACKUP_HOST = os.getenv("TS_CONNECT_BACKUP_HOST", "backup-db")
 DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
 DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
@@ -77,19 +209,6 @@ LEMON_INSTANCE_NAME = os.getenv("TS_LICENSE_INSTANCE_NAME", "").strip()
 LEMON_INSTANCE_ID = os.getenv("TS_LICENSE_INSTANCE_ID", "").strip()
 LEMON_ACTIVATION_ENABLED = os.getenv("TS_LICENSE_AUTO_ACTIVATE", "true").lower() in {"1", "true", "yes", "on"}
 ELASTIC_AGENT_ENABLED = os.getenv("ELASTIC_AGENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _normalize_license_tier(value: str | None) -> str:
-    if not value:
-        return DEFAULT_LICENSE_TIER
-    normalized = value.strip().lower()
-    if normalized not in LICENSE_RETENTION_DAYS:
-        return DEFAULT_LICENSE_TIER
-    return normalized
-
-
-def _retention_for_license(value: str | None) -> int:
-    return LICENSE_RETENTION_DAYS.get(_normalize_license_tier(value), DEFAULT_RETENTION_DAYS)
 
 
 def _license_status_snapshot(settings: dict) -> dict:
@@ -141,7 +260,7 @@ def _parse_variant_plan_map(raw: str) -> dict[str, str]:
             continue
         key, value = entry.split("=", 1)
         key = key.strip()
-        value = _normalize_license_tier(value)
+        value = normalize_license_tier(value)
         if key:
             mapping[key.lower()] = value
     return mapping
@@ -153,47 +272,6 @@ _DEFAULT_VARIANT_MAP = {
     "1056379": "pro",
 }
 LEMON_VARIANT_PLAN_MAP = _parse_variant_plan_map(LEMON_VARIANT_PLAN_MAP_RAW)
-
-
-def _plan_display_name(plan: str | None) -> str:
-    if not plan:
-        return "Unbekannt"
-    return _normalize_license_tier(plan).capitalize()
-
-
-def _plan_limit_label(plan: str) -> str:
-    plan = _normalize_license_tier(plan)
-    info = LICENSE_PLAN_RULES.get(plan, LICENSE_PLAN_RULES["basic"])
-    min_value = info.get("min")
-    max_value = info.get("max")
-    label = info.get("label")
-    if label:
-        return label
-    if max_value is None and min_value is not None:
-        return f"Ab {min_value} Schützen"
-    if min_value is None and max_value is not None:
-        return f"Bis {max_value} Schützen"
-    if min_value is not None and max_value is not None:
-        return f"{min_value} – {max_value} Schützen"
-    return "Schützenlimit unbekannt"
-
-
-def _plan_allows_shooter_count(plan: str, count: int | None) -> bool:
-    if count is None:
-        return True
-    plan = _normalize_license_tier(plan)
-    required_plan = _required_plan_for_shooter_count(count)
-    required_index = LICENSE_PLAN_ORDER.index(required_plan)
-    current_index = LICENSE_PLAN_ORDER.index(plan)
-    return current_index >= required_index
-
-
-def _required_plan_for_shooter_count(count: int | None) -> str:
-    if count is None or count <= 29:
-        return "basic"
-    if count <= 89:
-        return "plus"
-    return "pro"
 
 
 def _write_json_log(filename: str, payload: dict) -> None:
@@ -227,7 +305,7 @@ def _resolve_update_image() -> str:
     return DEFAULT_UPDATE_IMAGE
 
 
-SESSION_SECRET = os.getenv("UI_SESSION_SECRET", "targetshot-connect-ui-secret")
+SESSION_SECRET = _resolve_session_secret()
 CONFLUENT_CLUSTER_URL = os.getenv(
     "TS_CONNECT_CLUSTER_URL",
     "https://pkc-w7d6j.germanywestcentral.azure.confluent.cloud",
@@ -239,13 +317,8 @@ CONFLUENT_BOOTSTRAP_DEFAULT = os.getenv(
 )
 DOCS_URL = os.getenv("TS_CONNECT_DOCS_URL", "https://docs.targetshot.app/")
 
-DATA_DIR = Path("/app/data")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR = DATA_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "config.db"
 SECRETS_PATH = Path(CONNECT_SECRETS_PATH)
-ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
 APPLY_STATE_PATH = DATA_DIR / "connector_apply_state.json"
 MM2_CONFIG_PATH = DATA_DIR / "mm2.properties"
 LICENSE_KEY_FILE = DATA_DIR / "license.key"
@@ -254,9 +327,6 @@ UPDATE_STATE_PATH = DATA_DIR / "update_state.json"
 UPDATE_CACHE_SECONDS = int(os.getenv("TS_CONNECT_UPDATE_CACHE_SECONDS", "3600"))
 GITHUB_REPO_OVERRIDE = os.getenv("TS_CONNECT_GITHUB_REPO", "").strip()
 GITHUB_TOKEN = os.getenv("TS_CONNECT_GITHUB_TOKEN", "").strip()
-UPDATE_RUNNER_IMAGE = os.getenv("TS_CONNECT_UPDATE_IMAGE", "").strip()
-UPDATE_CONTAINER_PREFIX = os.getenv("TS_CONNECT_UPDATE_CONTAINER_PREFIX", "ts-connect-update")
-DOCKER_SOCKET_PATH = Path(os.getenv("TS_CONNECT_DOCKER_SOCKET", "/var/run/docker.sock"))
 AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
@@ -277,10 +347,6 @@ _os_update_state_lock = asyncio.Lock()
 _os_update_refresh_lock = asyncio.Lock()
 _os_update_task: asyncio.Task | None = None
 _git_safe_configured = False
-
-logger = logging.getLogger("ts-connect-ui")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
 
 _apply_state_lock = asyncio.Lock()
 
@@ -678,7 +744,7 @@ def _parse_license_validation_payload(payload: dict[str, Any]) -> dict[str, Any]
     valid = bool(valid_flag if valid_flag is not None else status.lower() in {"active", "valid"})
     return {
         "valid": valid,
-        "plan": _normalize_license_tier(plan),
+        "plan": normalize_license_tier(plan),
         "status": status or ("valid" if valid else "unbekannt"),
         "variant_id": str(variant_id).strip() if variant_id else None,
         "variant_name": variant_name,
@@ -925,7 +991,7 @@ async def _collect_workspace_info() -> dict[str, Any]:
     return info
 
 
-def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any]:
+async def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any]:
     def _binary_found(name: str, extra_paths: tuple[str, ...] = ()) -> bool:
         path = shutil.which(name)
         if path and os.access(path, os.X_OK):
@@ -937,45 +1003,14 @@ def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any]:
         return False
 
     git_available = _binary_found("git", ("/usr/bin/git", "/usr/local/bin/git"))
-    docker_available = _binary_found("docker", ("/usr/bin/docker", "/usr/local/bin/docker"))
-    docker_socket = DOCKER_SOCKET_PATH.exists()
     workspace_ready = bool(workspace_info.get("exists") and workspace_info.get("git"))
+    update_agent_ok = await _ping_update_agent()
     return {
         "git": git_available,
-        "docker": docker_available,
-        "docker_socket": docker_socket,
+        "update_agent": update_agent_ok,
         "workspace": workspace_ready,
-        "ok": git_available and docker_available and docker_socket and workspace_ready,
+        "ok": git_available and workspace_ready and update_agent_ok,
     }
-
-
-async def _inspect_container_mounts() -> tuple[dict[str, str], str | None]:
-    if shutil.which("docker") is None:
-        return {}, None
-    container_id = os.getenv("HOSTNAME")
-    if not container_id:
-        return {}, None
-    try:
-        code, stdout, _ = await _run_command_capture(["docker", "inspect", container_id])
-    except FileNotFoundError:
-        return {}, None
-    if code != 0:
-        return {}, None
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError:
-        return {}, None
-    if not data:
-        return {}, None
-    first = data[0]
-    mounts: dict[str, str] = {}
-    for mount in first.get("Mounts", []):
-        dest = mount.get("Destination")
-        source = mount.get("Source")
-        if dest and source:
-            mounts[dest] = source
-    image = first.get("Config", {}).get("Image")
-    return mounts, image
 
 
 def _extract_manifest_version(manifest: dict[str, Any]) -> str | None:
@@ -1098,7 +1133,7 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
     release = await _ensure_latest_release(force=force)
     workspace_info = await _collect_workspace_info()
     connect_version, connect_release = _load_version_defaults()
-    prereq = _detect_prerequisites(workspace_info)
+    prereq = await _detect_prerequisites(workspace_info)
     repo_slug = await _determine_repo_slug()
     compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
     current_marker = connect_version or workspace_info.get("current_ref") or workspace_info.get("current_commit")
@@ -1271,54 +1306,14 @@ def _os_update_task_done(task: asyncio.Task) -> None:
 
 
 async def _start_update_runner(target_ref: str | None, repo_slug: str | None, compose_env: bool) -> str:
-    mounts, image = await _inspect_container_mounts()
-    workspace_host = mounts.get("/workspace") or mounts.get(str(WORKSPACE_PATH))
-    data_host = mounts.get("/app/data")
-    if not workspace_host or not data_host:
-        raise RuntimeError("Update benötigt Bind-Mounts für /workspace und /app/data")
-    runner_image = UPDATE_RUNNER_IMAGE or image
-    if not runner_image:
-        raise RuntimeError("Update-Runner Image konnte nicht bestimmt werden")
-    socket_path = str(DOCKER_SOCKET_PATH)
-    if not os.path.exists(socket_path):
-        raise RuntimeError(f"Docker Socket nicht gefunden: {socket_path}")
-    container_name = f"{UPDATE_CONTAINER_PREFIX}-{int(time.time())}"
-    cmd = [
-        "docker",
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        container_name,
-        "-v",
-        f"{workspace_host}:/workspace",
-        "-v",
-        f"{data_host}:/app/data",
-        "-v",
-        f"{socket_path}:{socket_path}",
-        "-e",
-        "TS_CONNECT_WORKSPACE=/workspace",
-        "-e",
-        "TS_CONNECT_DATA_DIR=/app/data",
-    ]
-    if PROJECT_NAME:
-        cmd += ["-e", f"COMPOSE_PROJECT_NAME={PROJECT_NAME}"]
-    if repo_slug:
-        cmd += ["-e", f"TS_CONNECT_GITHUB_REPO={repo_slug}"]
-    if target_ref:
-        cmd += ["-e", f"TS_CONNECT_UPDATE_REF={target_ref}"]
-    if compose_env:
-        compose_env_file = WORKSPACE_PATH / "compose.env"
-        cmd += ["-e", "TS_CONNECT_UPDATE_COMPOSE_ENV=compose.env"]
-        if compose_env_file.exists():
-            # Forward compose.env entries (e.g. registry credentials) into the runner container.
-            cmd += ["--env-file", str(compose_env_file)]
-    cmd += [runner_image, "python", "-m", "update_runner"]
-    code, stdout, stderr = await _run_command_capture(cmd)
-    if code != 0:
-        message = stderr.strip() or stdout.strip() or "docker run Fehler"
-        raise RuntimeError(message)
-    return stdout.strip()
+    payload = {
+        "target_ref": target_ref,
+        "repo_slug": repo_slug,
+        "compose_env": compose_env,
+        "project_name": PROJECT_NAME,
+    }
+    result = await _update_agent_request("POST", "/api/v1/run", json_payload=payload, timeout=10)
+    return result.get("job_id") or "update-agent"
 
 
 async def _launch_update_job(
@@ -1334,7 +1329,7 @@ async def _launch_update_job(
         if state.get("status") == "running":
             return {"ok": False, "error": "Ein Update läuft bereits", "code": 409}
         workspace_info = await _collect_workspace_info()
-        prereq = _detect_prerequisites(workspace_info)
+        prereq = await _detect_prerequisites(workspace_info)
         if not prereq.get("ok"):
             missing = [name for name, available in prereq.items() if name != "ok" and not available]
             detail = "Voraussetzungen fehlen: " + ", ".join(missing)
@@ -1358,7 +1353,7 @@ async def _launch_update_job(
             updates["auto_update_last_run"] = job_started
         await merge_update_state_async(**updates)
         try:
-            container_id = await _start_update_runner(selected_target, repo_slug, compose_env_exists)
+            job_identifier = await _start_update_runner(selected_target, repo_slug, compose_env_exists)
         except Exception as exc:  # noqa: BLE001
             message = _short_error_message(str(exc), 200)
             result_updates: dict[str, Any] = {
@@ -1371,16 +1366,12 @@ async def _launch_update_job(
             if initiated_by == "auto":
                 result_updates.setdefault("auto_update_last_run", job_started)
             await merge_update_state_async(**result_updates)
-            try:
-                await _run_command_capture(["docker", "rm", "-f", "ts-kafka-connect", "ts-connect-ui"], cwd=WORKSPACE_PATH)
-            except Exception:  # noqa: BLE001
-                pass
             return {"ok": False, "error": message, "code": 500}
         await merge_update_state_async(
-            current_action="Update-Runner läuft",
-            log_append=[f"Runner Container: {container_id}"],
+            current_action="Update-Agent gestartet",
+            log_append=[f"Update-Agent Job: {job_identifier}"],
         )
-        return {"ok": True, "container": container_id, "target": selected_target}
+        return {"ok": True, "container": job_identifier, "target": selected_target}
 
 
 async def _auto_update_worker() -> None:
@@ -1612,7 +1603,7 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
     if cur.fetchone()["cnt"] == 0:
         return
     row = conn.execute("SELECT license_tier, retention_days FROM settings WHERE id=1").fetchone()
-    license_value = _normalize_license_tier(row["license_tier"] if row else None)
+    license_value = normalize_license_tier(row["license_tier"] if row else None)
     retention_value = row["retention_days"] if row and row["retention_days"] else LICENSE_RETENTION_DAYS[license_value]
     conn.execute(
         """
@@ -1752,7 +1743,11 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         "emit.checkpoints.enabled = true",
         "refresh.topics.interval.seconds = 30",
     ]
-    _atomic_write_text(MM2_CONFIG_PATH, "\n".join(config_lines) + "\n")
+    _atomic_write_text(
+        MM2_CONFIG_PATH,
+        "\n".join(config_lines) + "\n",
+        mode=stat.S_IRUSR | stat.S_IWUSR,
+    )
 
 
 def _build_backup_sink_config(settings: dict, secrets: dict) -> dict:
@@ -1803,43 +1798,22 @@ def _build_backup_sink_config(settings: dict, secrets: dict) -> dict:
 
 
 async def restart_mirror_maker() -> None:
-    code, output = await _run_command_text(
-        ["docker", "ps", "-aq", "--filter", "name=ts-mirror-maker"],
-        timeout=10,
-    )
-    if code != 0:
-        raise RuntimeError(f"docker ps für mirror-maker fehlgeschlagen: {output}")
-    if not output.strip():
-        # Container existiert nicht - vermutlich offline Buffer nicht aktiviert.
-        return
-    code, restart_out = await _run_command_text(
-        ["docker", "restart", "ts-mirror-maker"],
-        timeout=30,
-    )
-    if code != 0:
-        raise RuntimeError(f"docker restart ts-mirror-maker fehlgeschlagen: {restart_out}")
+    try:
+        result = await _restart_container("ts-mirror-maker")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"MirrorMaker Neustart fehlgeschlagen: {exc}") from exc
+    if not result.get("found", True):
+        logger.info("MirrorMaker Container ist nicht vorhanden – kein Neustart erforderlich.")
 
 
 async def update_remote_replication_state(active: bool) -> None:
     try:
-        _, status_output = await _run_command_text(
-            [
-                "docker",
-                "ps",
-                "-a",
-                "--filter",
-                "name=ts-mirror-maker",
-                "--format",
-                "{{.Status}}",
-            ],
-            timeout=5,
-        )
+        status = await _container_status("ts-mirror-maker")
     except Exception as exc:  # noqa: BLE001
         logger.warning("MirrorMaker Status konnte nicht abgefragt werden: %s", exc)
         return
-    status_output = status_output.strip()
-    has_container = bool(status_output)
-    is_running = "Up" in status_output if status_output else False
+    has_container = bool(status.get("exists"))
+    is_running = bool(status.get("running"))
 
     if active:
         if not has_container:
@@ -1855,7 +1829,7 @@ async def update_remote_replication_state(active: bool) -> None:
         if not has_container or not is_running:
             return
         try:
-            await _run_command_text(["docker", "stop", "ts-mirror-maker"], timeout=30)
+            await _stop_container("ts-mirror-maker")
         except Exception as exc:  # noqa: BLE001
             logger.warning("MirrorMaker konnte nicht gestoppt werden: %s", exc)
 
@@ -1879,7 +1853,7 @@ def fetch_settings() -> dict:
     conn.close()
     if row is None:
         raise RuntimeError("settings row missing")
-    license_tier = _normalize_license_tier(row["license_tier"])
+    license_tier = normalize_license_tier(row["license_tier"])
     retention_days = LICENSE_RETENTION_DAYS.get(license_tier, LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER])
     return {
         "db_host": row["db_host"],
@@ -1995,47 +1969,6 @@ def _collect_shooter_stats_sync(settings: dict, secrets: dict) -> dict[str, Any]
     return result
 
 
-def _fsync_directory(path: Path) -> None:
-    """Best effort fsync to persist metadata updates inside parent directory."""
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        dir_fd = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(dir_fd)
-    except OSError:
-        pass
-    finally:
-        os.close(dir_fd)
-
-
-def _tmp_path_for(path: Path) -> Path:
-    return path.with_name(f".{path.name}.tmp")
-
-
-def _atomic_write_text(path: Path, data: str, *, mode: int | None = None) -> None:
-    directory = path.parent
-    tmp_path = _tmp_path_for(path)
-    directory.mkdir(parents=True, exist_ok=True)
-    try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
-    if mode is not None:
-        os.chmod(path, mode)
-    _fsync_directory(directory)
-
-
 def write_secrets_file(values: dict[str, str]) -> None:
     secrets_dir = SECRETS_PATH.parent
     tmp_path = _tmp_path_for(SECRETS_PATH)
@@ -2052,7 +1985,7 @@ def write_secrets_file(values: dict[str, str]) -> None:
     _atomic_write_text(
         SECRETS_PATH,
         payload,
-        mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
+        mode=stat.S_IRUSR | stat.S_IWUSR,
     )
 
 
@@ -2074,7 +2007,7 @@ def store_license_key(value: str) -> None:
         _atomic_write_text(
             LICENSE_KEY_FILE,
             value + "\n",
-            mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
+            mode=stat.S_IRUSR | stat.S_IWUSR,
         )
         return
     tmp_path = _tmp_path_for(LICENSE_KEY_FILE)
@@ -2287,7 +2220,21 @@ def _read_admin_password_record() -> str:
 def ensure_admin_password_file() -> None:
     if ADMIN_PASSWORD_FILE.exists():
         return
-    set_admin_password(ADMIN_PASSWORD)
+    env_password = _resolve_env_admin_password()
+    if env_password:
+        set_admin_password(env_password)
+        _clear_generated_admin_password_file()
+        logger.info("Admin-Passwort aus UI_ADMIN_PASSWORD initialisiert.")
+        return
+    generated_password = _read_generated_admin_password()
+    if not generated_password:
+        generated_password = _generate_admin_password()
+        _remember_generated_admin_password(generated_password)
+    set_admin_password(generated_password)
+    logger.warning(
+        "Es wurde ein zufälliges Admin-Passwort erzeugt und in %s abgelegt.",
+        ADMIN_PASSWORD_GENERATED_FILE,
+    )
 
 
 def verify_admin_password(candidate: str) -> bool:
@@ -2585,7 +2532,7 @@ def build_index_context(request: Request) -> dict:
         "status": data.get("license_status", "unknown"),
         "status_label": license_status_label,
         "plan": data.get("license_tier", DEFAULT_LICENSE_TIER),
-        "plan_label": _normalize_license_tier(data.get("license_tier")).capitalize(),
+        "plan_label": normalize_license_tier(data.get("license_tier")).capitalize(),
         "valid_until": license_valid_iso,
         "valid_until_display": license_valid_display,
         "days_remaining": license_days_remaining,
@@ -2606,15 +2553,15 @@ def build_index_context(request: Request) -> dict:
 
     shooter_stats = _collect_shooter_stats_sync(data, secrets_data)
     shooter_count = shooter_stats.get("count")
-    required_plan = _required_plan_for_shooter_count(shooter_count)
-    plan_ok = _plan_allows_shooter_count(license_info["plan"], shooter_count)
+    required_plan = required_plan_for_shooter_count(shooter_count)
+    plan_ok = plan_allows_shooter_count(license_info["plan"], shooter_count)
     license_info.update(
         {
             "shooter_stats": shooter_stats,
             "shooter_plan_ok": plan_ok,
             "shooter_required_plan": required_plan,
-            "shooter_required_plan_label": _plan_display_name(required_plan) if required_plan else None,
-            "shooter_limit_label": _plan_limit_label(license_info["plan"]),
+            "shooter_required_plan_label": plan_display_name(required_plan) if required_plan else None,
+            "shooter_limit_label": plan_limit_label(license_info["plan"]),
         }
     )
 
@@ -2941,15 +2888,12 @@ async def _check_elastic_agent_health() -> dict[str, str]:
     if not ELASTIC_AGENT_ENABLED:
         return {"status": "skipped", "message": "Deaktiviert"}
     try:
-        code, status_output = await _run_command_text(
-            ["docker", "ps", "--filter", "name=ts-elastic-agent", "--format", "{{.Status}}"],
-            timeout=5,
-        )
+        status = await _container_status("ts-elastic-agent")
     except Exception as exc:  # noqa: BLE001
         return {"status": "error", "message": _short_error_message(str(exc), 140)}
-    if code != 0 or not status_output.strip():
+    if not status.get("exists"):
         return {"status": "warn", "message": "Agent nicht gestartet"}
-    status_text = status_output.strip()
+    status_text = (status.get("status") or "").strip()
     if "Up" in status_text:
         return {"status": "ok", "message": status_text}
     if "Exited" in status_text or "Dead" in status_text:
@@ -3034,6 +2978,7 @@ async def save(
             request.session["error_message"] = "Das neue Admin-Passwort muss mindestens 8 Zeichen enthalten."
             return RedirectResponse("/", status_code=303)
         set_admin_password(new_admin_password)
+        _clear_generated_admin_password_file()
         request.session["flash_message"] = "Admin-Passwort aktualisiert."
         return RedirectResponse("/", status_code=303)
 
@@ -3101,7 +3046,7 @@ async def save(
         plan = validation.get("plan") or DEFAULT_LICENSE_TIER
         if not validation.get("valid"):
             plan = DEFAULT_LICENSE_TIER
-        plan = _normalize_license_tier(plan)
+        plan = normalize_license_tier(plan)
         retention_days = LICENSE_RETENTION_DAYS.get(plan, DEFAULT_RETENTION_DAYS)
         status = validation.get("status") or ("valid" if validation.get("valid") else "unbekannt")
         expires_at_norm = _normalize_iso8601(validation.get("expires_at") or validation.get("raw_expires_at"))
@@ -3119,10 +3064,10 @@ async def save(
         if shooter_error and shooter_count is None:
             request.session["error_message"] = f"Schützenprüfung fehlgeschlagen: {shooter_error}"
             return RedirectResponse("/", status_code=303)
-        if shooter_count is not None and not _plan_allows_shooter_count(plan, shooter_count):
-            required_plan = _required_plan_for_shooter_count(shooter_count)
-            required_label = _plan_display_name(required_plan)
-            limit_label = _plan_limit_label(plan)
+        if shooter_count is not None and not plan_allows_shooter_count(plan, shooter_count):
+            required_plan = required_plan_for_shooter_count(shooter_count)
+            required_label = plan_display_name(required_plan)
+            limit_label = plan_limit_label(plan)
             request.session["error_message"] = (
                 f"Plan {plan.capitalize()} reicht nicht aus (Limit: {limit_label}). "
                 f"Für {shooter_count} Schützen wird mindestens der Plan {required_label} benötigt."
