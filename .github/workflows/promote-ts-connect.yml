@@ -102,8 +102,8 @@ jobs:
             --subscription "${AZURE_SUBSCRIPTION_ID}" \
             --name "${ACR_NAME}" \
             --image "${IMAGE_NAME}@${DIGEST}" \
-            --query 'metadata.annotations."org.opencontainers.image.version"' \
-            -o tsv)
+            --query 'annotations."org.opencontainers.image.version"' \
+            -o tsv 2>/dev/null || true)
           if [[ -z "${VERSION}" || "${VERSION}" == "None" ]]; then
             VERSION="${SOURCE_INPUT}"
           fi
@@ -115,9 +115,8 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eux
-          az acr manifest update \
+          az acr tag update \
             --subscription "${AZURE_SUBSCRIPTION_ID}" \
             --name "${ACR_NAME}" \
-            --repository "${IMAGE_NAME}" \
-            --tag "${CHANNEL}" \
-            --set metadata.annotations."org.opencontainers.image.version"="${VERSION}"
+            --image "${IMAGE_NAME}:${CHANNEL}" \
+            --metadata org.opencontainers.image.version="${VERSION}"
