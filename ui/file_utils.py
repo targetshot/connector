@@ -23,7 +23,23 @@ def tmp_path_for(path: Path) -> Path:
     return path.with_name(f".{path.name}.tmp")
 
 
-def atomic_write_text(path: Path, data: str, *, mode: int | None = None) -> None:
+def _apply_owner(path: Path, *, uid: int | None, gid: int | None) -> None:
+    if uid is None and gid is None:
+        return
+    try:
+        os.chown(path, uid if uid is not None else -1, gid if gid is not None else -1)
+    except PermissionError:
+        print(f"[file_utils] Warning: unable to chown {path}")
+
+
+def atomic_write_text(
+    path: Path,
+    data: str,
+    *,
+    mode: int | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> None:
     directory = path.parent
     tmp_path = tmp_path_for(path)
     directory.mkdir(parents=True, exist_ok=True)
@@ -42,6 +58,7 @@ def atomic_write_text(path: Path, data: str, *, mode: int | None = None) -> None
             pass
     if mode is not None:
         os.chmod(path, mode)
+    _apply_owner(path, uid=uid, gid=gid)
     fsync_directory(directory)
 
 

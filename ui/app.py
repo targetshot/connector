@@ -48,6 +48,20 @@ logger = logging.getLogger("ts-connect-ui")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
+
+def _env_int(name: str, default: int | None) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    trimmed = value.strip()
+    if not trimmed:
+        return default
+    try:
+        return int(trimmed)
+    except ValueError:
+        logger.warning("Ungültiger Integer-Wert für %s: %s", name, trimmed)
+        return default
+
 APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
 DEFAULT_CONNECTOR_NAME = os.getenv("DEFAULT_CONNECTOR_NAME", "targetshot-debezium")
@@ -70,6 +84,8 @@ ADMIN_PASSWORD_GENERATED_FILE = DATA_DIR / "admin_password.generated"
 SESSION_SECRET_FILE = DATA_DIR / "session_secret"
 UPDATE_AGENT_URL = os.getenv("TS_CONNECT_UPDATE_AGENT_URL", "http://update-agent:9000").rstrip("/")
 UPDATE_AGENT_TOKEN = get_update_agent_token(DATA_DIR)
+SECRETS_FILE_UID = _env_int("TS_CONNECT_SECRETS_UID", 1000)
+SECRETS_FILE_GID = _env_int("TS_CONNECT_SECRETS_GID", 1000)
 
 
 def _generate_admin_password(length: int = 24) -> str:
@@ -1986,6 +2002,8 @@ def write_secrets_file(values: dict[str, str]) -> None:
         SECRETS_PATH,
         payload,
         mode=stat.S_IRUSR | stat.S_IWUSR,
+        uid=SECRETS_FILE_UID,
+        gid=SECRETS_FILE_GID,
     )
 
 
