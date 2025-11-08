@@ -10,6 +10,8 @@ cd connector
 cp .env.example .env  # adjust secrets
 cp ui/.env.example ui/.env  # optional: UI-specific overrides
 cp compose.env.example compose.env  # optional: compose overrides (e.g. UI_BIND_IP)
+# Tipp: Wenn du `compose.env` nutzt, jeden Compose-Befehl mit `--env-file compose.env` aufrufen
+# (oder den Inhalt nach `.env` verschieben), damit Variablen auch in den Containern landen.
 docker compose up -d
 ```
 
