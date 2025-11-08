@@ -99,3 +99,27 @@ jobs:
             --source "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" \
             --image "${IMAGE_NAME}:beta" \
             --force
+
+      - name: Annotate version tag
+        env:
+          VERSION_TAG: ${{ steps.meta.outputs.version }}
+        run: |
+          set -eux
+          az acr manifest update \
+            --subscription "${{ env.AZURE_SUBSCRIPTION_ID }}" \
+            --name "${ACR_NAME}" \
+            --repository "${IMAGE_NAME}" \
+            --tag "${VERSION_TAG}" \
+            --set metadata.annotations."org.opencontainers.image.version"="${VERSION_TAG}"
+
+      - name: Annotate beta channel
+        env:
+          VERSION_TAG: ${{ steps.meta.outputs.version }}
+        run: |
+          set -eux
+          az acr manifest update \
+            --subscription "${{ env.AZURE_SUBSCRIPTION_ID }}" \
+            --name "${ACR_NAME}" \
+            --repository "${IMAGE_NAME}" \
+            --tag "beta" \
+            --set metadata.annotations."org.opencontainers.image.version"="${VERSION_TAG}"
