@@ -989,6 +989,15 @@ def _extract_manifest_version(manifest: dict[str, Any]) -> str | None:
     return None
 
 
+def _image_repo_from_ref(ref: str) -> str:
+    base = ref.split("@", 1)[0]
+    last_colon = base.rfind(":")
+    last_slash = base.rfind("/")
+    if last_colon > last_slash:
+        return base[:last_colon]
+    return base
+
+
 async def _fetch_latest_release() -> dict[str, Any] | None:
     image_ref = _resolve_update_image()
     try:
@@ -1002,68 +1011,58 @@ async def _fetch_latest_release() -> dict[str, Any] | None:
         manifest = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError("Docker Manifest konnte nicht geparsed werden") from exc
-    # Single-manifest vs manifest list
+    manifest_list = manifest.get("manifests")
     child_digest: str | None = None
-    manifest_obj: dict[str, Any] = manifest
-    if isinstance(manifest.get("manifests"), list):
-        # Pick the first platform entry
-        first = manifest["manifests"][0]
-        child_digest = first.get("digest")
-    elif isinstance(manifest.get("config"), dict):
-        child_digest = manifest["config"].get("digest")
+    if isinstance(manifest_list, list) and manifest_list:
+        preferred = next(
+            (entry for entry in manifest_list if (entry.get("platform") or {}).get("architecture") == "amd64"),
+            manifest_list[0],
+        )
+        child_digest = preferred.get("digest")
+    else:
+        child_digest = manifest.get("config", {}).get("digest")
     if not child_digest:
         raise RuntimeError("Manifest Digest konnte nicht bestimmt werden.")
-    # Fetch config blob to read labels
+    repo_ref = _image_repo_from_ref(image_ref)
+    child_ref = f"{repo_ref}@{child_digest}"
+    code_child, child_out, child_err = await _run_command_capture(["docker", "manifest", "inspect", child_ref])
+    if code_child != 0:
+        message = child_err.strip() or child_out.strip() or f"docker manifest inspect {child_ref} fehlgeschlagen"
+        raise RuntimeError(message)
     try:
-        cfg_code, cfg_out, cfg_err = await _run_command_capture(["docker", "buildx", "imagetools", "inspect", image_ref, "--format", "{{json .Manifest}}"])
-    except FileNotFoundError:
-        cfg_code = 1
+        child_manifest = json.loads(child_out)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Child Manifest konnte nicht geparsed werden") from exc
+    config_digest = child_manifest.get("config", {}).get("digest") or child_digest
+    labels: dict[str, str] | None = None
+    created: str | None = None
+    try:
+        code_cfg, cfg_out, cfg_err = await _run_command_capture(
+            ["docker", "buildx", "imagetools", "inspect", child_ref, "--format", "{{json .Manifest.Config}}"]
+        )
+    except FileNotFoundError:  # pragma: no cover - system dependency
+        code_cfg = -1
         cfg_out = ""
-        cfg_err = "docker buildx nicht verfügbar"
-    if cfg_code == 0:
+    if code_cfg == 0 and cfg_out.strip():
         try:
-            manifest_obj = json.loads(cfg_out)
-        except json.JSONDecodeError:
-            manifest_obj = manifest
-    config_digest = None
-    config_blob = None
-    if manifest_obj and isinstance(manifest_obj, dict):
-        config_digest = manifest_obj.get("config", {}).get("digest") or child_digest
-    if not config_digest:
-        config_digest = child_digest
-    # Use docker buildx imagetools inspect --format to dump config JSON
-    inspect_cmd = [
-        "docker",
-        "buildx",
-        "imagetools",
-        "inspect",
-        image_ref,
-        "--format",
-        "{{json .Manifest.Config}}",
-    ]
-    code_cfg, cfg_json, cfg_err = await _run_command_capture(inspect_cmd)
-    if code_cfg == 0 and cfg_json.strip():
-        try:
-            config_blob = json.loads(cfg_json)
+            config_blob = json.loads(cfg_out)
         except json.JSONDecodeError:
             config_blob = None
-    version = None
-    created = None
-    if isinstance(config_blob, dict):
-        labels = config_blob.get("Labels") or {}
-        version = labels.get("org.opencontainers.image.version")
-        created = config_blob.get("Created")
+        else:
+            labels = config_blob.get("Labels")
+            created = config_blob.get("Created") or config_blob.get("created")
+    if not labels:
+        labels = {}
+    version = (labels.get("org.opencontainers.image.version") or "").strip()
     if not version:
-        # Fall back to annotations on manifest list
-        version = _extract_manifest_version(manifest)
-    digest = config_digest
+        version = _extract_manifest_version(child_manifest) or _extract_manifest_version(manifest)
     return {
         "tag_name": version,
         "name": f"Version {version}",
         "published_at": created,
         "html_url": None,
         "image": image_ref,
-        "digest": digest,
+        "digest": config_digest,
         "source": "acr",
     }
 
