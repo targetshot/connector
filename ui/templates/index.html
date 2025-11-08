@@ -1647,13 +1647,19 @@
           if (data.current_version) {
             parts.push('Aktuelle Version: ' + data.current_version);
           }
-        if (data.latest_release && data.latest_release.tag_name) {
-          const versionName = data.latest_release.name || data.latest_release.tag_name;
-          if (data.latest_release.html_url) {
-            parts.push('Letzte Version: <a class="text-accent-dark dark:text-accent" target="_blank" rel="noopener" href="' + data.latest_release.html_url + '">' + escapeHtml(versionName) + '</a>');
-          } else {
-            parts.push('Letzte Version: ' + escapeHtml(versionName));
+          if (data.latest_release && data.latest_release.tag_name) {
+            const versionName = data.latest_release.name || data.latest_release.tag_name;
+            if (data.latest_release.html_url) {
+              parts.push('Letzte Version: <a class="text-accent-dark dark:text-accent" target="_blank" rel="noopener" href="' + data.latest_release.html_url + '">' + escapeHtml(versionName) + '</a>');
+            } else {
+              parts.push('Letzte Version: ' + escapeHtml(versionName));
+            }
           }
+          if (data.latest_release && data.latest_release.image) {
+            parts.push('Kanal: ' + escapeHtml(data.latest_release.image));
+          }
+          if (data.latest_release && data.latest_release.digest) {
+            parts.push('Digest: ' + escapeHtml(data.latest_release.digest));
           }
           if (data.update_available) {
             parts.push('<strong>Update verfügbar</strong>');

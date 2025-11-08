@@ -214,6 +214,19 @@ def _load_version_defaults() -> tuple[str, str]:
     return (version or "dev"), (release or "Unbekannt")
 
 
+def _resolve_update_image() -> str:
+    for candidate in (
+        os.getenv("TS_CONNECT_UPDATE_CHECK_IMAGE"),
+        os.getenv("TS_CONNECT_UI_IMAGE"),
+        DEFAULT_UPDATE_IMAGE,
+    ):
+        if candidate:
+            trimmed = candidate.strip()
+            if trimmed:
+                return trimmed
+    return DEFAULT_UPDATE_IMAGE
+
+
 SESSION_SECRET = os.getenv("UI_SESSION_SECRET", "targetshot-connect-ui-secret")
 CONFLUENT_CLUSTER_URL = os.getenv(
     "TS_CONNECT_CLUSTER_URL",
@@ -252,6 +265,7 @@ OS_UPDATE_STATE_PATH = DATA_DIR / "os_update_state.json"
 OS_UPDATE_MAX_AGE_SECONDS = int(os.getenv("TS_CONNECT_OS_UPDATE_MAX_AGE", "21600"))
 OS_UPDATE_LOG_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_LOG_LIMIT", "400"))
 OS_UPDATE_PACKAGE_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_PACKAGE_LIMIT", "80"))
+DEFAULT_UPDATE_IMAGE = "targetshot.azurecr.io/ts-connect:stable"
 
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
 
@@ -964,27 +978,47 @@ async def _inspect_container_mounts() -> tuple[dict[str, str], str | None]:
     return mounts, image
 
 
-async def _fetch_latest_release(repo_slug: str) -> dict[str, Any] | None:
-    if not repo_slug:
-        return None
-    url = f"https://raw.githubusercontent.com/{repo_slug}/main/ts-connect/VERSION"
-    headers = {}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.get(url, headers=headers)
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    version = (response.text or "").strip()
+def _extract_manifest_version(manifest: dict[str, Any]) -> str | None:
+    annotations = manifest.get("annotations") or {}
+    for key in ("org.opencontainers.image.version", "org.opencontainers.image.ref.name"):
+        value = annotations.get(key)
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate:
+                return candidate
+    return None
+
+
+async def _fetch_latest_release() -> dict[str, Any] | None:
+    image_ref = _resolve_update_image()
+    try:
+        code, stdout, stderr = await _run_command_capture(["docker", "manifest", "inspect", image_ref])
+    except FileNotFoundError as exc:  # pragma: no cover - system dependency
+        raise RuntimeError("Docker CLI nicht gefunden (docker manifest)") from exc
+    if code != 0:
+        message = stderr.strip() or stdout.strip() or f"docker manifest inspect {image_ref} fehlgeschlagen"
+        raise RuntimeError(message)
+    try:
+        manifest = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Docker Manifest konnte nicht geparsed werden") from exc
+    version = _extract_manifest_version(manifest)
     if not version:
-        return None
-    version_url = f"https://github.com/{repo_slug}/blob/main/ts-connect/VERSION"
+        raise RuntimeError("Manifest enthält kein org.opencontainers.image.version Label.")
+    digest = manifest.get("config", {}).get("digest")
+    if not digest:
+        manifests = manifest.get("manifests")
+        if isinstance(manifests, list) and manifests:
+            digest = manifests[0].get("digest")
+    created = (manifest.get("annotations") or {}).get("org.opencontainers.image.created")
     return {
         "tag_name": version,
         "name": f"Version {version}",
-        "published_at": None,
-        "html_url": version_url,
+        "published_at": created,
+        "html_url": None,
+        "image": image_ref,
+        "digest": digest,
+        "source": "acr",
     }
 
 
@@ -997,12 +1031,8 @@ async def _ensure_latest_release(force: bool = False) -> dict[str, Any] | None:
         age = datetime.now(timezone.utc) - last_check
         if age.total_seconds() < UPDATE_CACHE_SECONDS:
             return latest_release
-    repo_slug = await _determine_repo_slug(force=force)
-    if not repo_slug:
-        await merge_update_state_async(last_check=_now_utc_iso(), last_check_error="Repository konnte nicht bestimmt werden")
-        return latest_release
     try:
-        release = await _fetch_latest_release(repo_slug)
+        release = await _fetch_latest_release()
     except Exception as exc:  # noqa: BLE001
         await merge_update_state_async(
             last_check=_now_utc_iso(),
