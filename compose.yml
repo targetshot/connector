@@ -1,4 +1,4 @@
-name: connector
+name: ts-connect
 services:
   redpanda:
     image: redpandadata/redpanda:v24.1.10
@@ -176,5 +176,9 @@ services:
       - ./elastic-agent/state:/usr/share/elastic-agent/state
     depends_on:
       - ui
+
+networks:
+  default:
+    name: ts-connect_default
 
 volumes: {}
