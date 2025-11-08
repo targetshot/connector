@@ -1232,7 +1232,11 @@ async def _start_update_runner(target_ref: str | None, repo_slug: str | None, co
     if target_ref:
         cmd += ["-e", f"TS_CONNECT_UPDATE_REF={target_ref}"]
     if compose_env:
+        compose_env_file = WORKSPACE_PATH / "compose.env"
         cmd += ["-e", "TS_CONNECT_UPDATE_COMPOSE_ENV=compose.env"]
+        if compose_env_file.exists():
+            # Forward compose.env entries (e.g. registry credentials) into the runner container.
+            cmd += ["--env-file", str(compose_env_file)]
     cmd += [runner_image, "python", "-m", "update_runner"]
     code, stdout, stderr = await _run_command_capture(cmd)
     if code != 0:
@@ -2005,6 +2009,31 @@ def store_license_key(value: str) -> None:
         tmp_path.unlink()
 
 
+def sync_license_key_file(settings: dict | None = None) -> bool:
+    """Ensure license.key reflects the currently stored license value.
+
+    Returns True when the file was changed (written or removed).
+    """
+    if settings is None:
+        settings = fetch_settings()
+    desired = (settings.get("license_key") or "").strip()
+    existing = ""
+    if LICENSE_KEY_FILE.exists():
+        try:
+            existing = LICENSE_KEY_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            existing = ""
+    if desired:
+        if existing != desired:
+            store_license_key(desired)
+            return True
+        return False
+    if LICENSE_KEY_FILE.exists():
+        store_license_key("")
+        return True
+    return False
+
+
 def _license_meta_path() -> Path:
     return DATA_DIR / "license_meta.json"
 
@@ -2205,6 +2234,11 @@ async def init_admin_password() -> None:
     ensure_admin_password_file()
     await ensure_offline_buffer_ready()
     current_settings = fetch_settings()
+    try:
+        if sync_license_key_file(current_settings):
+            logger.info("Synchronized license.key with stored license settings")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("License file sync failed: %s", exc)
     await update_remote_replication_state(_license_is_active(current_settings))
     await configure_git_safety()
     await ensure_update_state()
@@ -3275,6 +3309,23 @@ async def save(
 
     request.session["error_message"] = "Unbekannter Abschnitt."
     return RedirectResponse("/", status_code=303)
+
+
+# --------- License Utilities ----------
+@app.post("/api/license/refresh", dependencies=[Depends(require_session)])
+async def refresh_license_file():
+    settings = fetch_settings()
+    license_value = (settings.get("license_key") or "").strip()
+    if not license_value:
+        raise HTTPException(status_code=400, detail="Keine Lizenz hinterlegt.")
+    updated = sync_license_key_file(settings)
+    return {
+        "ok": True,
+        "updated": updated,
+        "path": str(LICENSE_KEY_FILE),
+        "exists": LICENSE_KEY_FILE.exists(),
+    }
+
 
 # --------- Connector Control ----------
 # --------- Connector Control ----------
