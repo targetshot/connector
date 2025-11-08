@@ -1368,8 +1368,7 @@
       }
       const missing = [];
       if (!prereq.git) missing.push('git');
-      if (!prereq.docker) missing.push('docker');
-      if (!prereq.docker_socket) missing.push('Docker Socket');
+      if (!prereq.update_agent) missing.push('Update-Agent');
       if (!prereq.workspace) missing.push('Workspace-Mount');
       updatePrereqHint.className = 'text-xs text-amber-600 dark:text-amber-300';
       updatePrereqHint.textContent = 'Voraussetzungen fehlen: ' + missing.join(', ');
