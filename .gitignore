@@ -7,3 +7,4 @@ compose.env
 ui/.env
 elastic-agent/state/elastic-agent.yml
 elastic-agent/state/container-paths.yml
+scripts/bump_version.sh
