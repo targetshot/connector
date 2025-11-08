@@ -1,0 +1,25 @@
+services:
+  update-agent:
+    build:
+      context: ../ui
+    image: ${TS_CONNECT_UI_IMAGE:-targetshot.azurecr.io/ts-connect:stable}
+    container_name: ts-connect-update-agent
+    restart: unless-stopped
+    command: ["uvicorn","update_agent:app","--host","0.0.0.0","--port","9000"]
+    environment:
+      TS_CONNECT_WORKSPACE: /workspace
+      TS_CONNECT_DATA_DIR: /app/data
+      TS_CONNECT_UPDATE_AGENT_TOKEN: ${TS_CONNECT_UPDATE_AGENT_TOKEN:-}
+      TS_CONNECT_UPDATE_BUILD_LOCAL: ${TS_CONNECT_UPDATE_BUILD_LOCAL:-false}
+      TS_CONNECT_UI_IMAGE: ${TS_CONNECT_UI_IMAGE:-targetshot.azurecr.io/ts-connect:stable}
+      TS_CONNECT_ACR_REGISTRY: ${TS_CONNECT_ACR_REGISTRY:-}
+      TS_CONNECT_ACR_USERNAME: ${TS_CONNECT_ACR_USERNAME:-}
+      TS_CONNECT_ACR_PASSWORD: ${TS_CONNECT_ACR_PASSWORD:-}
+    volumes:
+      - ../ui/data:/app/data
+      - type: bind
+        source: ${TS_CONNECT_WORKSPACE_HOST:-..}
+        target: /workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:9000:9000"
