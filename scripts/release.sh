@@ -82,6 +82,10 @@ git push origin main
 
 wait_for_workflow "Build & publish ts-connect" "$HEAD_SHA" "$push_epoch"
 
+echo "Tagging release $VERSION …"
+git tag -f "$VERSION" "$HEAD_SHA"
+git push -f origin "$VERSION"
+
 promote_epoch="$(date -u +%s)"
 echo "Triggering stable promotion for $VERSION…"
 gh workflow run "Promote ts-connect image" --ref main -f source="$VERSION" -f channel=stable >/dev/null
