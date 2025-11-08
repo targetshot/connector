@@ -10,6 +10,7 @@ env:
   ACR_NAME: targetshot
   REGISTRY: targetshot.azurecr.io
   AZURE_SUBSCRIPTION_ID: e4d628f6-ede4-4af9-8310-b25724a71961
+  AZURE_EXTENSION_USE_DYNAMIC_INSTALL: yes_without_prompt
 
 jobs:
   build-push-sign:
@@ -52,9 +53,6 @@ jobs:
         run: |
           az account show --query "{sub:id, name:name}" -o table
           az acr show --subscription "${{ env.AZURE_SUBSCRIPTION_ID }}" -n "${ACR_NAME}" -o table
-
-      - name: Ensure ACR extension
-        run: az extension add --upgrade --name acr
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
