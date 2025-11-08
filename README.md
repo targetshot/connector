@@ -13,6 +13,9 @@ cp compose.env.example compose.env  # optional: compose overrides (e.g. UI_BIND_
 # Tipp: Wenn du `compose.env` nutzt, jeden Compose-Befehl mit `--env-file compose.env` aufrufen
 # (oder den Inhalt nach `.env` verschieben), damit Variablen auch in den Containern landen.
 docker compose up -d
+# Update-Agent separat starten (damit `docker compose down` den Runner nicht stoppt)
+cd update-agent
+docker compose --env-file ../compose.env up -d
 ```
 
 ### Versioning & Releases
@@ -45,7 +48,7 @@ docker compose up -d
 - `redpanda`: local Kafka (single node) for offsets/history
 - `kafka-connect`: Confluent Kafka Connect with Debezium MySQL plugin
 - `ui`: FastAPI web UI to manage connector, tests, secrets
-- `update-agent`: Sidecar API that owns the Docker socket, executes update jobs, and restarts auxiliary containers on behalf of the UI
+- `update-agent`: Sidecar API (jetzt als eigenes Compose-Projekt unter `update-agent/compose.yml`) – kümmert sich um Pull/Restart, ohne sich selbst zu stoppen
 - `schema-registry`: lokaler Schema Registry Dienst für Avro/JSON Converter
 - `mirror-maker`: Kafka MirrorMaker 2, spiegelt `ts.raw.*`-Topics in die Confluent Cloud sobald erreichbar
 - `streams-transform`: Kafka Streams Anwendung, die Vereins-Topics auf einheitliche Confluent-Topics mapped

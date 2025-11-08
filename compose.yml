@@ -145,33 +145,8 @@ services:
       TS_CONNECT_ACR_USERNAME: ${TS_CONNECT_ACR_USERNAME:-}
       TS_CONNECT_ACR_PASSWORD: ${TS_CONNECT_ACR_PASSWORD:-}
       ELASTIC_AGENT_ENABLED: ${ELASTIC_AGENT_ENABLED:-false}
-      TS_CONNECT_UPDATE_AGENT_URL: http://update-agent:9000
+      TS_CONNECT_UPDATE_AGENT_URL: ${TS_CONNECT_UPDATE_AGENT_URL:-http://127.0.0.1:9000}
       TS_CONNECT_UPDATE_AGENT_TOKEN: ${TS_CONNECT_UPDATE_AGENT_TOKEN:-}
-    depends_on:
-      - kafka-connect
-      - update-agent
-    volumes:
-      - ./ui/data:/app/data
-      - type: bind
-        source: ${TS_CONNECT_WORKSPACE_HOST:-.}
-        target: /workspace
-      - /var/run/docker.sock:/var/run/docker.sock
-
-  update-agent:
-    build:
-      context: ./ui
-    image: ${TS_CONNECT_UI_IMAGE:-targetshot.azurecr.io/ts-connect:stable}
-    restart: unless-stopped
-    environment:
-      TS_CONNECT_WORKSPACE: /workspace
-      TS_CONNECT_DATA_DIR: /app/data
-      TS_CONNECT_UPDATE_AGENT_TOKEN: ${TS_CONNECT_UPDATE_AGENT_TOKEN:-}
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-ts-connect}
-      TS_CONNECT_UPDATE_BUILD_LOCAL: ${TS_CONNECT_UPDATE_BUILD_LOCAL:-false}
-      TS_CONNECT_UI_IMAGE: ${TS_CONNECT_UI_IMAGE:-targetshot.azurecr.io/ts-connect:stable}
-      TS_CONNECT_ACR_REGISTRY: ${TS_CONNECT_ACR_REGISTRY:-}
-      TS_CONNECT_ACR_USERNAME: ${TS_CONNECT_ACR_USERNAME:-}
-      TS_CONNECT_ACR_PASSWORD: ${TS_CONNECT_ACR_PASSWORD:-}
     depends_on:
       - kafka-connect
     volumes:
@@ -180,7 +155,6 @@ services:
         source: ${TS_CONNECT_WORKSPACE_HOST:-.}
         target: /workspace
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["uvicorn","update_agent:app","--host","0.0.0.0","--port","9000"]
 
   elastic-agent:
     profiles:
