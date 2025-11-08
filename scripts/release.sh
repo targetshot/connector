@@ -38,12 +38,11 @@ function wait_for_workflow() {
     local run_json run_info run_id
     run_json="$(gh run list \
       --workflow "$workflow" \
-      --branch main \
       --limit 20 \
-      --json databaseId,headSha,status,conclusion,createdAt)"
+      --json databaseId,headSha,headBranch,status,conclusion,createdAt)"
 
     run_info="$(echo "$run_json" | jq -r --arg sha "$target_sha" --argjson threshold "$threshold_epoch" '
-      map(select(.headSha == $sha and (.createdAt | fromdateiso8601) >= $threshold))
+      map(select(.headSha == $sha and .headBranch == "main" and (.createdAt | fromdateiso8601) >= $threshold))
       | first // empty')"
 
     if [[ -n "$run_info" ]]; then
