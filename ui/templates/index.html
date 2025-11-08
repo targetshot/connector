@@ -1647,6 +1647,9 @@
           if (data.current_version) {
             parts.push('Aktuelle Version: ' + data.current_version);
           }
+          if (data.current_image) {
+            parts.push('Aktueller Kanal: ' + escapeHtml(data.current_image));
+          }
           if (data.latest_release && data.latest_release.tag_name) {
             const versionName = data.latest_release.name || data.latest_release.tag_name;
             if (data.latest_release.html_url) {

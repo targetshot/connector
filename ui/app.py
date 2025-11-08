@@ -1091,6 +1091,7 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         "repo_slug": repo_slug,
         "compose_env": compose_env_exists,
         "job_started": state.get("job_started"),
+        "current_image": os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE),
         "auto_update": {
             "enabled": auto_enabled,
             "hour": auto_hour,
