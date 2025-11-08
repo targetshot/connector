@@ -54,8 +54,8 @@ jobs:
           az account show --query "{sub:id, name:name}" -o table
           az acr show --subscription "${{ env.AZURE_SUBSCRIPTION_ID }}" -n "${ACR_NAME}" -o table
 
-      - name: Ensure containerregistry extension
-        run: az extension add --upgrade --name containerregistry
+      - name: Ensure ACR extension
+        run: az extension add --upgrade --name acr
 
       - name: Resolve digest
         id: resolve
