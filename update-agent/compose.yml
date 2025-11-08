@@ -1,3 +1,4 @@
+name: update-agent
 services:
   update-agent:
     build:

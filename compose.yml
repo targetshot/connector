@@ -1,3 +1,4 @@
+name: connector
 services:
   redpanda:
     image: redpandadata/redpanda:v24.1.10
