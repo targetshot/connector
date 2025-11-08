@@ -1002,15 +1002,61 @@ async def _fetch_latest_release() -> dict[str, Any] | None:
         manifest = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError("Docker Manifest konnte nicht geparsed werden") from exc
-    version = _extract_manifest_version(manifest)
+    # Single-manifest vs manifest list
+    child_digest: str | None = None
+    manifest_obj: dict[str, Any] = manifest
+    if isinstance(manifest.get("manifests"), list):
+        # Pick the first platform entry
+        first = manifest["manifests"][0]
+        child_digest = first.get("digest")
+    elif isinstance(manifest.get("config"), dict):
+        child_digest = manifest["config"].get("digest")
+    if not child_digest:
+        raise RuntimeError("Manifest Digest konnte nicht bestimmt werden.")
+    # Fetch config blob to read labels
+    try:
+        cfg_code, cfg_out, cfg_err = await _run_command_capture(["docker", "buildx", "imagetools", "inspect", image_ref, "--format", "{{json .Manifest}}"])
+    except FileNotFoundError:
+        cfg_code = 1
+        cfg_out = ""
+        cfg_err = "docker buildx nicht verfügbar"
+    if cfg_code == 0:
+        try:
+            manifest_obj = json.loads(cfg_out)
+        except json.JSONDecodeError:
+            manifest_obj = manifest
+    config_digest = None
+    config_blob = None
+    if manifest_obj and isinstance(manifest_obj, dict):
+        config_digest = manifest_obj.get("config", {}).get("digest") or child_digest
+    if not config_digest:
+        config_digest = child_digest
+    # Use docker buildx imagetools inspect --format to dump config JSON
+    inspect_cmd = [
+        "docker",
+        "buildx",
+        "imagetools",
+        "inspect",
+        image_ref,
+        "--format",
+        "{{json .Manifest.Config}}",
+    ]
+    code_cfg, cfg_json, cfg_err = await _run_command_capture(inspect_cmd)
+    if code_cfg == 0 and cfg_json.strip():
+        try:
+            config_blob = json.loads(cfg_json)
+        except json.JSONDecodeError:
+            config_blob = None
+    version = None
+    created = None
+    if isinstance(config_blob, dict):
+        labels = config_blob.get("Labels") or {}
+        version = labels.get("org.opencontainers.image.version")
+        created = config_blob.get("Created")
     if not version:
-        raise RuntimeError("Manifest enthält kein org.opencontainers.image.version Label.")
-    digest = manifest.get("config", {}).get("digest")
-    if not digest:
-        manifests = manifest.get("manifests")
-        if isinstance(manifests, list) and manifests:
-            digest = manifests[0].get("digest")
-    created = (manifest.get("annotations") or {}).get("org.opencontainers.image.created")
+        # Fall back to annotations on manifest list
+        version = _extract_manifest_version(manifest)
+    digest = config_digest
     return {
         "tag_name": version,
         "name": f"Version {version}",
@@ -2654,7 +2700,7 @@ async def test_confluent(bootstrap: str):
             host, port = bootstrap_value, 9092
         ctx = ssl.create_default_context()
         with socket.create_connection((host, port), timeout=3) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+            with ctx.wrap_socket(sock, server_hostname=host):
                 # handshake ok
                 return {"ok": True, "msg": "TLS handshake OK"}
     except Exception as e:
@@ -3364,7 +3410,8 @@ async def refresh_license_file():
 async def connector_control(action: str, pw: str = Form(...)):
     require_admin(pw)
     valid = {"pause", "resume", "restart"}
-    if action not in valid: raise HTTPException(400, "invalid action")
+    if action not in valid:
+        raise HTTPException(400, "invalid action")
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/{action}")
         return {"ok": r.status_code in (200, 202), "status": r.status_code}
