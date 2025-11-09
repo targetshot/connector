@@ -21,6 +21,7 @@ if not logger.handlers:
 
 WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
+MODULE_DIR = Path(__file__).resolve().parent
 TOKEN = get_update_agent_token(DATA_DIR)
 
 app = FastAPI(title="TargetShot Update Agent")
@@ -83,6 +84,11 @@ def _build_runner_env(payload: RunRequest) -> dict[str, str]:
     env = os.environ.copy()
     env["TS_CONNECT_WORKSPACE"] = str(WORKSPACE_PATH)
     env["TS_CONNECT_DATA_DIR"] = str(DATA_DIR)
+    existing_pythonpath = env.get("PYTHONPATH", "").strip()
+    if existing_pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join((str(MODULE_DIR), existing_pythonpath))
+    else:
+        env["PYTHONPATH"] = str(MODULE_DIR)
     if payload.repo_slug:
         env["TS_CONNECT_GITHUB_REPO"] = payload.repo_slug
     else:
