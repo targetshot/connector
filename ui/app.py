@@ -17,6 +17,7 @@ from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 import psycopg2
 from psycopg2 import sql
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
@@ -346,6 +347,7 @@ GITHUB_TOKEN = os.getenv("TS_CONNECT_GITHUB_TOKEN", "").strip()
 AUTO_UPDATE_DEFAULT_HOUR = int(os.getenv("TS_CONNECT_AUTO_UPDATE_HOUR", "1"))
 AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS", "60"))
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
+AUTO_UPDATE_STALE_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_STALE_SECONDS", "14400"))
 PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
 OS_UPDATE_STATE_PATH = DATA_DIR / "os_update_state.json"
 OS_UPDATE_MAX_AGE_SECONDS = int(os.getenv("TS_CONNECT_OS_UPDATE_MAX_AGE", "21600"))
@@ -365,6 +367,8 @@ _os_update_task: asyncio.Task | None = None
 _git_safe_configured = False
 
 _apply_state_lock = asyncio.Lock()
+_registry_login_lock = asyncio.Lock()
+_logged_in_registries: set[str] = set()
 
 
 class DeferredApplyError(RuntimeError):
@@ -943,6 +947,13 @@ def _calculate_next_auto_run(hour: int, last_run_iso: str | None) -> datetime:
     return candidate_local.astimezone(timezone.utc)
 
 
+def _job_age_seconds(job_started: str | None) -> float | None:
+    start_dt = _parse_iso8601(job_started)
+    if not start_dt:
+        return None
+    return (datetime.now(timezone.utc) - start_dt).total_seconds()
+
+
 async def _ensure_git_safe_directory() -> None:
     global _git_safe_configured
     if _git_safe_configured:
@@ -1049,8 +1060,234 @@ def _image_repo_from_ref(ref: str) -> str:
     return base
 
 
-async def _fetch_latest_release() -> dict[str, Any] | None:
-    image_ref = _resolve_update_image()
+def _registry_from_image(ref: str) -> str | None:
+    base = ref.split("@", 1)[0]
+    if "/" not in base:
+        return None
+    candidate = base.split("/", 1)[0]
+    if "." in candidate or ":" in candidate:
+        return candidate
+    return None
+
+
+def _parse_image_reference(ref: str) -> tuple[str, str, str]:
+    if not ref:
+        raise ValueError("Leerer Image-Ref")
+    name = ref
+    reference: str | None = None
+    if "@" in name:
+        name, reference = name.rsplit("@", 1)
+    else:
+        last_colon = name.rfind(":")
+        last_slash = name.rfind("/")
+        if last_colon > last_slash:
+            name, reference = name[:last_colon], name[last_colon + 1 :]
+    if not reference:
+        reference = "latest"
+    registry: str | None = None
+    repository = name
+    if "/" in name:
+        candidate = name.split("/", 1)[0]
+        if "." in candidate or ":" in candidate or candidate == "localhost":
+            registry = candidate
+            repository = name.split("/", 1)[1]
+    if registry is None:
+        registry = "registry-1.docker.io"
+        if "/" not in repository:
+            repository = f"library/{repository}"
+    if not repository:
+        raise ValueError(f"Ungültiger Image-Ref: {ref}")
+    return registry, repository, reference
+
+
+def _encode_repository_path(repository: str) -> str:
+    parts = [quote(part, safe="") for part in repository.split("/") if part]
+    return "/".join(parts)
+
+
+def _encode_reference(reference: str) -> str:
+    return quote(reference, safe=":@")
+
+
+_REGISTRY_MANIFEST_ACCEPT = ",".join(
+    (
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+    )
+)
+_REGISTRY_CONFIG_ACCEPT = "application/vnd.docker.container.image.v1+json"
+
+
+async def _registry_http_get(
+    registry: str,
+    path: str,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    accept: str | None = None,
+) -> httpx.Response:
+    url = f"https://{registry}{path}"
+    headers: dict[str, str] = {}
+    if accept:
+        headers["Accept"] = accept
+    auth = httpx.BasicAuth(username, password) if username and password else None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url, headers=headers, auth=auth)
+    except httpx.RequestError as exc:  # noqa: BLE001
+        raise RuntimeError(f"Registry {registry} nicht erreichbar: {_short_error_message(str(exc), 160)}") from exc
+    if response.status_code >= 400:
+        detail = _short_error_message(response.text, 160)
+        raise RuntimeError(f"Registry {registry}{path} -> {response.status_code}: {detail}")
+    return response
+
+
+async def _registry_fetch_manifest_json(
+    registry: str,
+    repository_path: str,
+    reference: str,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    path = f"/v2/{repository_path}/manifests/{_encode_reference(reference)}"
+    response = await _registry_http_get(
+        registry,
+        path,
+        username=username,
+        password=password,
+        accept=_REGISTRY_MANIFEST_ACCEPT,
+    )
+    try:
+        return response.json(), response.headers.get("content-type", "")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Registry lieferte ein ungültiges Manifest") from exc
+
+
+async def _registry_fetch_blob_json(
+    registry: str,
+    repository_path: str,
+    digest: str,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+) -> dict[str, Any]:
+    path = f"/v2/{repository_path}/blobs/{_encode_reference(digest)}"
+    response = await _registry_http_get(
+        registry,
+        path,
+        username=username,
+        password=password,
+        accept=_REGISTRY_CONFIG_ACCEPT,
+    )
+    try:
+        return response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Registry lieferte einen ungültigen Image-Config-Blob") from exc
+
+
+def _select_manifest_entry(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    entries = manifest.get("manifests")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        platform = entry.get("platform") or {}
+        if platform.get("architecture") == "amd64":
+            return entry
+    return entries[0] if entries else None
+
+
+async def _ensure_registry_login_for_release(image_ref: str) -> None:
+    registry = os.getenv("TS_CONNECT_ACR_REGISTRY") or _registry_from_image(image_ref)
+    username = os.getenv("TS_CONNECT_ACR_USERNAME", "").strip()
+    password = os.getenv("TS_CONNECT_ACR_PASSWORD", "")
+    if not registry or not username or not password:
+        return
+    async with _registry_login_lock:
+        if registry in _logged_in_registries:
+            return
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            "login",
+            registry,
+            "-u",
+            username,
+            "--password-stdin",
+            stdin=PIPE,
+            stdout=PIPE,
+            stderr=PIPE,
+        )
+        stdout_data, stderr_data = await process.communicate(input=(password + "\n").encode("utf-8"))
+        if process.returncode != 0:
+            stdout = stdout_data.decode("utf-8", "replace").strip()
+            stderr = stderr_data.decode("utf-8", "replace").strip()
+            message = stderr or stdout or f"Docker-Login für {registry} fehlgeschlagen"
+            raise RuntimeError(message)
+        _logged_in_registries.add(registry)
+
+
+async def _fetch_release_via_registry_http(image_ref: str) -> dict[str, Any]:
+    registry, repository, reference = _parse_image_reference(image_ref)
+    repository_path = _encode_repository_path(repository)
+    username = os.getenv("TS_CONNECT_ACR_USERNAME", "").strip() or None
+    password = os.getenv("TS_CONNECT_ACR_PASSWORD", "")
+    manifest, content_type = await _registry_fetch_manifest_json(
+        registry,
+        repository_path,
+        reference,
+        username=username,
+        password=password,
+    )
+    media_type = (manifest.get("mediaType") or content_type or "").lower()
+    if media_type.endswith("manifest.list.v2+json") or media_type.endswith("image.index.v1+json") or manifest.get("manifests"):
+        entry = _select_manifest_entry(manifest)
+        if not entry or not entry.get("digest"):
+            raise RuntimeError("Registry Manifest enthält keine Plattform-Einträge")
+        manifest, _ = await _registry_fetch_manifest_json(
+            registry,
+            repository_path,
+            entry["digest"],
+            username=username,
+            password=password,
+        )
+    config = manifest.get("config") or {}
+    config_digest = config.get("digest")
+    if not config_digest:
+        raise RuntimeError("Registry Manifest enthält keinen Config Digest")
+    config_blob = await _registry_fetch_blob_json(
+        registry,
+        repository_path,
+        config_digest,
+        username=username,
+        password=password,
+    )
+    labels: dict[str, str] = {}
+    config_section = config_blob.get("config")
+    if isinstance(config_section, dict):
+        raw_labels = config_section.get("Labels")
+        if isinstance(raw_labels, dict):
+            labels = raw_labels
+    created = config_blob.get("created")
+    version = (labels.get("org.opencontainers.image.version") or "").strip()
+    if not version:
+        version = (labels.get("org.opencontainers.image.ref.name") or "").strip()
+    if not version:
+        version = _extract_manifest_version(manifest) or reference
+    return {
+        "tag_name": version,
+        "name": f"Version {version}",
+        "published_at": created,
+        "html_url": None,
+        "image": image_ref,
+        "digest": config_digest,
+        "source": "registry-api",
+    }
+
+
+async def _fetch_release_via_docker_cli(image_ref: str) -> dict[str, Any]:
+    await _ensure_registry_login_for_release(image_ref)
     try:
         code, stdout, stderr = await _run_command_capture(["docker", "manifest", "inspect", image_ref])
     except FileNotFoundError as exc:  # pragma: no cover - system dependency
@@ -1114,8 +1351,25 @@ async def _fetch_latest_release() -> dict[str, Any] | None:
         "html_url": None,
         "image": image_ref,
         "digest": config_digest,
-        "source": "acr",
+        "source": "docker-cli",
     }
+
+
+async def _fetch_latest_release() -> dict[str, Any] | None:
+    image_ref = _resolve_update_image()
+    registry_error: str | None = None
+    try:
+        return await _fetch_release_via_registry_http(image_ref)
+    except Exception as exc:  # noqa: BLE001
+        registry_error = _short_error_message(str(exc), 200)
+        logger.info("Registry-API für %s konnte nicht gelesen werden (%s), versuche Docker CLI", image_ref, registry_error)
+    try:
+        return await _fetch_release_via_docker_cli(image_ref)
+    except Exception as exc:  # noqa: BLE001
+        if registry_error:
+            combined = f"{_short_error_message(str(exc), 200)} | Registry-API: {registry_error}"
+            raise RuntimeError(combined) from exc
+        raise
 
 
 async def _ensure_latest_release(force: bool = False) -> dict[str, Any] | None:
@@ -1395,6 +1649,33 @@ async def _auto_update_worker() -> None:
     while True:
         try:
             state = await get_update_state_snapshot()
+            if state.get("status") == "running":
+                if AUTO_UPDATE_STALE_SECONDS > 0:
+                    age_seconds = _job_age_seconds(state.get("job_started"))
+                    if age_seconds is None or age_seconds >= AUTO_UPDATE_STALE_SECONDS:
+                        minutes = None
+                        if age_seconds is not None and age_seconds > 0:
+                            minutes = max(1, int(age_seconds // 60))
+                        suffix = f" (letzte Aktivität vor {minutes} Minuten)" if minutes is not None else ""
+                        reset_updates: dict[str, Any] = {
+                            "status": "idle",
+                            "update_in_progress": False,
+                            "current_action": None,
+                            "last_error": "Update-Status nach Timeout zurückgesetzt",
+                        }
+                        if state.get("auto_update_enabled"):
+                            reset_updates["auto_update_last_run"] = None
+                        await merge_update_state_async(
+                            log_append=[f"Update-Status automatisch auf idle gesetzt{suffix}"],
+                            **reset_updates,
+                        )
+                        state = await get_update_state_snapshot()
+                    else:
+                        await asyncio.sleep(AUTO_UPDATE_CHECK_SECONDS)
+                        continue
+                else:
+                    await asyncio.sleep(AUTO_UPDATE_CHECK_SECONDS)
+                    continue
             if state.get("auto_update_enabled"):
                 auto_hour = _sanitize_hour(state.get("auto_update_hour"))
                 last_run_iso = state.get("auto_update_last_run")
