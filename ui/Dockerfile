@@ -9,8 +9,8 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN set -eux; \
     case "${TARGETARCH}" in \
-      amd64) DOCKER_RELEASE_ARCH="x86_64" ;; \
-      arm64) DOCKER_RELEASE_ARCH="aarch64" ;; \
+      amd64) DOCKER_RELEASE_ARCH="x86_64"; DOCKER_BUILDX_ARCH="amd64" ;; \
+      arm64) DOCKER_RELEASE_ARCH="aarch64"; DOCKER_BUILDX_ARCH="arm64" ;; \
       *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     apt-get update \
@@ -23,7 +23,7 @@ RUN set -eux; \
     && mkdir -p /usr/lib/docker/cli-plugins \
     && curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${DOCKER_RELEASE_ARCH}" -o /usr/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/lib/docker/cli-plugins/docker-compose \
-    && curl -fsSL "https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-${DOCKER_RELEASE_ARCH}" -o /usr/lib/docker/cli-plugins/docker-buildx \
+    && curl -fsSL "https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-${DOCKER_BUILDX_ARCH}" -o /usr/lib/docker/cli-plugins/docker-buildx \
     && chmod +x /usr/lib/docker/cli-plugins/docker-buildx \
     && git config --global --add safe.directory /workspace \
     && rm -rf /var/lib/apt/lists/*
