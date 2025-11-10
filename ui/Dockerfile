@@ -4,6 +4,7 @@ WORKDIR /app
 # Systemdeps schlank halten, Docker CLI & Compose manuell installieren
 ARG DOCKER_CLI_VERSION=26.1.3
 ARG DOCKER_COMPOSE_VERSION=2.29.7
+ARG DOCKER_BUILDX_VERSION=0.17.1
 ARG TARGETOS
 ARG TARGETARCH
 RUN set -eux; \
@@ -22,6 +23,8 @@ RUN set -eux; \
     && mkdir -p /usr/lib/docker/cli-plugins \
     && curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${DOCKER_RELEASE_ARCH}" -o /usr/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/lib/docker/cli-plugins/docker-compose \
+    && curl -fsSL "https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-${DOCKER_RELEASE_ARCH}" -o /usr/lib/docker/cli-plugins/docker-buildx \
+    && chmod +x /usr/lib/docker/cli-plugins/docker-buildx \
     && git config --global --add safe.directory /workspace \
     && rm -rf /var/lib/apt/lists/*
 
