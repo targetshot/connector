@@ -349,6 +349,7 @@ AUTO_UPDATE_CHECK_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_POLL_SECONDS",
 AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1").lower() in {"1", "true", "yes", "on"}
 AUTO_UPDATE_STALE_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_STALE_SECONDS", "14400"))
 PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
+UI_CONTAINER_NAME = os.getenv("TS_CONNECT_UI_CONTAINER_NAME", "ts-connect-ui")
 OS_UPDATE_STATE_PATH = DATA_DIR / "os_update_state.json"
 OS_UPDATE_MAX_AGE_SECONDS = int(os.getenv("TS_CONNECT_OS_UPDATE_MAX_AGE", "21600"))
 OS_UPDATE_LOG_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_LOG_LIMIT", "400"))
@@ -991,6 +992,34 @@ async def _determine_repo_slug(force: bool = False) -> str | None:
     return slug
 
 
+async def _read_local_ui_image_details() -> tuple[str | None, str | None]:
+    container_name = (UI_CONTAINER_NAME or "ts-connect-ui").strip() or "ts-connect-ui"
+    digest: str | None = None
+    image_ref: str | None = None
+    code, output = await _run_command_text(
+        ["docker", "inspect", "--format", "{{.Image}}", container_name],
+        cwd=WORKSPACE_PATH,
+    )
+    if code == 0 and output:
+        digest = output.strip()
+        code_img, img_output = await _run_command_text(
+            ["docker", "inspect", "--format", "{{.Config.Image}}", container_name],
+            cwd=WORKSPACE_PATH,
+        )
+        if code_img == 0 and img_output:
+            image_ref = img_output.strip()
+    if not digest:
+        fallback_image = os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE)
+        code_img, img_digest = await _run_command_text(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", fallback_image],
+            cwd=WORKSPACE_PATH,
+        )
+        if code_img == 0 and img_digest:
+            digest = img_digest.strip()
+            image_ref = fallback_image
+    return digest, image_ref
+
+
 async def _collect_workspace_info() -> dict[str, Any]:
     info: dict[str, Any] = {
         "path": str(WORKSPACE_PATH),
@@ -1118,6 +1147,7 @@ _REGISTRY_MANIFEST_ACCEPT = ",".join(
     )
 )
 _REGISTRY_CONFIG_ACCEPT = "application/vnd.docker.container.image.v1+json"
+_AUTH_PARAM_RE = re.compile(r'(\w+)=(".*?"|[^,]+)')
 
 
 async def _registry_http_get(
@@ -1127,21 +1157,90 @@ async def _registry_http_get(
     username: str | None = None,
     password: str | None = None,
     accept: str | None = None,
+    scope: str | None = None,
 ) -> httpx.Response:
     url = f"https://{registry}{path}"
     headers: dict[str, str] = {}
     if accept:
         headers["Accept"] = accept
     auth = httpx.BasicAuth(username, password) if username and password else None
+    bearer_token: str | None = None
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(url, headers=headers, auth=auth)
+            if response.status_code == 401:
+                challenge = response.headers.get("www-authenticate", "")
+                params = _parse_www_authenticate_header(challenge)
+                if params.get("scheme") == "bearer":
+                    token = await _registry_fetch_bearer_token(
+                        params,
+                        username=username,
+                        password=password,
+                        scope_override=scope,
+                    )
+                    if token:
+                        bearer_token = token
+                        headers.pop("Authorization", None)
+                        headers["Authorization"] = f"Bearer {token}"
+                        response = await client.get(url, headers=headers)
     except httpx.RequestError as exc:  # noqa: BLE001
         raise RuntimeError(f"Registry {registry} nicht erreichbar: {_short_error_message(str(exc), 160)}") from exc
     if response.status_code >= 400:
         detail = _short_error_message(response.text, 160)
-        raise RuntimeError(f"Registry {registry}{path} -> {response.status_code}: {detail}")
+        auth_hint = ""
+        if response.status_code == 401 and not bearer_token:
+            auth_hint = " (Authentifizierung fehlgeschlagen)"
+        raise RuntimeError(f"Registry {registry}{path} -> {response.status_code}: {detail}{auth_hint}")
     return response
+
+
+def _parse_www_authenticate_header(header: str) -> dict[str, str]:
+    if not header:
+        return {}
+    parts = header.split(" ", 1)
+    scheme = parts[0].strip().lower()
+    params_part = parts[1] if len(parts) > 1 else ""
+    params: dict[str, str] = {"scheme": scheme}
+    for match in _AUTH_PARAM_RE.finditer(params_part):
+        key = match.group(1).lower()
+        value = match.group(2).strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        params[key] = value
+    return params
+
+
+async def _registry_fetch_bearer_token(
+    auth_params: dict[str, str],
+    *,
+    username: str | None,
+    password: str | None,
+    scope_override: str | None,
+) -> str | None:
+    realm = auth_params.get("realm")
+    if not realm:
+        return None
+    params: dict[str, str] = {}
+    service = auth_params.get("service")
+    if service:
+        params["service"] = service
+    scope = auth_params.get("scope") or scope_override
+    if scope:
+        params["scope"] = scope
+    auth = httpx.BasicAuth(username, password) if username and password else None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(realm, params=params or None, auth=auth)
+    except httpx.RequestError:
+        return None
+    if response.status_code >= 400:
+        return None
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        return None
+    token = data.get("access_token") or data.get("token")
+    return token
 
 
 async def _registry_fetch_manifest_json(
@@ -1149,16 +1248,19 @@ async def _registry_fetch_manifest_json(
     repository_path: str,
     reference: str,
     *,
+    repository_scope: str | None = None,
     username: str | None = None,
     password: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     path = f"/v2/{repository_path}/manifests/{_encode_reference(reference)}"
+    scope = f"repository:{repository_scope}:pull" if repository_scope else None
     response = await _registry_http_get(
         registry,
         path,
         username=username,
         password=password,
         accept=_REGISTRY_MANIFEST_ACCEPT,
+        scope=scope,
     )
     try:
         return response.json(), response.headers.get("content-type", "")
@@ -1171,16 +1273,19 @@ async def _registry_fetch_blob_json(
     repository_path: str,
     digest: str,
     *,
+    repository_scope: str | None = None,
     username: str | None = None,
     password: str | None = None,
 ) -> dict[str, Any]:
     path = f"/v2/{repository_path}/blobs/{_encode_reference(digest)}"
+    scope = f"repository:{repository_scope}:pull" if repository_scope else None
     response = await _registry_http_get(
         registry,
         path,
         username=username,
         password=password,
         accept=_REGISTRY_CONFIG_ACCEPT,
+        scope=scope,
     )
     try:
         return response.json()
@@ -1237,6 +1342,7 @@ async def _fetch_release_via_registry_http(image_ref: str) -> dict[str, Any]:
         registry,
         repository_path,
         reference,
+        repository_scope=repository,
         username=username,
         password=password,
     )
@@ -1249,6 +1355,7 @@ async def _fetch_release_via_registry_http(image_ref: str) -> dict[str, Any]:
             registry,
             repository_path,
             entry["digest"],
+            repository_scope=repository,
             username=username,
             password=password,
         )
@@ -1260,6 +1367,7 @@ async def _fetch_release_via_registry_http(image_ref: str) -> dict[str, Any]:
         registry,
         repository_path,
         config_digest,
+        repository_scope=repository,
         username=username,
         password=password,
     )
@@ -1402,13 +1510,21 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
     state = await get_update_state_snapshot()
     release = await _ensure_latest_release(force=force)
     workspace_info = await _collect_workspace_info()
+    local_image_digest, local_image_ref = await _read_local_ui_image_details()
     connect_version, connect_release = _load_version_defaults()
     prereq = await _detect_prerequisites(workspace_info)
     repo_slug = await _determine_repo_slug()
     compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
     current_marker = connect_version or workspace_info.get("current_ref") or workspace_info.get("current_commit")
     latest_tag = release.get("tag_name") if isinstance(release, dict) else None
-    update_available = bool(latest_tag and current_marker and latest_tag != current_marker)
+    remote_digest = release.get("digest") if isinstance(release, dict) else None
+    update_available = False
+    if latest_tag and current_marker and latest_tag != current_marker:
+        update_available = True
+    elif remote_digest and local_image_digest and remote_digest != local_image_digest:
+        update_available = True
+    elif remote_digest and not local_image_digest:
+        update_available = True
     auto_enabled = bool(state.get("auto_update_enabled"))
     auto_hour = _sanitize_hour(state.get("auto_update_hour"))
     auto_last_run = state.get("auto_update_last_run")
@@ -1428,7 +1544,10 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         "current_action": state.get("current_action"),
         "current_version": connect_version,
         "current_release": connect_release,
+        "current_image": local_image_ref,
+        "current_image_digest": local_image_digest,
         "latest_release": release,
+        "latest_release_digest": remote_digest,
         "update_available": update_available,
         "last_check": state.get("last_check"),
         "last_check_error": state.get("last_check_error"),
