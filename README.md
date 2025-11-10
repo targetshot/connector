@@ -20,6 +20,7 @@ docker compose --env-file ../compose.env up -d
 
 ### Versioning & Releases
 - Update the version defaults once per release. Run `./scripts/bump_version.sh vX.Y.Z [ReleaseName]` from the repo root. This updates `ts-connect/VERSION` (and optionally `ts-connect/RELEASE`).
+
 - For a fully automated workflow (stage dev changes → merge main → bump version → wait for the build → promote `stable`), use `./scripts/release.sh vX.Y.Z [ReleaseName]`. The script requires `git`, `gh`, and `jq` to be installed and authenticated.
 - Commit the version file changes and merge them into `main`. Pushing to `main` automatically triggers the **Build & publish ts-connect** workflow.
 - The UI reads `VERSION`/`RELEASE` automatically when `TS_CONNECT_VERSION`/`TS_CONNECT_RELEASE` are not set.
