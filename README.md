@@ -63,6 +63,7 @@ docker compose --env-file ../compose.env up -d
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
 - Docker socket access moved into the dedicated `update-agent` service. The UI talks to it via `TS_CONNECT_UPDATE_AGENT_URL` (defaults to `http://update-agent:9000`) and authenticates with `TS_CONNECT_UPDATE_AGENT_TOKEN`. Leave the token empty to auto-generate a shared secret in `ui/data/update-agent.token`.
 
+
 ### Kafka Streams Transformation
 - Der Dienst `streams-transform` abonniert alle Topics nach dem Muster `<Vereinsnummer>.SMDB.(Schuetze|Treffer|Scheiben|Serien)` und leitet sie in die Standard-Topics `ts.sds-test.{schuetze,treffer,scheiben,serien}` weiter.
 - Standardmäßig verbindet sich die Anwendung mit `redpanda:9092`; per `TS_STREAMS_TARGET_PREFIX` lässt sich das Zielpräfix anpassen.
