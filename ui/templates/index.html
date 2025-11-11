@@ -705,6 +705,7 @@
                 <span id="updateStatusHint" class="text-xs text-zinc-500 dark:text-zinc-400"></span>
               </div>
             </section>
+            {% if host_agent_configured %}
             <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6 lg:col-span-2">
               <div>
                 <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Betriebssystem-Updates</h2>
@@ -737,8 +738,29 @@
                   <button type="button" id="btnCheckOsUpdates" class="btn-secondary">Systemcheck</button>
                   <button type="button" id="btnApplyOsUpdates" class="btn-secondary">Pakete aktualisieren</button>
                 </div>
+                <div class="mt-6 rounded-2xl border border-zinc-200/70 bg-white/80 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-white/5">
+                  <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p class="font-semibold text-zinc-800 dark:text-white">Server-Neustart</p>
+                      <p id="hostRebootSummary" class="text-[0.75rem] text-zinc-500 dark:text-zinc-300">Status wird geladen…</p>
+                    </div>
+                    <button type="button" id="btnHostReboot" class="btn-secondary">Server neu starten</button>
+                  </div>
+                  <pre id="hostRebootLog" class="mt-3 hidden max-h-32 overflow-auto whitespace-pre-wrap rounded-2xl bg-black/80 p-3 text-[0.72rem] text-indigo-200 dark:bg-black/60"></pre>
+                </div>
               </div>
             </section>
+            {% else %}
+            <section class="rounded-[28px] border border-dashed border-amber-300/70 bg-amber-50/70 p-7 text-sm text-amber-900 shadow-inner dark:border-amber-200/40 dark:bg-amber-500/10 dark:text-amber-100 lg:col-span-2">
+              <h2 class="brand-sub text-xl font-semibold text-amber-900 dark:text-amber-100">Host-Agent nicht verbunden</h2>
+              <p class="mt-3">Installiere den neuen TargetShot Host Agent auf dem Server, um Betriebssystem-Updates und Neustarts direkt aus der UI zu steuern.</p>
+              <ul class="mt-3 list-disc space-y-1 pl-5 text-amber-900/80 dark:text-amber-100/90">
+                <li>Installationsanleitung siehe README Abschnitt „Host-Agent“.</li>
+                <li>Setze <code>TS_CONNECT_HOST_AGENT_URL</code> und übermittle das Token an die UI (Datei <code>ui/data/host-agent.token</code>).</li>
+                <li>Starte die Container neu: <code>docker compose --env-file compose.env up -d</code> sowie <code>cd update-agent &amp;&amp; docker compose --env-file ../compose.env up -d</code>.</li>
+              </ul>
+            </section>
+            {% endif %}
             </div>
           </div>
         </div>
@@ -1196,6 +1218,7 @@
     const btnRunUpdate = document.getElementById('btnRunUpdate');
     const btnCheckOsUpdates = document.getElementById('btnCheckOsUpdates');
     const btnApplyOsUpdates = document.getElementById('btnApplyOsUpdates');
+    const btnHostReboot = document.getElementById('btnHostReboot');
     const updateStatusHint = document.getElementById('updateStatusHint');
     const licenseLastCheckedDateEl = document.getElementById('licenseLastCheckedDate');
     const licenseLastCheckedTimeEl = document.getElementById('licenseLastCheckedTime');
@@ -1215,6 +1238,7 @@
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const btnCheckOsDefaultText = btnCheckOsUpdates ? btnCheckOsUpdates.textContent : '';
     const btnApplyOsDefaultText = btnApplyOsUpdates ? btnApplyOsUpdates.textContent : '';
+    const btnHostRebootDefaultText = btnHostReboot ? btnHostReboot.textContent : '';
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     let updateReloadTimer = null;
     const autoUpdateHour = document.getElementById('autoUpdateHour');
@@ -1230,6 +1254,8 @@
     const osUpdateLastApplied = document.getElementById('osUpdateLastApplied');
     const osUpdateSecurityNotice = document.getElementById('osUpdateSecurityNotice');
     const osUpdateLog = document.getElementById('osUpdateLog');
+    const hostRebootSummary = document.getElementById('hostRebootSummary');
+    const hostRebootLog = document.getElementById('hostRebootLog');
     let osUpdatePollTimer = null;
 
     function escapeHtml(value) {
@@ -1578,6 +1604,53 @@
       }
     }
 
+    function renderHostRebootState(data) {
+      if (!hostRebootSummary) return;
+      const pending = !!data?.pending;
+      const action = data?.current_action;
+      const scheduled = data?.scheduled_for;
+      const lastSuccess = data?.last_success;
+      const lastError = data?.last_error;
+      const parts = [];
+      if (pending) {
+        parts.push('Neustart vorbereitet…');
+      }
+      if (action) {
+        parts.push(action);
+      }
+      if (scheduled) {
+        parts.push(`Geplant für ${formatIso(scheduled)}`);
+      }
+      if (!pending && !action && lastSuccess) {
+        parts.push(`Letzter Neustart: ${formatIso(lastSuccess)}`);
+      }
+      if (lastError) {
+        parts.push(`Fehler: ${lastError}`);
+      }
+      hostRebootSummary.textContent = parts.join(' · ') || 'Bereit';
+      if (hostRebootLog) {
+        const logLines = Array.isArray(data?.log) ? data.log : [];
+        const hasLog = pending || action || logLines.length > 0;
+        if (hasLog) {
+          hostRebootLog.classList.remove('hidden');
+          hostRebootLog.textContent = logLines.join('\n') || 'Keine Logausgaben.';
+        } else {
+          hostRebootLog.classList.add('hidden');
+          hostRebootLog.textContent = '';
+        }
+      }
+      if (btnHostReboot) {
+        btnHostReboot.disabled = pending;
+        btnHostReboot.classList.toggle('opacity-60', pending);
+        btnHostReboot.classList.toggle('cursor-not-allowed', pending);
+        if (!pending && btnHostRebootDefaultText) {
+          btnHostReboot.textContent = btnHostRebootDefaultText;
+        } else if (pending) {
+          btnHostReboot.textContent = 'Neustart läuft…';
+        }
+      }
+    }
+
     async function loadOsUpdateStatus(force) {
       if (!osUpdateBadge) return;
       if (osUpdatePollTimer) {
@@ -1585,15 +1658,25 @@
         osUpdatePollTimer = null;
       }
       try {
-        const url = force ? '/api/os-updates/status?refresh=1' : '/api/os-updates/status';
-        const response = await fetch(url);
+        if (force) {
+          const refreshResponse = await fetch('/api/host/os-refresh', { method: 'POST' });
+          const refreshData = await refreshResponse.json().catch(() => ({}));
+          if (!refreshResponse.ok || refreshData.ok === false) {
+            const detail = refreshData.detail || refreshResponse.statusText || refreshResponse.status;
+            throw new Error(String(detail || 'Systemcheck konnte nicht gestartet werden.'));
+          }
+        }
+        const response = await fetch('/api/host/status');
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
           const detail = data.detail || response.statusText || response.status;
           throw new Error(String(detail));
         }
-        renderOsUpdateState(data);
-        if (data.update_in_progress || data.check_in_progress) {
+        renderOsUpdateState(data?.os || {});
+        renderHostRebootState(data?.reboot || {});
+        const osState = data?.os || {};
+        const rebootState = data?.reboot || {};
+        if (osState.update_in_progress || osState.check_in_progress || rebootState.pending) {
           osUpdatePollTimer = setTimeout(() => {
             loadOsUpdateStatus(false).catch(() => {});
           }, 5000);
@@ -1614,6 +1697,18 @@
           btnApplyOsUpdates.disabled = false;
           btnApplyOsUpdates.classList.remove('opacity-60', 'cursor-not-allowed');
           btnApplyOsUpdates.textContent = btnApplyOsDefaultText || 'Pakete aktualisieren';
+        }
+        if (hostRebootSummary) {
+          hostRebootSummary.textContent = error instanceof Error ? error.message : String(error);
+        }
+        if (hostRebootLog) {
+          hostRebootLog.classList.add('hidden');
+          hostRebootLog.textContent = '';
+        }
+        if (btnHostReboot) {
+          btnHostReboot.disabled = false;
+          btnHostReboot.classList.remove('opacity-60', 'cursor-not-allowed');
+          btnHostReboot.textContent = btnHostRebootDefaultText || 'Server neu starten';
         }
         if (!osUpdatePollTimer) {
           osUpdatePollTimer = setTimeout(() => {
@@ -1808,7 +1903,7 @@
         btnApplyOsUpdates.classList.add('opacity-60', 'cursor-not-allowed');
         btnApplyOsUpdates.textContent = 'Installation läuft…';
         try {
-          const response = await fetch('/api/os-updates/apply', { method: 'POST', body: fd });
+          const response = await fetch('/api/host/os-update', { method: 'POST', body: fd });
           const data = await response.json().catch(() => ({}));
           if (!response.ok || !data.ok) {
             const detail = data.detail || data.error || response.statusText || response.status;
@@ -1820,6 +1915,37 @@
           const message = error instanceof Error ? error.message : String(error);
           showInfoModal('Systemupdate fehlgeschlagen', message, 'error');
           await loadOsUpdateStatus(false);
+        }
+      };
+    }
+
+    if (btnHostReboot) {
+      btnHostReboot.onclick = async () => {
+        if (btnHostReboot.disabled) return;
+        const confirmed = await showConfirmModal('Server jetzt neu starten? Alle Dienste werden sauber gestoppt und anschließend wird das System rebootet.');
+        if (!confirmed) return;
+        const pw = await askAdminPassword();
+        if (!pw) return;
+        const fd = new FormData();
+        fd.append('pw', pw);
+        btnHostReboot.disabled = true;
+        btnHostReboot.classList.add('opacity-60', 'cursor-not-allowed');
+        btnHostReboot.textContent = 'Reboot geplant…';
+        try {
+          const response = await fetch('/api/host/reboot', { method: 'POST', body: fd });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || data.ok === false) {
+            const detail = data.detail || data.error || response.statusText || response.status;
+            throw new Error(detail ? String(detail) : 'Neustart konnte nicht geplant werden.');
+          }
+          showInfoModal('Reboot geplant', 'Die Dienste werden gestoppt und der Server wird anschließend neu gestartet. Die UI versucht automatisch, die Verbindung wiederherzustellen.');
+          await loadOsUpdateStatus(false);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          showInfoModal('Neustart fehlgeschlagen', message, 'error');
+          btnHostReboot.disabled = false;
+          btnHostReboot.classList.remove('opacity-60', 'cursor-not-allowed');
+          btnHostReboot.textContent = btnHostRebootDefaultText || 'Server neu starten';
         }
       };
     }
