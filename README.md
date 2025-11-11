@@ -82,6 +82,8 @@ Der neue Host-Agent läuft außerhalb von Docker direkt auf dem Server und kümm
      TS_CONNECT_HOST_AGENT_TOKEN=<Inhalt aus /etc/ts-connect-host-agent/token>
      ```
      (Alternativ den Token nach `ui/data/host-agent.token` kopieren.)
+     Falls `host.docker.internal` auf deiner Docker-Version nicht auf den Host zeigt, setze zusätzlich
+     `TS_CONNECT_HOST_GATEWAY_OVERRIDE=mein-hostname:meine-ip` (Standard `host.docker.internal:host-gateway`).
    - UI + Update-Agent neu starten:
      ```bash
      docker compose --env-file compose.env up -d
