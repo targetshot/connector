@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import threading
 from pathlib import Path
 from typing import Any
-import threading
 
 
 def _default_state() -> dict[str, Any]:
@@ -27,7 +28,9 @@ def _default_state() -> dict[str, Any]:
 
 
 def _tmp_path_for(path: Path) -> Path:
-    return path.with_name(f".{path.name}.tmp")
+    # Include PID and random suffix to avoid clashes across processes/containers
+    suffix = secrets.token_hex(4)
+    return path.with_name(f".{path.name}.{os.getpid()}.{suffix}.tmp")
 
 
 def _fsync_directory(path: Path) -> None:
