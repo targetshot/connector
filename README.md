@@ -45,6 +45,56 @@ docker compose --env-file ../compose.env up -d
 - Environments without Watchtower can continue to rely on the built-in manual/auto-update flow; Watchtower is optional and simply adds continuous polling for the channel tag.
 - Azure Container Registry authentication: either log in once per host (`docker login targetshot.azurecr.io -u <user> --password-stdin`) using an ACR token/service principal, or set `TS_CONNECT_ACR_USERNAME/TS_CONNECT_ACR_PASSWORD` (and optionally `TS_CONNECT_ACR_REGISTRY`) in `compose.env` so the update runner performs `docker login` automatically before `docker compose pull`. Using a Docker credential helper (`pass`, `secretservice`, `osxkeychain`, …) is recommended to store the token securely.
 
+### Host-Agent für OS-Updates & Neustart
+Der neue Host-Agent läuft außerhalb von Docker direkt auf dem Server und kümmert sich um sichere Betriebssystem-Updates sowie orchestrierte Reboots. Die UI spricht ihn über eine geschützte HTTP-API an.
+
+1. **Installieren**
+   ```bash
+   cd /opt/ts-connect/host-agent
+   python3 -m venv /opt/ts-host-agent
+   source /opt/ts-host-agent/bin/activate
+   pip install -r requirements.txt
+   ```
+   Beispiel-Unit `/etc/systemd/system/ts-connect-host-agent.service`:
+   ```ini
+   [Unit]
+   Description=TargetShot Host Agent
+   After=network.target docker.service
+
+   [Service]
+   Type=simple
+   WorkingDirectory=/opt/ts-connect/host-agent
+   Environment=TS_HOST_WORKSPACE=/opt/ts-connect
+   Environment=TS_HOST_COMPOSE_ENV=compose.env
+   Environment=TS_HOST_UPDATE_AGENT_PATH=/opt/ts-connect/update-agent
+   ExecStart=/opt/ts-host-agent/bin/python host_agent.py --host 127.0.0.1 --port 9010
+   Restart=on-failure
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   Der Agent erstellt automatisch `/etc/ts-connect-host-agent/token` und `/var/lib/ts-connect-host-agent/state.json`.
+
+2. **UI anbinden**
+   - Setze in `compose.env`:  
+     ```
+     TS_CONNECT_HOST_AGENT_URL=http://127.0.0.1:9010
+     TS_CONNECT_HOST_AGENT_TOKEN=<Inhalt aus /etc/ts-connect-host-agent/token>
+     ```
+     (Alternativ den Token nach `ui/data/host-agent.token` kopieren.)
+   - UI + Update-Agent neu starten:
+     ```bash
+     docker compose --env-file compose.env up -d
+     cd update-agent && docker compose --env-file ../compose.env up -d
+     ```
+
+3. **Funktionsumfang**
+   - `Systemcheck` ruft `apt-get update && apt list --upgradable` direkt auf dem Host auf.
+   - `Pakete aktualisieren` startet `apt-get upgrade && apt-get autoremove`.
+   - `Server neu starten` stoppt zuerst den Haupt-Stack (`docker compose down`), anschließend den Update-Agent, synchronisiert das Dateisystem und triggert einen zeitnahen Reboot (Standardverzögerung `TS_CONNECT_HOST_REBOOT_DELAY`, Default 60 s).
+
+Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Agent benötigt Root-Rechte (oder passende sudo-Regeln), damit apt und `shutdown` ausgeführt werden können.
+
 ### Services
 - `redpanda`: local Kafka (single node) for offsets/history
 - `kafka-connect`: Confluent Kafka Connect with Debezium MySQL plugin

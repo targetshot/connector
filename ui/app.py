@@ -42,6 +42,7 @@ from licenses import (
     required_plan_for_shooter_count,
     retention_for_license,
 )
+from host_agent_utils import get_host_agent_token
 from update_agent_utils import get_update_agent_token
 from update_state import UpdateStateManager
 
@@ -85,6 +86,11 @@ ADMIN_PASSWORD_GENERATED_FILE = DATA_DIR / "admin_password.generated"
 SESSION_SECRET_FILE = DATA_DIR / "session_secret"
 UPDATE_AGENT_URL = os.getenv("TS_CONNECT_UPDATE_AGENT_URL", "http://update-agent:9000").rstrip("/")
 UPDATE_AGENT_TOKEN = get_update_agent_token(DATA_DIR)
+HOST_AGENT_URL = os.getenv("TS_CONNECT_HOST_AGENT_URL", "").strip()
+if HOST_AGENT_URL:
+    HOST_AGENT_URL = HOST_AGENT_URL.rstrip("/")
+HOST_AGENT_TOKEN = get_host_agent_token(DATA_DIR)
+HOST_REBOOT_DELAY_SECONDS = int(os.getenv("TS_CONNECT_HOST_REBOOT_DELAY", "60"))
 SECRETS_FILE_UID = _env_int("TS_CONNECT_SECRETS_UID", 1000)
 SECRETS_FILE_GID = _env_int("TS_CONNECT_SECRETS_GID", 1000)
 
@@ -190,6 +196,43 @@ async def _update_agent_request(
 async def _ping_update_agent(timeout: float = 3.0) -> bool:
     try:
         result = await _update_agent_request("GET", "/api/v1/health", timeout=timeout)
+    except Exception:
+        return False
+    return bool(result.get("ok"))
+
+
+async def _host_agent_request(
+    method: str,
+    path: str,
+    *,
+    json_payload: dict | None = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    if not HOST_AGENT_URL:
+        raise RuntimeError("Host-Agent URL nicht konfiguriert")
+    url = f"{HOST_AGENT_URL}{path}"
+    headers: dict[str, str] = {}
+    token = HOST_AGENT_TOKEN
+    if token:
+        headers["X-Host-Agent-Token"] = token
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(method, url, json=json_payload, headers=headers)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Host-Agent nicht erreichbar: {_short_error_message(str(exc), 140)}") from exc
+    if response.status_code >= 400:
+        text = _short_error_message(response.text, 200)
+        raise RuntimeError(f"Host-Agent {response.status_code}: {text}")
+    if response.headers.get("content-type", "").startswith("application/json"):
+        return response.json()
+    return {"ok": True, "body": response.text}
+
+
+async def _ping_host_agent(timeout: float = 3.0) -> bool:
+    if not HOST_AGENT_URL:
+        return False
+    try:
+        result = await _host_agent_request("GET", "/api/v1/health", timeout=timeout)
     except Exception:
         return False
     return bool(result.get("ok"))
@@ -1061,11 +1104,19 @@ async def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any
     git_available = _binary_found("git", ("/usr/bin/git", "/usr/local/bin/git"))
     workspace_ready = bool(workspace_info.get("exists") and workspace_info.get("git"))
     update_agent_ok = await _ping_update_agent()
+    host_agent_required = bool(HOST_AGENT_URL)
+    host_agent_ok = True
+    if host_agent_required:
+        host_agent_ok = await _ping_host_agent()
+    overall = git_available and workspace_ready and update_agent_ok
+    if host_agent_required:
+        overall = overall and host_agent_ok
     return {
         "git": git_available,
         "update_agent": update_agent_ok,
         "workspace": workspace_ready,
-        "ok": git_available and workspace_ready and update_agent_ok,
+        "host_agent": host_agent_ok if host_agent_required else None,
+        "ok": overall,
     }
 
 
@@ -2999,6 +3050,7 @@ def build_index_context(request: Request) -> dict:
         "default_server_name": DEFAULT_SERVER_NAME,
         "license": license_info,
         "license_activation_enabled": LEMON_ACTIVATION_ENABLED,
+        "host_agent_configured": bool(HOST_AGENT_URL),
     }
 
 
@@ -3956,6 +4008,50 @@ async def os_updates_apply(pw: str = Form(...)):
     _os_update_task = asyncio.create_task(_run_os_updates_job())
     _os_update_task.add_done_callback(_os_update_task_done)
     return {"ok": True}
+
+
+def _ensure_host_agent_configured() -> None:
+    if not HOST_AGENT_URL:
+        raise HTTPException(status_code=503, detail="Host-Agent nicht konfiguriert.")
+
+
+@app.get("/api/host/status", dependencies=[Depends(require_session)])
+async def host_status():
+    _ensure_host_agent_configured()
+    try:
+        return await _host_agent_request("GET", "/api/v1/status", timeout=10)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_short_error_message(str(exc), 200))
+
+
+@app.post("/api/host/os-refresh", dependencies=[Depends(require_session)])
+async def host_os_refresh():
+    _ensure_host_agent_configured()
+    try:
+        return await _host_agent_request("POST", "/api/v1/os/refresh", timeout=5)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 200))
+
+
+@app.post("/api/host/os-update", dependencies=[Depends(require_session)])
+async def host_os_update(pw: str = Form(...)):
+    require_admin(pw)
+    _ensure_host_agent_configured()
+    try:
+        return await _host_agent_request("POST", "/api/v1/os/update", timeout=5)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 200))
+
+
+@app.post("/api/host/reboot", dependencies=[Depends(require_session)])
+async def host_reboot(pw: str = Form(...), delay: int = Form(HOST_REBOOT_DELAY_SECONDS)):
+    require_admin(pw)
+    _ensure_host_agent_configured()
+    payload = {"delay": max(0, min(int(delay), 3600))}
+    try:
+        return await _host_agent_request("POST", "/api/v1/reboot", json_payload=payload, timeout=5)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 200))
 
 if __name__ == "__main__":
     import uvicorn
