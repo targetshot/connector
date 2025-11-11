@@ -156,6 +156,8 @@ services:
         source: ${TS_CONNECT_WORKSPACE_HOST:-.}
         target: /workspace
       - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "${TS_CONNECT_HOST_GATEWAY_OVERRIDE:-host.docker.internal:host-gateway}"
 
   elastic-agent:
     profiles:
