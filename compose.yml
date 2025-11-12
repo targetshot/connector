@@ -82,6 +82,8 @@ services:
     restart: unless-stopped
     environment:
       KAFKA_LOG4J_ROOT_LOGLEVEL: INFO
+      KAFKA_LOG4J_OPTS: "-Dlog4j.configuration=file:/etc/kafka/connect-log4j.properties"
+      KAFKA_LOG4J_LOGGERS: "org.apache.zookeeper=ERROR,org.I0Itec.zkclient=ERROR"
     entrypoint: /bin/bash
     command: >
       -lc "
