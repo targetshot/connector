@@ -2196,6 +2196,7 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         "remote.ssl.endpoint.identification.algorithm = https",
         "local->remote.enabled = true",
         "remote->local.enabled = false",
+        f"local->remote.enabled = true",
         f"local->remote.topics = {STREAMS_TARGET_PREFIX}.*",
         "local->remote.groups = _ts.*",
         "local->remote.emit.heartbeats.interval.seconds = 15",
