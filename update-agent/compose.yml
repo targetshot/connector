@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     command: ["uvicorn","update_agent:app","--host","0.0.0.0","--port","9000"]
     environment:
-      TS_CONNECT_WORKSPACE: /workspace
+      TS_CONNECT_WORKSPACE: ${TS_CONNECT_WORKSPACE_HOST:-/workspace}
       TS_CONNECT_DATA_DIR: /app/data
       TS_CONNECT_UPDATE_AGENT_TOKEN: ${TS_CONNECT_UPDATE_AGENT_TOKEN:-}
       TS_CONNECT_UPDATE_BUILD_LOCAL: ${TS_CONNECT_UPDATE_BUILD_LOCAL:-false}
@@ -23,6 +23,9 @@ services:
       - type: bind
         source: ${TS_CONNECT_WORKSPACE_HOST:-..}
         target: /workspace
+      - type: bind
+        source: ${TS_CONNECT_WORKSPACE_HOST:-..}
+        target: ${TS_CONNECT_WORKSPACE_HOST:-/workspace_host}
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "127.0.0.1:9000:9000"
