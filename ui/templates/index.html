@@ -351,7 +351,7 @@
           </div>
           {% endif %}
 
-          <div class="grid gap-7 lg:grid-cols-2">
+          <div class="grid grid-cols-1 gap-7 lg:grid-cols-2">
             <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
               <input type="hidden" name="section" value="db" />
               <div>
@@ -634,7 +634,7 @@
               </div>
             </section>
 
-            <div class="grid gap-7 lg:grid-cols-2">
+            <div class="grid grid-cols-1 gap-7 lg:grid-cols-2">
               <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
                 <input type="hidden" name="section" value="admin" />
                 <div>
@@ -671,7 +671,26 @@
                   <span id="updateStatusBadge" class="badge">…</span>
                   <span id="updateStatusText" class="text-zinc-700 dark:text-zinc-200">Status wird ermittelt…</span>
                 </div>
-                <div id="updateVersionInfo">Version wird geladen…</div>
+                <div id="updateVersionInfo" class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/60 dark:text-zinc-200">
+                  <div class="grid gap-4 md:grid-cols-2">
+                    <div>
+                      <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Aktuelle Version</p>
+                      <p id="updateCurrentVersion" class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-white">–</p>
+                      <p id="updateLatestVersion" class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Letzte Version: –</p>
+                    </div>
+                    <div>
+                      <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Bereitgestellter Kanal</p>
+                      <div class="mt-2 inline-flex items-center gap-2 rounded-full border border-indigo-200/70 bg-indigo-50/80 px-3 py-1 text-sm font-semibold text-indigo-700 shadow-sm dark:border-indigo-400/40 dark:bg-indigo-500/10 dark:text-indigo-200">
+                        <span id="updateChannelBadge">–</span>
+                      </div>
+                      <p id="updateChannelDetail" class="mt-2 text-xs text-zinc-500 dark:text-zinc-400 break-all">Kanal-URL wird geladen…</p>
+                    </div>
+                  </div>
+                  <div class="mt-3 flex flex-wrap items-center gap-2">
+                    <span id="updateAvailabilityBadge" class="hidden rounded-full border border-emerald-200/70 bg-emerald-50/80 px-3 py-1 text-[0.7rem] font-semibold uppercase tracking-wide text-emerald-700 dark:border-emerald-300/40 dark:bg-emerald-500/10 dark:text-emerald-200" aria-live="polite">Update verfügbar</span>
+                  </div>
+                  <div id="updateDigest" class="mt-3 text-[0.7rem] text-zinc-500 dark:text-zinc-400 break-all">Digest wird geladen…</div>
+                </div>
                 <div id="updatePrereqHint"></div>
                 <div class="mt-3 grid gap-3 rounded-2xl border border-zinc-200/70 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-white/5">
                   <div class="flex flex-wrap items-center gap-3">
@@ -1210,6 +1229,13 @@
     const updateStatusBadge = document.getElementById('updateStatusBadge');
     const updateStatusText = document.getElementById('updateStatusText');
     const updateVersionInfo = document.getElementById('updateVersionInfo');
+    const updateCurrentVersion = document.getElementById('updateCurrentVersion');
+    const updateLatestVersion = document.getElementById('updateLatestVersion');
+    const updateChannelBadge = document.getElementById('updateChannelBadge');
+    const updateChannelDetail = document.getElementById('updateChannelDetail');
+    const updateDigest = document.getElementById('updateDigest');
+    const updateAvailabilityBadge = document.getElementById('updateAvailabilityBadge');
+    const hasDetailedVersionLayout = !!(updateCurrentVersion || updateChannelBadge || updateDigest);
     const updatePrereqHint = document.getElementById('updatePrereqHint');
     const updateModal = document.getElementById('updateModal');
     const updateModalStatus = document.getElementById('updateModalStatus');
@@ -1263,6 +1289,20 @@
         const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" };
         return map[match] || match;
       });
+    }
+    
+    function formatChannelLabel(image) {
+      if (!image) return null;
+      const withoutDigest = image.split('@')[0] || image;
+      const colonIndex = withoutDigest.lastIndexOf(':');
+      if (colonIndex !== -1 && colonIndex < withoutDigest.length - 1) {
+        return withoutDigest.slice(colonIndex + 1);
+      }
+      const slashIndex = withoutDigest.lastIndexOf('/');
+      if (slashIndex !== -1 && slashIndex < withoutDigest.length - 1) {
+        return withoutDigest.slice(slashIndex + 1);
+      }
+      return withoutDigest;
     }
 
     function formatIso(iso) {
@@ -1737,31 +1777,67 @@
           btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
         }
         if (updateVersionInfo) {
-          const parts = [];
-          if (data.current_version) {
-            parts.push('Aktuelle Version: ' + data.current_version);
-          }
-          if (data.current_image) {
-            parts.push('Aktueller Kanal: ' + escapeHtml(data.current_image));
-          }
-          if (data.latest_release && data.latest_release.tag_name) {
-            const versionName = data.latest_release.name || data.latest_release.tag_name;
-            if (data.latest_release.html_url) {
-              parts.push('Letzte Version: <a class="text-accent-dark dark:text-accent" target="_blank" rel="noopener" href="' + data.latest_release.html_url + '">' + escapeHtml(versionName) + '</a>');
-            } else {
-              parts.push('Letzte Version: ' + escapeHtml(versionName));
+          if (hasDetailedVersionLayout) {
+            if (updateCurrentVersion) {
+              updateCurrentVersion.textContent = data.current_version || '–';
             }
+            if (updateLatestVersion) {
+              let latestLabel = 'Letzte Version: –';
+              if (data.latest_release?.tag_name) {
+                const versionName = data.latest_release.name || data.latest_release.tag_name;
+                if (data.latest_release.html_url) {
+                  latestLabel = 'Letzte Version: <a class="text-accent-dark dark:text-accent" target="_blank" rel="noopener" href="' + data.latest_release.html_url + '">' + escapeHtml(versionName) + '</a>';
+                } else {
+                  latestLabel = 'Letzte Version: ' + escapeHtml(versionName);
+                }
+              }
+              updateLatestVersion.innerHTML = latestLabel;
+            }
+            const channelSource = data.current_image || data.latest_release?.image || '';
+            const channelLabel = formatChannelLabel(channelSource);
+            if (updateChannelBadge) {
+              updateChannelBadge.textContent = channelLabel || '–';
+            }
+            if (updateChannelDetail) {
+              updateChannelDetail.textContent = channelSource || 'Kanal-URL unbekannt';
+            }
+            if (updateDigest) {
+              const digest = data.latest_release?.digest || data.current_digest || (channelSource.includes('@') ? channelSource.split('@')[1] : '');
+              updateDigest.textContent = digest ? ('Digest: ' + digest) : 'Digest nicht verfügbar';
+            }
+            if (updateAvailabilityBadge) {
+              updateAvailabilityBadge.classList.toggle('hidden', !data.update_available);
+              if (data.update_available) {
+                updateAvailabilityBadge.textContent = 'Neues Release verfügbar';
+              }
+            }
+          } else {
+            const parts = [];
+            if (data.current_version) {
+              parts.push('Aktuelle Version: ' + data.current_version);
+            }
+            if (data.current_image) {
+              parts.push('Aktueller Kanal: ' + escapeHtml(data.current_image));
+            }
+            if (data.latest_release && data.latest_release.tag_name) {
+              const versionName = data.latest_release.name || data.latest_release.tag_name;
+              if (data.latest_release.html_url) {
+                parts.push('Letzte Version: <a class="text-accent-dark dark:text-accent" target="_blank" rel="noopener" href="' + data.latest_release.html_url + '">' + escapeHtml(versionName) + '</a>');
+              } else {
+                parts.push('Letzte Version: ' + escapeHtml(versionName));
+              }
+            }
+            if (data.latest_release && data.latest_release.image) {
+              parts.push('Kanal: ' + escapeHtml(data.latest_release.image));
+            }
+            if (data.latest_release && data.latest_release.digest) {
+              parts.push('Digest: ' + escapeHtml(data.latest_release.digest));
+            }
+            if (data.update_available) {
+              parts.push('<strong>Update verfügbar</strong>');
+            }
+            updateVersionInfo.innerHTML = parts.length ? parts.join(' · ') : 'Keine Versionsinformationen verfügbar.';
           }
-          if (data.latest_release && data.latest_release.image) {
-            parts.push('Kanal: ' + escapeHtml(data.latest_release.image));
-          }
-          if (data.latest_release && data.latest_release.digest) {
-            parts.push('Digest: ' + escapeHtml(data.latest_release.digest));
-          }
-          if (data.update_available) {
-            parts.push('<strong>Update verfügbar</strong>');
-          }
-          updateVersionInfo.innerHTML = parts.length ? parts.join(' · ') : 'Keine Versionsinformationen verfügbar.';
         }
         renderPrerequisites(data.prerequisites);
         if (btnRunUpdate) {
