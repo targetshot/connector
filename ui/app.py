@@ -2195,7 +2195,7 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         ),
         "remote.ssl.endpoint.identification.algorithm = https",
         "local->remote.enabled = true",
-        f"local->remote.topics = ts.raw.*,{STREAMS_TARGET_PREFIX}.*",
+        f"local->remote.topics = {STREAMS_TARGET_PREFIX}.*",
         "local->remote.groups = _ts.*",
         "local->remote.emit.heartbeats.interval.seconds = 15",
         "offset.storage.topic = _ts_mm2_offsets",
