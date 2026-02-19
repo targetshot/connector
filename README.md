@@ -130,6 +130,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Feintuning (Application ID, Pattern, Threads, Commit-Intervalle) erfolgt über die optionalen `TS_STREAMS_*` Variablen in `.env`.
 
 ### Mirror-MariaDB Replikation
+- Die Replikationsquelle kann direkt in der UI unter **Vereins-MainDB-Replikation** gepflegt und live angewendet werden.
 - Der Container `mariadb-mirror` kann beim ersten Start automatisch als Replikat der Vereins-Meyton-DB konfiguriert werden.
 - Dafür in `.env` setzen:
   - `TS_CONNECT_SOURCE_DB_HOST`, `TS_CONNECT_SOURCE_DB_PORT`

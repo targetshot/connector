@@ -384,6 +384,70 @@
             </form>
 
           <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
+            <input type="hidden" name="section" value="source" />
+            <div>
+              <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Vereins-MainDB-Replikation</h2>
+              <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Konfiguriert die Quelle der lokalen Mirror-MariaDB. Debezium bleibt dabei unverändert auf der Mirror-DB.</p>
+            </div>
+            <div class="grid gap-6 md:grid-cols-2">
+              <div>
+                <label class="input-label" for="source_db_host">Source Host (Vereins-MainDB)</label>
+                <input id="source_db_host" name="source_db_host" class="ts-input" value="{{ data.source_db_host }}" placeholder="leer = Replikation aus" />
+              </div>
+              <div>
+                <label class="input-label" for="source_db_port">Source Port</label>
+                <input id="source_db_port" name="source_db_port" type="number" class="ts-input" value="{{ data.source_db_port }}" />
+              </div>
+            </div>
+            <div class="grid gap-6 md:grid-cols-2">
+              <div>
+                <label class="input-label" for="source_db_repl_user">Replikations-User</label>
+                <input id="source_db_repl_user" name="source_db_repl_user" class="ts-input" value="{{ data.source_db_repl_user }}" />
+              </div>
+              <div>
+                <label class="input-label" for="source_db_repl_password">Replikations-Passwort</label>
+                <input id="source_db_repl_password" name="source_db_repl_password" type="password" class="ts-input" placeholder="••••••••" value="{{ source_repl_password_placeholder }}" autocomplete="current-password" />
+                {% if source_repl_password_saved %}
+                <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Gespeichertes Passwort wird aus Sicherheitsgründen nur als Platzhalter angezeigt.</p>
+                {% endif %}
+              </div>
+            </div>
+            <div class="grid gap-6 md:grid-cols-3">
+              <div>
+                <label class="input-label" for="source_db_gtid_mode">GTID aktiv</label>
+                <select id="source_db_gtid_mode" name="source_db_gtid_mode" class="ts-input">
+                  <option value="true" {% if data.source_db_gtid_mode %}selected{% endif %}>Ja</option>
+                  <option value="false" {% if not data.source_db_gtid_mode %}selected{% endif %}>Nein (Binlog Datei/Pos)</option>
+                </select>
+              </div>
+              <div>
+                <label class="input-label" for="source_db_log_file">Binlog-Datei (non-GTID)</label>
+                <input id="source_db_log_file" name="source_db_log_file" class="ts-input" value="{{ data.source_db_log_file }}" placeholder="mysql-bin.000001" />
+              </div>
+              <div>
+                <label class="input-label" for="source_db_log_pos">Binlog-Position (non-GTID)</label>
+                <input id="source_db_log_pos" name="source_db_log_pos" type="number" class="ts-input" value="{{ data.source_db_log_pos or '' }}" />
+              </div>
+            </div>
+            <div>
+              <label class="input-label" for="source_db_connect_retry">Connect-Retry (Sek.)</label>
+              <input id="source_db_connect_retry" name="source_db_connect_retry" type="number" class="ts-input max-w-xs" value="{{ data.source_db_connect_retry }}" />
+            </div>
+            <div class="flex flex-wrap items-center gap-3 pt-1">
+              <button type="button" id="btnTestSourceDb" class="btn-secondary">Test MainDB</button>
+              <span id="sourceDbBadge" class="badge">…</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 pt-1">
+              <button type="button" id="btnRefreshSourceReplication" class="btn-secondary">Replikationsstatus</button>
+              <span id="sourceReplicationBadge" class="badge">…</span>
+              <span id="sourceReplicationInfo" class="text-xs text-zinc-500 dark:text-zinc-400">Status wird geladen…</span>
+            </div>
+            <div class="flex flex-wrap gap-3 pt-2">
+              <button type="submit" class="primary-button">Replikation speichern &amp; anwenden</button>
+            </div>
+          </form>
+
+          <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
             <input type="hidden" name="section" value="confluent" />
             <div class="space-y-4">
               <div>
@@ -1048,6 +1112,26 @@
       const j = await r.json();
       setBadge(document.getElementById('dbBadge'), j.ok, j.msg);
     };
+    const btnTestSourceDb = document.getElementById('btnTestSourceDb');
+    const sourceDbBadge = document.getElementById('sourceDbBadge');
+    if (btnTestSourceDb && sourceDbBadge) {
+      btnTestSourceDb.onclick = async () => {
+        const sourceHost = document.getElementById('source_db_host').value.trim();
+        if (!sourceHost) {
+          setBadge(sourceDbBadge, 'warn', 'Host fehlt');
+          return;
+        }
+        const qs = new URLSearchParams({
+          host: sourceHost,
+          port: document.getElementById('source_db_port').value || '3306',
+          user: document.getElementById('source_db_repl_user').value,
+          password: document.getElementById('source_db_repl_password').value
+        });
+        const r = await fetch('/api/test/source-db?' + qs.toString());
+        const j = await r.json();
+        setBadge(sourceDbBadge, j.ok, j.msg);
+      };
+    }
     document.getElementById('btnTestCflt').onclick = async () => {
       const qs = new URLSearchParams({
         bootstrap: document.getElementById('confluent_bootstrap').value
@@ -1267,6 +1351,9 @@
     const backupStatusMessage = document.getElementById('backupStatusMessage');
     const licenseStatusBadge = document.getElementById('licenseStatusBadge');
     const licenseStatusMessage = document.getElementById('licenseStatusMessage');
+    const btnRefreshSourceReplication = document.getElementById('btnRefreshSourceReplication');
+    const sourceReplicationBadge = document.getElementById('sourceReplicationBadge');
+    const sourceReplicationInfo = document.getElementById('sourceReplicationInfo');
     const btnRefreshUiLog = document.getElementById('btnRefreshUiLog');
     const uiLogBadge = document.getElementById('uiLogBadge');
     const uiLogMeta = document.getElementById('uiLogMeta');
@@ -1293,6 +1380,11 @@
     const hostRebootSummary = document.getElementById('hostRebootSummary');
     const hostRebootLog = document.getElementById('hostRebootLog');
     let osUpdatePollTimer = null;
+    if (btnRefreshSourceReplication) {
+      btnRefreshSourceReplication.onclick = async () => {
+        await loadSourceReplicationStatus(true);
+      };
+    }
     if (btnRefreshUiLog) {
       btnRefreshUiLog.onclick = async () => {
         await loadUiLog(true);
@@ -1535,6 +1627,39 @@
         setHealthBadge(connectorStatusBadge, { status: 'error', message: '' }, connectorStatusMessage);
         setHealthBadge(backupStatusBadge, { status: 'error', message: '' }, backupStatusMessage);
         setHealthBadge(licenseStatusBadge, { status: 'error', message: '' }, licenseStatusMessage);
+      }
+    }
+
+    async function loadSourceReplicationStatus(showError) {
+      if (!sourceReplicationBadge || !sourceReplicationInfo) return;
+      try {
+        const response = await fetch('/api/source-replication/status');
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = data.detail || response.statusText || response.status;
+          throw new Error(String(detail));
+        }
+        if (!data.configured) {
+          setBadge(sourceReplicationBadge, 'pending', 'Deaktiviert');
+          sourceReplicationInfo.textContent = 'Keine Vereins-MainDB für Replikation konfiguriert.';
+          return;
+        }
+        if (data.running) {
+          const lag = data.seconds_behind_master != null ? `Lag: ${data.seconds_behind_master}s` : 'Lag: n/a';
+          setBadge(sourceReplicationBadge, true, lag);
+          sourceReplicationInfo.textContent = `Source: ${data.master_host || data.configured_host || 'unbekannt'} · IO: ${data.slave_io_running ? 'OK' : 'Fehler'} · SQL: ${data.slave_sql_running ? 'OK' : 'Fehler'}`;
+          return;
+        }
+        const message = data.message || 'Replikation nicht aktiv';
+        setBadge(sourceReplicationBadge, 'warn', 'Nicht aktiv');
+        sourceReplicationInfo.textContent = message;
+      } catch (error) {
+        setBadge(sourceReplicationBadge, false, 'Fehler');
+        const message = error instanceof Error ? error.message : String(error);
+        sourceReplicationInfo.textContent = message;
+        if (showError) {
+          showInfoModal('Replikationsstatus', message, 'error');
+        }
       }
     }
 
@@ -2113,6 +2238,7 @@
     loadOsUpdateStatus(false).catch(() => {});
     loadUpdateStatus(false).catch(() => {});
     loadHealthSummary(false).catch(() => {});
+    loadSourceReplicationStatus(false).catch(() => {});
     loadUiLog(false).catch(() => {});
   </script>
 </body>

@@ -285,6 +285,14 @@ DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
 DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
 DEFAULT_BACKUP_USER = os.getenv("TS_CONNECT_BACKUP_USER", "targetshot")
 DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mariadb-mirror")
+DEFAULT_SOURCE_DB_HOST = os.getenv("TS_CONNECT_SOURCE_DB_HOST", "").strip()
+DEFAULT_SOURCE_DB_PORT = int(os.getenv("TS_CONNECT_SOURCE_DB_PORT", "3306"))
+DEFAULT_SOURCE_DB_REPL_USER = os.getenv("TS_CONNECT_SOURCE_DB_REPL_USER", "").strip()
+DEFAULT_SOURCE_DB_GTID_MODE = os.getenv("TS_CONNECT_SOURCE_DB_GTID_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_SOURCE_DB_LOG_FILE = os.getenv("TS_CONNECT_SOURCE_DB_LOG_FILE", "").strip()
+DEFAULT_SOURCE_DB_LOG_POS = _env_int("TS_CONNECT_SOURCE_DB_LOG_POS", None)
+DEFAULT_SOURCE_DB_CONNECT_RETRY = int(os.getenv("TS_CONNECT_SOURCE_DB_CONNECT_RETRY", "10"))
+SOURCE_DB_REPL_PASSWORD_KEY = "source_db_repl_password"
 STREAMS_TARGET_PREFIX = (os.getenv("TS_STREAMS_TARGET_PREFIX", "ts.sds-test") or "ts.sds-test").strip() or "ts.sds-test"
 LEMON_LICENSE_API_URL = os.getenv(
     "TS_LICENSE_API_URL",
@@ -2025,6 +2033,10 @@ def get_db():
     conn.execute("""CREATE TABLE IF NOT EXISTS settings (
         id INTEGER PRIMARY KEY CHECK (id=1),
         db_host TEXT, db_port INTEGER, db_user TEXT,
+        source_db_host TEXT, source_db_port INTEGER,
+        source_db_repl_user TEXT, source_db_gtid_mode INTEGER,
+        source_db_log_file TEXT, source_db_log_pos INTEGER,
+        source_db_connect_retry INTEGER,
         confluent_bootstrap TEXT, confluent_sasl_username TEXT,
         topic_prefix TEXT, server_id INTEGER, server_name TEXT,
         offline_buffer_enabled INTEGER DEFAULT 0,
@@ -2048,6 +2060,8 @@ def get_db():
             """
             INSERT INTO settings(
                 id, db_host, db_port, db_user,
+                source_db_host, source_db_port, source_db_repl_user,
+                source_db_gtid_mode, source_db_log_file, source_db_log_pos, source_db_connect_retry,
                 confluent_bootstrap, confluent_sasl_username,
                 topic_prefix, server_id, server_name,
                 offline_buffer_enabled, license_tier, retention_days,
@@ -2056,13 +2070,20 @@ def get_db():
                 license_activation_id, license_activated_at,
                 backup_pg_host, backup_pg_port, backup_pg_db, backup_pg_user
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 1,
                 os.getenv("TS_CONNECT_DEFAULT_DB_HOST", "mariadb-mirror"),
                 3306,
                 os.getenv("TS_CONNECT_DEFAULT_DB_USER", "debezium_sync"),
+                DEFAULT_SOURCE_DB_HOST,
+                DEFAULT_SOURCE_DB_PORT,
+                DEFAULT_SOURCE_DB_REPL_USER,
+                1 if DEFAULT_SOURCE_DB_GTID_MODE else 0,
+                DEFAULT_SOURCE_DB_LOG_FILE or None,
+                DEFAULT_SOURCE_DB_LOG_POS,
+                DEFAULT_SOURCE_DB_CONNECT_RETRY,
                 CONFLUENT_BOOTSTRAP_DEFAULT,
                 "YOUR-API-KEY",
                 os.getenv("TS_CONNECT_DEFAULT_TOPIC_PREFIX", "413067"),
@@ -2111,6 +2132,13 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
     add_column("backup_pg_port", "backup_pg_port INTEGER")
     add_column("backup_pg_db", "backup_pg_db TEXT")
     add_column("backup_pg_user", "backup_pg_user TEXT")
+    add_column("source_db_host", "source_db_host TEXT")
+    add_column("source_db_port", "source_db_port INTEGER")
+    add_column("source_db_repl_user", "source_db_repl_user TEXT")
+    add_column("source_db_gtid_mode", "source_db_gtid_mode INTEGER DEFAULT 1")
+    add_column("source_db_log_file", "source_db_log_file TEXT")
+    add_column("source_db_log_pos", "source_db_log_pos INTEGER")
+    add_column("source_db_connect_retry", "source_db_connect_retry INTEGER DEFAULT 10")
     add_column("shooter_count_cached", "shooter_count_cached INTEGER")
     add_column("shooter_count_checked_at", "shooter_count_checked_at TEXT")
     conn.commit()
@@ -2133,7 +2161,10 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
             backup_pg_host = COALESCE(NULLIF(TRIM(backup_pg_host), ''), ?),
             backup_pg_port = COALESCE(backup_pg_port, ?),
             backup_pg_db = COALESCE(NULLIF(TRIM(backup_pg_db), ''), ?),
-            backup_pg_user = COALESCE(NULLIF(TRIM(backup_pg_user), ''), ?)
+            backup_pg_user = COALESCE(NULLIF(TRIM(backup_pg_user), ''), ?),
+            source_db_port = COALESCE(source_db_port, ?),
+            source_db_gtid_mode = COALESCE(source_db_gtid_mode, ?),
+            source_db_connect_retry = COALESCE(source_db_connect_retry, ?)
         WHERE id=1
         """,
         (
@@ -2143,6 +2174,9 @@ def _ensure_settings_schema(conn: sqlite3.Connection) -> None:
             DEFAULT_BACKUP_PORT,
             DEFAULT_BACKUP_DB,
             DEFAULT_BACKUP_USER,
+            DEFAULT_SOURCE_DB_PORT,
+            1 if DEFAULT_SOURCE_DB_GTID_MODE else 0,
+            DEFAULT_SOURCE_DB_CONNECT_RETRY,
         ),
     )
     conn.commit()
@@ -2223,6 +2257,52 @@ def _probe_backup_connection(*, host: str, port: int, database: str, user: str, 
         with connection.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+
+
+def _build_source_replication_payload(settings: dict, secrets: dict[str, str]) -> dict[str, Any] | None:
+    host = str(settings.get("source_db_host") or "").strip()
+    if not host:
+        return None
+    user = str(settings.get("source_db_repl_user") or "").strip()
+    password = str(secrets.get(SOURCE_DB_REPL_PASSWORD_KEY) or "").strip()
+    if not user or not password:
+        raise ValueError("Replikations-Benutzer oder Passwort fehlt.")
+    port = int(settings.get("source_db_port") or DEFAULT_SOURCE_DB_PORT)
+    connect_retry = int(settings.get("source_db_connect_retry") or DEFAULT_SOURCE_DB_CONNECT_RETRY)
+    gtid_mode = bool(settings.get("source_db_gtid_mode"))
+    log_file = str(settings.get("source_db_log_file") or "").strip()
+    log_pos = settings.get("source_db_log_pos")
+    if not gtid_mode:
+        if not log_file or log_pos is None:
+            raise ValueError("Für non-GTID müssen Binlog-Datei und Position gesetzt sein.")
+    payload: dict[str, Any] = {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "gtid_mode": gtid_mode,
+        "connect_retry": max(1, connect_retry),
+    }
+    if not gtid_mode:
+        payload["log_file"] = log_file
+        payload["log_pos"] = int(log_pos)
+    return payload
+
+
+async def apply_source_replication_config(settings: dict, secrets: dict[str, str]) -> dict[str, Any]:
+    payload = _build_source_replication_payload(settings, secrets)
+    if payload is None:
+        return await _update_agent_request("POST", "/api/v1/mirror-replication/disable", timeout=25)
+    return await _update_agent_request(
+        "POST",
+        "/api/v1/mirror-replication/apply",
+        json_payload=payload,
+        timeout=35,
+    )
+
+
+async def source_replication_status_snapshot() -> dict[str, Any]:
+    return await _update_agent_request("GET", "/api/v1/mirror-replication/status", timeout=12)
 
 
 def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
@@ -2362,6 +2442,8 @@ def fetch_settings() -> dict:
     cur = conn.execute(
         """
         SELECT db_host, db_port, db_user,
+               source_db_host, source_db_port, source_db_repl_user,
+               source_db_gtid_mode, source_db_log_file, source_db_log_pos, source_db_connect_retry,
                confluent_bootstrap, confluent_sasl_username,
                topic_prefix, server_id, server_name,
                offline_buffer_enabled, license_tier, retention_days,
@@ -2382,6 +2464,13 @@ def fetch_settings() -> dict:
         "db_host": row["db_host"],
         "db_port": row["db_port"],
         "db_user": row["db_user"],
+        "source_db_host": row["source_db_host"] or "",
+        "source_db_port": row["source_db_port"] or DEFAULT_SOURCE_DB_PORT,
+        "source_db_repl_user": row["source_db_repl_user"] or "",
+        "source_db_gtid_mode": bool(row["source_db_gtid_mode"]) if row["source_db_gtid_mode"] is not None else DEFAULT_SOURCE_DB_GTID_MODE,
+        "source_db_log_file": row["source_db_log_file"] or "",
+        "source_db_log_pos": row["source_db_log_pos"],
+        "source_db_connect_retry": row["source_db_connect_retry"] or DEFAULT_SOURCE_DB_CONNECT_RETRY,
         "confluent_bootstrap": row["confluent_bootstrap"],
         "confluent_sasl_username": row["confluent_sasl_username"],
         "topic_prefix": row["topic_prefix"],
@@ -3010,6 +3099,7 @@ def build_index_context(request: Request) -> dict:
 
     has_secrets = SECRETS_PATH.exists()
     db_password_saved = bool(secrets_data.get("db_password"))
+    source_repl_password_saved = bool(secrets_data.get(SOURCE_DB_REPL_PASSWORD_KEY))
     flash_message = request.session.pop("flash_message", None)
     error_message = request.session.pop("error_message", None)
     license_valid_iso = data.get("license_valid_until")
@@ -3103,6 +3193,8 @@ def build_index_context(request: Request) -> dict:
         "docs_url": DOCS_URL,
         "db_password_placeholder": PASSWORD_PLACEHOLDER if db_password_saved else "",
         "db_password_saved": db_password_saved,
+        "source_repl_password_placeholder": PASSWORD_PLACEHOLDER if source_repl_password_saved else "",
+        "source_repl_password_saved": source_repl_password_saved,
         "default_server_name": DEFAULT_SERVER_NAME,
         "license": license_info,
         "license_activation_enabled": LEMON_ACTIVATION_ENABLED,
@@ -3154,6 +3246,32 @@ async def test_db(host: str, port: int, user: str, password: str):
         return {"ok": True, "msg": "DB OK"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+
+
+@app.get("/api/test/source-db", dependencies=[Depends(require_session)])
+async def test_source_db(host: str, port: int, user: str, password: str):
+    import pymysql
+    secrets_data = read_secrets_file()
+    if password == PASSWORD_PLACEHOLDER and secrets_data.get(SOURCE_DB_REPL_PASSWORD_KEY):
+        password = secrets_data[SOURCE_DB_REPL_PASSWORD_KEY]
+    try:
+        conn = pymysql.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            connect_timeout=3,
+            read_timeout=3,
+            write_timeout=3,
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        conn.close()
+        return {"ok": True, "msg": "MainDB erreichbar"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "msg": str(exc)}
+
 
 @app.get("/api/test/confluent", dependencies=[Depends(require_session)])
 async def test_confluent(bootstrap: str):
@@ -3455,6 +3573,14 @@ async def save(
     db_port: int | None = Form(default=None),
     db_user: str | None = Form(default=None),
     db_password: str | None = Form(default=None),
+    source_db_host: str | None = Form(default=None),
+    source_db_port: str | None = Form(default=None),
+    source_db_repl_user: str | None = Form(default=None),
+    source_db_repl_password: str | None = Form(default=None),
+    source_db_gtid_mode: str | None = Form(default="true"),
+    source_db_log_file: str | None = Form(default=None),
+    source_db_log_pos: str | None = Form(default=None),
+    source_db_connect_retry: str | None = Form(default=None),
     confluent_bootstrap: str | None = Form(default=None),
     confluent_sasl_username: str | None = Form(default=None),
     confluent_sasl_password: str | None = Form(default=None),
@@ -3741,6 +3867,116 @@ async def save(
             request.session["error_message"] = f"Connector-Update fehlgeschlagen: {exc}"
         return RedirectResponse("/", status_code=303)
 
+    if section_key == "source":
+        source_host_value = (source_db_host or "").strip()
+        source_port_raw = (source_db_port or "").strip()
+        source_port_value = DEFAULT_SOURCE_DB_PORT
+        if source_port_raw:
+            try:
+                source_port_value = int(source_port_raw)
+            except ValueError:
+                request.session["error_message"] = "Source-Port muss eine Zahl sein."
+                return RedirectResponse("/", status_code=303)
+        source_user_value = (source_db_repl_user or "").strip()
+        source_gtid_mode_value = _parse_bool(source_db_gtid_mode, default=True)
+        source_log_file_value = (source_db_log_file or "").strip()
+        source_log_pos_raw = (source_db_log_pos or "").strip()
+        source_log_pos_value = None
+        if source_log_pos_raw:
+            try:
+                source_log_pos_value = int(source_log_pos_raw)
+            except ValueError:
+                request.session["error_message"] = "Binlog-Position muss eine Zahl sein."
+                return RedirectResponse("/", status_code=303)
+        source_connect_retry_raw = (source_db_connect_retry or "").strip()
+        source_connect_retry_value = DEFAULT_SOURCE_DB_CONNECT_RETRY
+        if source_connect_retry_raw:
+            try:
+                source_connect_retry_value = int(source_connect_retry_raw)
+            except ValueError:
+                request.session["error_message"] = "Connect-Retry muss eine Zahl sein."
+                return RedirectResponse("/", status_code=303)
+
+        if source_port_value <= 0 or source_port_value > 65535:
+            request.session["error_message"] = "Source-Port muss zwischen 1 und 65535 liegen."
+            return RedirectResponse("/", status_code=303)
+        if source_connect_retry_value <= 0:
+            request.session["error_message"] = "Connect-Retry muss größer als 0 sein."
+            return RedirectResponse("/", status_code=303)
+
+        submitted_password = (source_db_repl_password or "").strip() if source_db_repl_password is not None else ""
+        existing_password = secrets_data.get(SOURCE_DB_REPL_PASSWORD_KEY, "")
+        if submitted_password == PASSWORD_PLACEHOLDER and existing_password:
+            source_password_value = existing_password
+        else:
+            source_password_value = submitted_password
+
+        if source_host_value:
+            if not source_user_value:
+                request.session["error_message"] = "Bitte den Replikations-User der Vereins-MainDB angeben."
+                return RedirectResponse("/", status_code=303)
+            if not source_password_value:
+                request.session["error_message"] = "Bitte das Replikations-Passwort der Vereins-MainDB angeben."
+                return RedirectResponse("/", status_code=303)
+            if not source_gtid_mode_value:
+                if not source_log_file_value:
+                    request.session["error_message"] = "Für non-GTID muss eine Binlog-Datei gesetzt sein."
+                    return RedirectResponse("/", status_code=303)
+                if source_log_pos_value is None or source_log_pos_value <= 0:
+                    request.session["error_message"] = "Für non-GTID muss eine gültige Binlog-Position gesetzt sein."
+                    return RedirectResponse("/", status_code=303)
+        else:
+            source_user_value = ""
+            source_password_value = ""
+            source_gtid_mode_value = True
+            source_log_file_value = ""
+            source_log_pos_value = None
+
+        conn = get_db()
+        conn.execute(
+            """
+            UPDATE settings
+            SET source_db_host=?, source_db_port=?, source_db_repl_user=?,
+                source_db_gtid_mode=?, source_db_log_file=?, source_db_log_pos=?, source_db_connect_retry=?
+            WHERE id=1
+            """,
+            (
+                source_host_value,
+                source_port_value,
+                source_user_value,
+                1 if source_gtid_mode_value else 0,
+                source_log_file_value or None,
+                source_log_pos_value,
+                source_connect_retry_value,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        if source_host_value and source_password_value:
+            secrets_data[SOURCE_DB_REPL_PASSWORD_KEY] = source_password_value
+        else:
+            secrets_data.pop(SOURCE_DB_REPL_PASSWORD_KEY, None)
+        write_secrets_file(secrets_data)
+
+        try:
+            result = await apply_source_replication_config(fetch_settings(), secrets_data)
+        except Exception as exc:  # noqa: BLE001
+            request.session["flash_message"] = "MainDB-Replikations-Einstellungen wurden gespeichert."
+            request.session["error_message"] = (
+                "Replikation konnte nicht angewendet werden: "
+                f"{_short_error_message(str(exc), 220)}"
+            )
+            return RedirectResponse("/", status_code=303)
+
+        message = str(result.get("message") or "").strip()
+        if source_host_value:
+            base = "Vereins-MainDB-Replikation gespeichert und auf der Mirror-MariaDB angewendet."
+        else:
+            base = "Vereins-MainDB-Replikation deaktiviert."
+        request.session["flash_message"] = f"{base} {message}".strip()
+        return RedirectResponse("/", status_code=303)
+
     if section_key == "offline":
         await ensure_offline_buffer_ready()
         try:
@@ -3987,6 +4223,24 @@ async def health_summary():
         "backup": backup,
         "license": license,
     }
+
+
+@app.get("/api/source-replication/status", dependencies=[Depends(require_session)])
+async def source_replication_status():
+    settings = fetch_settings()
+    configured = bool(str(settings.get("source_db_host") or "").strip())
+    try:
+        snapshot = await source_replication_status_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "configured": configured,
+            "message": _short_error_message(str(exc), 180),
+        }
+    snapshot["configured"] = configured
+    if configured:
+        snapshot.setdefault("configured_host", settings.get("source_db_host"))
+    return snapshot
 
 
 @app.get("/api/logs/ui", dependencies=[Depends(require_session)])

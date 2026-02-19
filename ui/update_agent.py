@@ -23,6 +23,7 @@ WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
 MODULE_DIR = Path(__file__).resolve().parent
 TOKEN = get_update_agent_token(DATA_DIR)
+MIRROR_CONTAINER_NAME = os.getenv("TS_CONNECT_MIRROR_CONTAINER_NAME", "ts-mariadb-mirror").strip() or "ts-mariadb-mirror"
 
 app = FastAPI(title="TargetShot Update Agent")
 
@@ -44,8 +45,23 @@ class RunRequest(BaseModel):
     project_name: str | None = None
 
 
+class MirrorReplicationApplyRequest(BaseModel):
+    host: str
+    port: int = 3306
+    user: str
+    password: str
+    gtid_mode: bool = True
+    log_file: str | None = None
+    log_pos: int | None = None
+    connect_retry: int = 10
+
+
 class DockerCommandError(RuntimeError):
     pass
+
+
+def _sql_escape(value: str) -> str:
+    return value.replace("'", "''")
 
 
 async def _run_subprocess(cmd: list[str], *, env: dict[str, str] | None = None) -> int:
@@ -65,6 +81,56 @@ async def _docker_command(args: list[str], *, timeout: float | None = None) -> t
         process.kill()
         raise
     return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+
+
+def _parse_replication_status(output: str) -> dict[str, Any]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return {
+            "configured": False,
+            "running": False,
+            "message": "Keine Replikation konfiguriert.",
+        }
+    data: dict[str, str] = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip()
+    io_running = data.get("Slave_IO_Running", "").lower() == "yes"
+    sql_running = data.get("Slave_SQL_Running", "").lower() == "yes"
+    seconds_raw = (data.get("Seconds_Behind_Master") or "").strip()
+    seconds: int | None = None
+    if seconds_raw and seconds_raw.upper() != "NULL":
+        try:
+            seconds = int(seconds_raw)
+        except ValueError:
+            seconds = None
+    last_io_error = data.get("Last_IO_Error") or ""
+    last_sql_error = data.get("Last_SQL_Error") or ""
+    running = io_running and sql_running
+    if running:
+        message = "Replikation läuft."
+    else:
+        details = [part for part in (last_io_error, last_sql_error) if part]
+        if details:
+            message = details[0]
+        elif io_running or sql_running:
+            message = "Replikation teilweise aktiv."
+        else:
+            message = "Replikation gestoppt."
+    return {
+        "configured": True,
+        "running": running,
+        "slave_io_running": io_running,
+        "slave_sql_running": sql_running,
+        "seconds_behind_master": seconds,
+        "master_host": data.get("Master_Host") or "",
+        "master_port": data.get("Master_Port") or "",
+        "last_io_error": last_io_error,
+        "last_sql_error": last_sql_error,
+        "message": message,
+    }
 
 
 async def _ensure_idle() -> None:
@@ -164,6 +230,89 @@ async def _container_exists(name: str) -> tuple[bool, str]:
     return bool(status), status
 
 
+async def _container_env(name: str) -> dict[str, str]:
+    code, stdout, stderr = await _docker_command(
+        ["inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", name],
+        timeout=10,
+    )
+    if code != 0:
+        raise DockerCommandError(stderr.strip() or stdout.strip() or "docker inspect fehlgeschlagen")
+    env_map: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env_map[key] = value
+    return env_map
+
+
+async def _mirror_root_password(name: str) -> str:
+    env_map = await _container_env(name)
+    password = (env_map.get("MARIADB_ROOT_PASSWORD") or "").strip()
+    if not password:
+        raise DockerCommandError("MARIADB_ROOT_PASSWORD im Mirror-Container nicht gefunden")
+    return password
+
+
+async def _run_mirror_sql(sql: str, *, name: str) -> str:
+    root_password = await _mirror_root_password(name)
+    code, stdout, stderr = await _docker_command(
+        [
+            "exec",
+            name,
+            "mariadb",
+            "--protocol=socket",
+            "-uroot",
+            f"-p{root_password}",
+            "-e",
+            sql,
+        ],
+        timeout=30,
+    )
+    if code != 0:
+        raise DockerCommandError(stderr.strip() or stdout.strip() or "MariaDB-Befehl fehlgeschlagen")
+    return stdout
+
+
+async def _mirror_replication_status(name: str) -> dict[str, Any]:
+    output = await _run_mirror_sql("SHOW SLAVE STATUS\\G", name=name)
+    return _parse_replication_status(output)
+
+
+def _build_change_master_sql(request: MirrorReplicationApplyRequest) -> str:
+    host = _sql_escape(request.host)
+    user = _sql_escape(request.user)
+    password = _sql_escape(request.password)
+    connect_retry = max(1, int(request.connect_retry or 10))
+    port = int(request.port or 3306)
+    if request.gtid_mode:
+        return (
+            "CHANGE MASTER TO "
+            f"MASTER_HOST='{host}', "
+            f"MASTER_PORT={port}, "
+            f"MASTER_USER='{user}', "
+            f"MASTER_PASSWORD='{password}', "
+            f"MASTER_CONNECT_RETRY={connect_retry}, "
+            "MASTER_USE_GTID=slave_pos;"
+        )
+    if not request.log_file or request.log_pos is None:
+        raise DockerCommandError("Für non-GTID werden log_file und log_pos benötigt.")
+    log_file = _sql_escape(request.log_file)
+    log_pos = int(request.log_pos)
+    if log_pos <= 0:
+        raise DockerCommandError("log_pos muss größer als 0 sein.")
+    return (
+        "CHANGE MASTER TO "
+        f"MASTER_HOST='{host}', "
+        f"MASTER_PORT={port}, "
+        f"MASTER_USER='{user}', "
+        f"MASTER_PASSWORD='{password}', "
+        f"MASTER_CONNECT_RETRY={connect_retry}, "
+        f"MASTER_LOG_FILE='{log_file}', "
+        f"MASTER_LOG_POS={log_pos};"
+    )
+
+
 @app.post("/api/v1/containers/{name}/restart")
 async def restart_container(name: str, _: Any = Depends(_auth_guard)):
     try:
@@ -207,4 +356,106 @@ async def container_status(name: str, _: Any = Depends(_auth_guard)):
         "exists": exists,
         "status": status,
         "running": running,
+    }
+
+
+@app.get("/api/v1/mirror-replication/status")
+async def mirror_replication_status(_: Any = Depends(_auth_guard)):
+    container_name = MIRROR_CONTAINER_NAME
+    try:
+        exists, status = await _container_exists(container_name)
+    except DockerCommandError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not exists:
+        return {
+            "ok": False,
+            "exists": False,
+            "container": container_name,
+            "status": status,
+            "configured": False,
+            "running": False,
+            "message": "Mirror-Container nicht gefunden.",
+        }
+    try:
+        snapshot = await _mirror_replication_status(container_name)
+    except DockerCommandError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "exists": True,
+        "container": container_name,
+        "status": status,
+        **snapshot,
+    }
+
+
+@app.post("/api/v1/mirror-replication/apply")
+async def mirror_replication_apply(request: MirrorReplicationApplyRequest, _: Any = Depends(_auth_guard)):
+    if not request.host.strip():
+        raise HTTPException(status_code=400, detail="Source-Host fehlt.")
+    if request.port <= 0 or request.port > 65535:
+        raise HTTPException(status_code=400, detail="Source-Port muss zwischen 1 und 65535 liegen.")
+    if not request.user.strip() or not request.password.strip():
+        raise HTTPException(status_code=400, detail="Replikations-Benutzer und Passwort sind erforderlich.")
+    if not request.gtid_mode:
+        if not (request.log_file and request.log_file.strip()) or request.log_pos is None:
+            raise HTTPException(status_code=400, detail="Für non-GTID müssen log_file und log_pos gesetzt sein.")
+    container_name = MIRROR_CONTAINER_NAME
+    try:
+        exists, _ = await _container_exists(container_name)
+    except DockerCommandError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not exists:
+        raise HTTPException(status_code=404, detail="Mirror-Container nicht gefunden.")
+
+    try:
+        change_master_sql = _build_change_master_sql(request)
+        sql = "\n".join(
+            [
+                "STOP SLAVE;",
+                "RESET SLAVE ALL;",
+                change_master_sql,
+                "START SLAVE;",
+            ]
+        )
+        await _run_mirror_sql(sql, name=container_name)
+        snapshot = await _mirror_replication_status(container_name)
+    except DockerCommandError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "applied": True,
+        "container": container_name,
+        **snapshot,
+    }
+
+
+@app.post("/api/v1/mirror-replication/disable")
+async def mirror_replication_disable(_: Any = Depends(_auth_guard)):
+    container_name = MIRROR_CONTAINER_NAME
+    try:
+        exists, _ = await _container_exists(container_name)
+    except DockerCommandError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not exists:
+        return {
+            "ok": True,
+            "applied": False,
+            "container": container_name,
+            "configured": False,
+            "running": False,
+            "message": "Mirror-Container nicht gefunden.",
+        }
+    try:
+        await _run_mirror_sql("STOP SLAVE; RESET SLAVE ALL;", name=container_name)
+    except DockerCommandError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "applied": True,
+        "container": container_name,
+        "configured": False,
+        "running": False,
+        "message": "Replikation deaktiviert.",
     }
