@@ -8,7 +8,7 @@ services:
       - start
       - --overprovisioned
       - --smp=1
-      - --memory=256M
+      - --memory=${REDPANDA_MEMORY:-2G}
       - --reserve-memory=0M
       - --check=false
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
@@ -31,6 +31,46 @@ services:
     ports:
       - "8081:8081"  # optional für Debug und Troubleshooting
 
+  mariadb-mirror:
+    image: mariadb:11.4
+    container_name: ts-mariadb-mirror
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${TS_CONNECT_MIRROR_ROOT_PASSWORD:-change-me-root}
+      MARIADB_DATABASE: ${TS_CONNECT_MIRROR_DB_NAME:-SMDB}
+      MARIADB_USER: ${TS_CONNECT_MIRROR_DB_USER:-debezium_sync}
+      MARIADB_PASSWORD: ${TS_CONNECT_MIRROR_DB_PASSWORD:-change-me-db}
+      TS_CONNECT_MIRROR_DB_USER: ${TS_CONNECT_MIRROR_DB_USER:-debezium_sync}
+      TS_CONNECT_MIRROR_DB_PASSWORD: ${TS_CONNECT_MIRROR_DB_PASSWORD:-change-me-db}
+      TS_CONNECT_SOURCE_DB_HOST: ${TS_CONNECT_SOURCE_DB_HOST:-}
+      TS_CONNECT_SOURCE_DB_PORT: ${TS_CONNECT_SOURCE_DB_PORT:-3306}
+      TS_CONNECT_SOURCE_DB_REPL_USER: ${TS_CONNECT_SOURCE_DB_REPL_USER:-}
+      TS_CONNECT_SOURCE_DB_REPL_PASSWORD: ${TS_CONNECT_SOURCE_DB_REPL_PASSWORD:-}
+      TS_CONNECT_SOURCE_DB_GTID_MODE: ${TS_CONNECT_SOURCE_DB_GTID_MODE:-true}
+      TS_CONNECT_SOURCE_DB_LOG_FILE: ${TS_CONNECT_SOURCE_DB_LOG_FILE:-}
+      TS_CONNECT_SOURCE_DB_LOG_POS: ${TS_CONNECT_SOURCE_DB_LOG_POS:-}
+      TS_CONNECT_SOURCE_DB_CONNECT_RETRY: ${TS_CONNECT_SOURCE_DB_CONNECT_RETRY:-10}
+    command:
+      - --server-id=${TS_CONNECT_MIRROR_SERVER_ID:-5401}
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --sync-binlog=1
+      - --innodb-flush-log-at-trx-commit=1
+      - --expire-logs-days=7
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./ui/data/mariadb:/var/lib/mysql
+      - ./mariadb/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${TS_CONNECT_MIRROR_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h127.0.0.1 -uroot -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+
   kafka-connect:
     build:
       context: ./connect
@@ -46,6 +86,12 @@ services:
       CONNECT_CONFIG_STORAGE_TOPIC: _ts_connect_configs
       CONNECT_OFFSET_STORAGE_TOPIC: _ts_connect_offsets
       CONNECT_STATUS_STORAGE_TOPIC: _ts_connect_status
+      CONNECT_CONFIG_STORAGE_PARTITIONS: 3
+      CONNECT_OFFSET_STORAGE_PARTITIONS: 3
+      CONNECT_STATUS_STORAGE_PARTITIONS: 3
+      CONNECT_CONFIG_STORAGE_TOPIC_CONFIG: cleanup.policy=compact,segment.bytes=67108864
+      CONNECT_OFFSET_STORAGE_TOPIC_CONFIG: cleanup.policy=compact,segment.bytes=67108864,retention.ms=604800000
+      CONNECT_STATUS_STORAGE_TOPIC_CONFIG: cleanup.policy=compact,segment.bytes=67108864,retention.ms=1209600000
       # Single-Node => RF=1 (wichtig!)
       CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
@@ -68,8 +114,12 @@ services:
     volumes:
       - ./ui/data:/app/data   # Connect liest hier die secrets.properties
     depends_on:
-      - redpanda
-      - schema-registry
+      redpanda:
+        condition: service_started
+      schema-registry:
+        condition: service_started
+      mariadb-mirror:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8083/connectors"]
       interval: 15s
@@ -139,6 +189,9 @@ services:
       UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD:-change-me}
       CONNECT_BASE_URL: http://kafka-connect:8083
       DEFAULT_CONNECTOR_NAME: targetshot-debezium
+      TS_CONNECT_DEFAULT_DB_HOST: ${TS_CONNECT_DEFAULT_DB_HOST:-mariadb-mirror}
+      TS_CONNECT_DEFAULT_DB_USER: ${TS_CONNECT_DEFAULT_DB_USER:-debezium_sync}
+      TS_CONNECT_DEFAULT_SERVER_NAME: ${TS_CONNECT_DEFAULT_SERVER_NAME:-targetshot-mariadb-mirror}
       UI_TRUSTED_CIDRS: ${UI_TRUSTED_CIDRS:-192.168.0.0/16,10.0.0.0/8,172.16.0.0/12}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-ts-connect}
       TS_CONNECT_WORKSPACE: /workspace
@@ -147,7 +200,6 @@ services:
       TS_CONNECT_ACR_REGISTRY: ${TS_CONNECT_ACR_REGISTRY:-}
       TS_CONNECT_ACR_USERNAME: ${TS_CONNECT_ACR_USERNAME:-}
       TS_CONNECT_ACR_PASSWORD: ${TS_CONNECT_ACR_PASSWORD:-}
-      ELASTIC_AGENT_ENABLED: ${ELASTIC_AGENT_ENABLED:-false}
       TS_CONNECT_UPDATE_AGENT_URL: ${TS_CONNECT_UPDATE_AGENT_URL:-http://ts-connect-update-agent:9000}
       TS_CONNECT_UPDATE_AGENT_TOKEN: ${TS_CONNECT_UPDATE_AGENT_TOKEN:-}
       TS_CONNECT_HOST_AGENT_URL: ${TS_CONNECT_HOST_AGENT_URL:-}
@@ -163,26 +215,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "${TS_CONNECT_HOST_GATEWAY_OVERRIDE:-host.docker.internal:host-gateway}"
-
-  elastic-agent:
-    profiles:
-      - elastic
-    image: docker.elastic.co/beats/elastic-agent:8.15.3
-    container_name: ts-elastic-agent
-    restart: unless-stopped
-    user: root
-    environment:
-      FLEET_ENROLL: "1"
-      FLEET_URL: ${ELASTIC_FLEET_URL}
-      FLEET_ENROLLMENT_TOKEN: ${ELASTIC_FLEET_ENROLLMENT_TOKEN}
-      ELASTIC_AGENT_TAGS: ${ELASTIC_AGENT_TAGS:-site:unknown,tier:unknown}
-      ELASTIC_AGENT_LOG_LEVEL: ${ELASTIC_AGENT_LOG_LEVEL:-info}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./ui/data:/app/data
-      - ./elastic-agent/state:/usr/share/elastic-agent/state
-    depends_on:
-      - ui
 
 networks:
   default:

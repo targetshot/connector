@@ -209,15 +209,19 @@ def run_update() -> int:
     args = _parse_args()
     workspace = Path(args.workspace).resolve()
     data_dir = Path(args.data_dir).resolve()
-    compose_env = args.compose_env
-    if compose_env:
-        compose_env_path = workspace / compose_env
-        if not compose_env_path.exists():
-            compose_env = None
-    else:
-        default_env = workspace / "compose.env"
-        if default_env.exists():
-            compose_env = "compose.env"
+    compose_env = None
+    candidates: list[str] = []
+    if args.compose_env:
+        candidates.append(args.compose_env)
+    candidates.append(".env")
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if (workspace / candidate).exists():
+            compose_env = candidate
+            break
     manager = UpdateStateManager(data_dir / "update_state.json")
     manager.ensure()
     start_ts = _now_iso()

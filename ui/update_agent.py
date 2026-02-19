@@ -39,7 +39,8 @@ def _require_workspace() -> None:
 class RunRequest(BaseModel):
     target_ref: str | None = None
     repo_slug: str | None = None
-    compose_env: bool = False
+    env_file: str | None = None
+    compose_env: bool | None = None
     project_name: str | None = None
 
 
@@ -97,8 +98,12 @@ def _build_runner_env(payload: RunRequest) -> dict[str, str]:
         env["TS_CONNECT_UPDATE_REF"] = payload.target_ref
     else:
         env.pop("TS_CONNECT_UPDATE_REF", None)
-    if payload.compose_env:
-        env["TS_CONNECT_UPDATE_COMPOSE_ENV"] = "compose.env"
+    env_file = (payload.env_file or "").strip()
+    if not env_file and payload.compose_env:
+        # Legacy payload field: map to the unified .env convention.
+        env_file = ".env"
+    if env_file:
+        env["TS_CONNECT_UPDATE_COMPOSE_ENV"] = env_file
     else:
         env.pop("TS_CONNECT_UPDATE_COMPOSE_ENV", None)
     if payload.project_name:

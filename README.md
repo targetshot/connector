@@ -1,6 +1,6 @@
 # TargetShot Connect Docker Compose Package
 
-This package bundles TargetShot Connect (Kafka Connect + MariaDB Debezium connector + web UI) for self-hosted deployments.
+This package bundles TargetShot Connect (Kafka Connect + local mirror MariaDB + Debezium connector + web UI) for self-hosted deployments.
 
 ## Quick Start
 
@@ -9,14 +9,18 @@ git clone https://github.com/targetshot/connector.git
 cd connector
 cp .env.example .env  # adjust secrets
 cp ui/.env.example ui/.env  # optional: UI-specific overrides
-cp compose.env.example compose.env  # optional: compose overrides (e.g. UI_BIND_IP)
-# Tipp: Wenn du `compose.env` nutzt, jeden Compose-Befehl mit `--env-file compose.env` aufrufen
-# (oder den Inhalt nach `.env` verschieben), damit Variablen auch in den Containern landen.
 docker compose up -d
 # Update-Agent separat starten (damit `docker compose down` den Runner nicht stoppt)
 cd update-agent
-docker compose --env-file ../compose.env up -d
+docker compose --env-file ../.env up -d
 ```
+
+Hinweis: `compose.env` wird nicht mehr verwendet. Nutze ab sofort ausschließlich `./.env`.
+
+Die empfohlene Pipeline ist jetzt:
+- Vereins-Meyton-DB -> lokale `mariadb-mirror` auf dem Server
+- Debezium Connector -> liest aus `mariadb-mirror`
+- Kafka Topics -> lokal (Redpanda) und optional weiter in die Cloud (MirrorMaker)
 
 ### Versioning & Releases
 - Update the version defaults once per release. Run `./scripts/bump_version.sh vX.Y.Z [ReleaseName]` from the repo root. This updates `ts-connect/VERSION` (and optionally `ts-connect/RELEASE`).
@@ -24,7 +28,7 @@ docker compose --env-file ../compose.env up -d
 - For a fully automated workflow (stage dev changes → merge main → bump version → wait for the build → promote `stable`), use `./scripts/release.sh vX.Y.Z [ReleaseName]`. The script requires `git`, `gh`, and `jq` to be installed and authenticated.
 - Commit the version file changes and merge them into `main`. Pushing to `main` automatically triggers the **Build & publish ts-connect** workflow.
 - The UI reads `VERSION`/`RELEASE` automatically when `TS_CONNECT_VERSION`/`TS_CONNECT_RELEASE` are not set.
-- If you need to run `docker compose` from another directory (e.g. via systemd), set `TS_CONNECT_WORKSPACE_HOST=/absolute/path/to/connector` in `.env` or `compose.env`. Otherwise the default bind `.:/workspace` (relative to `compose.yml`) is used.
+- If you need to run `docker compose` from another directory (e.g. via systemd), set `TS_CONNECT_WORKSPACE_HOST=/absolute/path/to/connector` in `.env`. Otherwise the default bind `.:/workspace` (relative to `compose.yml`) is used.
 
 ### Container Images & Channels
 - Pushes to `main` run the **Build & publish ts-connect** workflow. It logs into Azure via OIDC (Environment `release`), builds AMD64/ARM64 images with Buildx, signs the resulting manifest with Cosign, and publishes it to `targetshot.azurecr.io/ts-connect:<version>` and `:<commit>`. The digest is immediately re-tagged as `targetshot.azurecr.io/ts-connect:beta` without rebuilding.
@@ -43,7 +47,7 @@ docker compose --env-file ../compose.env up -d
 - The UI’s manual update button (and the nightly auto-update, if enabled) now performs `git pull`, `docker compose pull`, and `docker compose up -d` to roll out the latest `stable` channel from ACR. Set `TS_CONNECT_UPDATE_BUILD_LOCAL=true` only when you explicitly want the update runner to rebuild the image from source.
 - The update card compares your local `ts-connect/VERSION` with the `org.opencontainers.image.version` label of `${TS_CONNECT_UPDATE_CHECK_IMAGE:-TS_CONNECT_UI_IMAGE}` (default `targetshot.azurecr.io/ts-connect:stable`). Override this variable if you want the UI to monitor another tag (e.g. `beta`).
 - Environments without Watchtower can continue to rely on the built-in manual/auto-update flow; Watchtower is optional and simply adds continuous polling for the channel tag.
-- Azure Container Registry authentication: either log in once per host (`docker login targetshot.azurecr.io -u <user> --password-stdin`) using an ACR token/service principal, or set `TS_CONNECT_ACR_USERNAME/TS_CONNECT_ACR_PASSWORD` (and optionally `TS_CONNECT_ACR_REGISTRY`) in `compose.env` so the update runner performs `docker login` automatically before `docker compose pull`. Using a Docker credential helper (`pass`, `secretservice`, `osxkeychain`, …) is recommended to store the token securely.
+- Azure Container Registry authentication: either log in once per host (`docker login targetshot.azurecr.io -u <user> --password-stdin`) using an ACR token/service principal, or set `TS_CONNECT_ACR_USERNAME/TS_CONNECT_ACR_PASSWORD` (and optionally `TS_CONNECT_ACR_REGISTRY`) in `.env` so the update runner performs `docker login` automatically before `docker compose pull`. Using a Docker credential helper (`pass`, `secretservice`, `osxkeychain`, …) is recommended to store the token securely.
 
 ### Host-Agent für OS-Updates & Neustart
 Der neue Host-Agent läuft außerhalb von Docker direkt auf dem Server und kümmert sich um sichere Betriebssystem-Updates sowie orchestrierte Reboots. Die UI spricht ihn über eine geschützte HTTP-API an.
@@ -51,11 +55,11 @@ Der neue Host-Agent läuft außerhalb von Docker direkt auf dem Server und kümm
 1. **Installieren**
    ```bash
    cd /opt/ts-connect/host-agent
-   python3 -m venv /opt/ts-host-agent
-   source /opt/ts-host-agent/bin/activate
+   python3 -m venv /opt/ts-connect/.venv-host-agent
+   source /opt/ts-connect/.venv-host-agent/bin/activate
    pip install -r requirements.txt
    ```
-   Beispiel-Unit `/etc/systemd/system/ts-connect-host-agent.service`:
+   Beispiel-Unit `/etc/systemd/system/ts-connect-host-agent.service` (läuft als `tsconnect`):
    ```ini
    [Unit]
    Description=TargetShot Host Agent
@@ -63,11 +67,13 @@ Der neue Host-Agent läuft außerhalb von Docker direkt auf dem Server und kümm
 
    [Service]
    Type=simple
+   User=tsconnect
+   Group=tsconnect
    WorkingDirectory=/opt/ts-connect/host-agent
    Environment=TS_HOST_WORKSPACE=/opt/ts-connect
-   Environment=TS_HOST_COMPOSE_ENV=compose.env
+   Environment=TS_HOST_COMPOSE_ENV=.env
    Environment=TS_HOST_UPDATE_AGENT_PATH=/opt/ts-connect/update-agent
-   ExecStart=/opt/ts-host-agent/bin/python host_agent.py --host 127.0.0.1 --port 9010
+   ExecStart=/opt/ts-connect/.venv-host-agent/bin/python host_agent.py --host 127.0.0.1 --port 9010
    Restart=on-failure
 
    [Install]
@@ -76,7 +82,7 @@ Der neue Host-Agent läuft außerhalb von Docker direkt auf dem Server und kümm
    Der Agent erstellt automatisch `/etc/ts-connect-host-agent/token` und `/var/lib/ts-connect-host-agent/state.json`.
 
 2. **UI anbinden**
-   - Setze in `compose.env`:  
+   - Setze in `.env`:  
      ```
      TS_CONNECT_HOST_AGENT_URL=http://127.0.0.1:9010
      TS_CONNECT_HOST_AGENT_TOKEN=<Inhalt aus /etc/ts-connect-host-agent/token>
@@ -86,8 +92,8 @@ Der neue Host-Agent läuft außerhalb von Docker direkt auf dem Server und kümm
      `TS_CONNECT_HOST_GATEWAY_OVERRIDE=mein-hostname:meine-ip` (Standard `host.docker.internal:host-gateway`).
    - UI + Update-Agent neu starten:
      ```bash
-     docker compose --env-file compose.env up -d
-     cd update-agent && docker compose --env-file ../compose.env up -d
+     docker compose up -d
+     cd update-agent && docker compose --env-file ../.env up -d
      ```
 
 3. **Funktionsumfang**
@@ -100,26 +106,42 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 ### Services
 - `redpanda`: local Kafka (single node) for offsets/history
 - `kafka-connect`: Confluent Kafka Connect with Debezium MySQL plugin
+- `mariadb-mirror`: lokale MariaDB mit aktiviertem Binlog (Debezium-Quelle)
 - `ui`: FastAPI web UI to manage connector, tests, secrets
 - `update-agent`: Sidecar API (jetzt als eigenes Compose-Projekt unter `update-agent/compose.yml`) – kümmert sich um Pull/Restart, ohne sich selbst zu stoppen
 - `schema-registry`: lokaler Schema Registry Dienst für Avro/JSON Converter
 - `mirror-maker`: Kafka MirrorMaker 2, spiegelt `ts.raw.*`-Topics in die Confluent Cloud sobald erreichbar
 - `streams-transform`: Kafka Streams Anwendung, die Vereins-Topics auf einheitliche Confluent-Topics mapped
 - `backup-db`: lokaler PostgreSQL-Puffer für Offline-Backups
-- *(optional)* `elastic-agent`: Elastic Fleet Client für Logs & Metriken (per `docker compose --profile elastic up -d` aktivieren)
 
 ### Notes
-- UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `compose.env` for localhost-only access.
-- On first start the UI now generates a random admin password and stores it inside `ui/data/admin_password.generated` (container path `/app/data/admin_password.generated`). Read the file once, log in, and immediately rotate the password via the Admin section or by setting `UI_ADMIN_PASSWORD`.
-- Sessions are signed with `UI_SESSION_SECRET`. If the variable is absent, a random value is written to `/app/data/session_secret`. Supplying your own secret in `compose.env` keeps logins valid across re-installs.
+- UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `.env` for localhost-only access.
+- Debezium sollte auf die lokale Mirror-DB zeigen (`TS_CONNECT_DEFAULT_DB_HOST=mariadb-mirror`, Port intern `3306`, extern standardmäßig `${TS_CONNECT_MIRROR_PORT:-3307}`).
+- On first start the UI now generates a random admin password and stores it inside `ui/data/admin_password.generated` (container path `/app/data/admin_password.generated`). Read the file once, log in, and immediately rotate the password via the Admin section or by setting `UI_ADMIN_PASSWORD` in `.env`.
+- Sessions are signed with `UI_SESSION_SECRET`. If the variable is absent, a random value is written to `/app/data/session_secret`. Supplying your own secret in `.env` keeps logins valid across re-installs.
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
 - Docker socket access moved into the dedicated `update-agent` service. The UI talks to it via `TS_CONNECT_UPDATE_AGENT_URL` (defaults to `http://update-agent:9000`) and authenticates with `TS_CONNECT_UPDATE_AGENT_TOKEN`. Leave the token empty to auto-generate a shared secret in `ui/data/update-agent.token`.
+- UI und Health schreiben Logs nach `/app/data/logs/` (u. a. `ui.log`, `health.log`); `ui.log` lässt sich direkt im UI-Bereich "System-Logs" anzeigen.
 
 ### Kafka Streams Transformation
 - Der Dienst `streams-transform` abonniert alle Topics nach dem Muster `<Vereinsnummer>.SMDB.(Schuetze|Treffer|Scheiben|Serien)` und leitet sie in die Standard-Topics `ts.sds-test.{schuetze,treffer,scheiben,serien}` weiter.
 - Standardmäßig verbindet sich die Anwendung mit `redpanda:9092`; per `TS_STREAMS_TARGET_PREFIX` lässt sich das Zielpräfix anpassen.
 - Die erzeugten Ziele werden zusätzlich über MirrorMaker 2 in die Confluent Cloud repliziert (`ts.sds-test.*`).
-- Feintuning (Application ID, Pattern, Threads, Commit-Intervalle) erfolgt über die optionalen `TS_STREAMS_*` Variablen in `compose.env`.
+- Feintuning (Application ID, Pattern, Threads, Commit-Intervalle) erfolgt über die optionalen `TS_STREAMS_*` Variablen in `.env`.
+
+### Mirror-MariaDB Replikation
+- Der Container `mariadb-mirror` kann beim ersten Start automatisch als Replikat der Vereins-Meyton-DB konfiguriert werden.
+- Dafür in `.env` setzen:
+  - `TS_CONNECT_SOURCE_DB_HOST`, `TS_CONNECT_SOURCE_DB_PORT`
+  - `TS_CONNECT_SOURCE_DB_REPL_USER`, `TS_CONNECT_SOURCE_DB_REPL_PASSWORD`
+  - `TS_CONNECT_SOURCE_DB_GTID_MODE=true` (Standard)
+- Falls die Quell-DB kein GTID verwendet:
+  - `TS_CONNECT_SOURCE_DB_GTID_MODE=false`
+  - `TS_CONNECT_SOURCE_DB_LOG_FILE`, `TS_CONNECT_SOURCE_DB_LOG_POS`
+- Nach dem Start kannst du den Replikationsstatus prüfen:
+  ```bash
+  docker exec -it ts-mariadb-mirror mariadb -uroot -p"$TS_CONNECT_MIRROR_ROOT_PASSWORD" -e "SHOW SLAVE STATUS\\G"
+  ```
 
 ### Offline-Puffer konfigurieren
 - Der Offline-Puffer ist dauerhaft aktiv. Alle Debezium-Events werden lokal in der Postgres-Datenbank `buffer_events` zwischengespeichert und bei verfügbarer Verbindung automatisch hochgeladen.
@@ -130,7 +152,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
   - **Basic**: 14 Tage
   - **Plus**: 30 Tage
   - **Pro**: 90 Tage
-- Standard-Credentials für den Postgres-Puffer können über `TS_CONNECT_BACKUP_DB/USER/PORT` im `compose.env` angepasst werden.
+- Standard-Credentials für den Postgres-Puffer können über `TS_CONNECT_BACKUP_DB/USER/PORT` in `.env` angepasst werden.
 - Die UI legt die Tabelle `buffer_events` automatisch an und entfernt alte Einträge gemäß Lizenzlaufzeit.
 
 ### Lizenzprüfung (Lemon Squeezy)
@@ -144,19 +166,10 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
   - `TS_LICENSE_ACTIVATION_URL`: Endpoint für Aktivierungen (Standard: `https://api.lemonsqueezy.com/v1/licenses/activate`).
 - Die Cloud-Replikation (MirrorMaker) startet erst, wenn die Lizenz aktiviert wurde; bis dahin verbleiben alle Events ausschließlich im lokalen Puffer.
 
-### Zentrales Monitoring mit Elastic Agent
-- Standardmäßig bleibt der Elastic Agent deaktiviert (Health-Badge zeigt „Deaktiviert“).
-- Aktiviere ihn bei Bedarf mit `docker compose --profile elastic up -d` oder setze `COMPOSE_PROFILES=elastic`.
-- Setze zusätzlich `ELASTIC_AGENT_ENABLED=true`, damit die UI den Health-Check aktiviert.
-- `elastic-agent` joined automatisch deine Elastic-Fleet, sobald `ELASTIC_FLEET_URL` und `ELASTIC_FLEET_ENROLLMENT_TOKEN` gesetzt sind.
-- Der Agent läuft vollständig im Fleet-Modus (kein `inputs.d`). Konfiguriere Docker-, System- und Log-Integrationen direkt in Kibana → Fleet für deine Policy.
-- Persistenter Agent-State liegt unter `./elastic-agent/state`, damit Upgrades und Reboots sauber durchlaufen.
-- Health- und Lizenzdaten schreibt die UI als NDJSON nach `/app/data/logs/health.log`. Binde diesen Pfad in der Logs-Integration ein, um Status-Dashboards aufzubauen.
-
 ## Folder Structure
 ```
 compose.yml
-compose.env.example
+.env.example
 Dockerfile (under connect/ and ui/)
 ui/
 connect/

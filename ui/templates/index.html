@@ -229,7 +229,7 @@
             <span class="brand-sub text-lg font-semibold">TargetShot Connect</span>
           </a>
           <div class="flex flex-col items-start gap-3 text-sm text-zinc-500 dark:text-zinc-400 sm:flex-row sm:items-center sm:gap-4">
-            <p>Daten-Sync (Debezium) · MeytonDB → Cloud-Kafka (Confluent)</p>
+            <p>Daten-Sync (Debezium) · MeytonDB → Mirror-MariaDB (lokal) → Cloud-Kafka (Confluent)</p>
             <span class="inline-flex items-center gap-2 rounded-full border border-white/40 bg-white/90 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-zinc-800 shadow-sm shadow-cyan-500/10 supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-white/10 dark:text-white/90">
               <span>Version {{ connect_version }}</span>
               <span class="h-1 w-1 rounded-full bg-accent/80 dark:bg-accent"></span>
@@ -265,8 +265,8 @@
               <div class="flex items-start gap-3">
                 <span class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/15 font-semibold text-accent-dark dark:bg-accent/25 dark:text-white">1</span>
                 <div>
-                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">MeytonDB verbinden</h2>
-                  <p>Trage Host, Port und Zugangsdaten deines Vereinsservers ein, damit der Daten-Sync alle Ereignisse erfassen kann.</p>
+                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">Mirror-MariaDB verbinden</h2>
+                  <p>Debezium liest aus der lokalen Mirror-MariaDB auf dem Server. Trage dafür Host, Port und Zugangsdaten ein.</p>
                 </div>
               </div>
               <div class="flex items-start gap-3">
@@ -290,9 +290,9 @@
               <span id="statusBadge" class="badge">…</span>
               <span class="text-xs text-zinc-500 dark:text-zinc-400">Live-Abfrage des aktuellen Sync-Connectors</span>
             </div>
-          <div class="mt-4 grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+          <div class="mt-4 grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
-              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">MeytonDB</p>
+              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Mirror-MariaDB</p>
               <div class="mt-2 space-y-1">
                 <span id="dbStatusBadge" class="badge" aria-live="polite">…</span>
                 <p id="dbStatusMessage" class="status-detail"></p>
@@ -326,13 +326,6 @@
                 <p id="licenseStatusMessage" class="status-detail"></p>
               </div>
             </div>
-            <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
-              <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Monitoring Agent (Elastic)</p>
-              <div class="mt-2 space-y-1">
-                <span id="elasticAgentStatusBadge" class="badge" aria-live="polite">…</span>
-                <p id="elasticAgentStatusMessage" class="status-detail"></p>
-              </div>
-            </div>
           </div>
           </section>
 
@@ -355,8 +348,8 @@
             <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
               <input type="hidden" name="section" value="db" />
               <div>
-                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">MeytonDB-Verbindung</h2>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zugangsdaten deiner Vereinsdatenbank für den Sync-Connector.</p>
+                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Mirror-MariaDB-Verbindung</h2>
+                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zugangsdaten der lokalen Mirror-MariaDB für den Sync-Connector.</p>
               </div>
               <div class="grid gap-6 md:grid-cols-2">
                 <div>
@@ -628,10 +621,25 @@
                   <span>{{ 'secrets.properties vorhanden' if has_secrets else 'secrets.properties wird nach dem ersten Speichern erstellt' }}</span>
                 </div>
                 <p class="rounded-2xl border border-amber-200/70 bg-amber-100/70 px-3 py-2 text-amber-800 shadow-inner dark:border-amber-300/40 dark:bg-amber-500/10 dark:text-amber-200">
-                  <strong>Reset &amp; Re-Snapshot:</strong> Löscht den bestehenden Connector und erstellt ihn neu. Dadurch startet der Daten-Sync eine Vollaufnahme der Vereinsdatenbank.
+                  <strong>Reset &amp; Re-Snapshot:</strong> Löscht den bestehenden Connector und erstellt ihn neu. Dadurch startet der Daten-Sync eine Vollaufnahme der lokalen Mirror-MariaDB.
                   Benutzer sollten dies nur durchführen, wenn Postgres leer ist oder eine komplette Aktualisierung benötigt wird.
                 </p>
               </div>
+            </section>
+
+            <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-4">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">System-Logs</h2>
+                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zeigt die letzten Zeilen aus <code>/app/data/logs/ui.log</code>.</p>
+                </div>
+                <div class="flex items-center gap-3">
+                  <button type="button" id="btnRefreshUiLog" class="btn-secondary">Log aktualisieren</button>
+                  <span id="uiLogBadge" class="badge">…</span>
+                </div>
+              </div>
+              <p id="uiLogMeta" class="text-xs text-zinc-500 dark:text-zinc-400">Status wird geladen…</p>
+              <pre id="uiLogContent" class="max-h-72 overflow-auto whitespace-pre-wrap rounded-2xl bg-black/85 p-4 font-mono text-[0.78rem] text-emerald-200 dark:bg-black/60">Lade Logs…</pre>
             </section>
 
             <div class="grid grid-cols-1 gap-7 lg:grid-cols-2">
@@ -776,7 +784,7 @@
               <ul class="mt-3 list-disc space-y-1 pl-5 text-amber-900/80 dark:text-amber-100/90">
                 <li>Installationsanleitung siehe README Abschnitt „Host-Agent“.</li>
                 <li>Setze <code>TS_CONNECT_HOST_AGENT_URL</code> und übermittle das Token an die UI (Datei <code>ui/data/host-agent.token</code>).</li>
-                <li>Starte die Container neu: <code>docker compose --env-file compose.env up -d</code> sowie <code>cd update-agent &amp;&amp; docker compose --env-file ../compose.env up -d</code>.</li>
+                <li>Starte die Container neu: <code>docker compose up -d</code> sowie <code>cd update-agent &amp;&amp; docker compose --env-file ../.env up -d</code>.</li>
               </ul>
             </section>
             {% endif %}
@@ -1154,7 +1162,7 @@
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.ok) {
         if (j.pending) {
-          alert(j.message || 'Connector-Neuanlage wartet auf die Vereinsdatenbank und wird automatisch fortgesetzt.');
+          alert(j.message || 'Connector-Neuanlage wartet auf die lokale Mirror-MariaDB und wird automatisch fortgesetzt.');
         } else {
           alert('Connector wurde neu erstellt. Der Daten-Sync startet jetzt eine Vollaufnahme.');
         }
@@ -1259,8 +1267,10 @@
     const backupStatusMessage = document.getElementById('backupStatusMessage');
     const licenseStatusBadge = document.getElementById('licenseStatusBadge');
     const licenseStatusMessage = document.getElementById('licenseStatusMessage');
-    const elasticAgentStatusBadge = document.getElementById('elasticAgentStatusBadge');
-    const elasticAgentStatusMessage = document.getElementById('elasticAgentStatusMessage');
+    const btnRefreshUiLog = document.getElementById('btnRefreshUiLog');
+    const uiLogBadge = document.getElementById('uiLogBadge');
+    const uiLogMeta = document.getElementById('uiLogMeta');
+    const uiLogContent = document.getElementById('uiLogContent');
     const btnCheckDefaultText = btnCheckUpdate ? btnCheckUpdate.textContent : '';
     const btnCheckOsDefaultText = btnCheckOsUpdates ? btnCheckOsUpdates.textContent : '';
     const btnApplyOsDefaultText = btnApplyOsUpdates ? btnApplyOsUpdates.textContent : '';
@@ -1283,6 +1293,11 @@
     const hostRebootSummary = document.getElementById('hostRebootSummary');
     const hostRebootLog = document.getElementById('hostRebootLog');
     let osUpdatePollTimer = null;
+    if (btnRefreshUiLog) {
+      btnRefreshUiLog.onclick = async () => {
+        await loadUiLog(true);
+      };
+    }
 
     function escapeHtml(value) {
       return value.replace(/[&<>"']/g, function (match) {
@@ -1510,7 +1525,6 @@
         setHealthBadge(connectorStatusBadge, data.connector, connectorStatusMessage);
         setHealthBadge(backupStatusBadge, data.backup, backupStatusMessage);
         setHealthBadge(licenseStatusBadge, data.license, licenseStatusMessage);
-        setHealthBadge(elasticAgentStatusBadge, data.elastic_agent, elasticAgentStatusMessage);
       } catch (error) {
         if (showError) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1521,7 +1535,48 @@
         setHealthBadge(connectorStatusBadge, { status: 'error', message: '' }, connectorStatusMessage);
         setHealthBadge(backupStatusBadge, { status: 'error', message: '' }, backupStatusMessage);
         setHealthBadge(licenseStatusBadge, { status: 'error', message: '' }, licenseStatusMessage);
-        setHealthBadge(elasticAgentStatusBadge, { status: 'error', message: '' }, elasticAgentStatusMessage);
+      }
+    }
+
+    async function loadUiLog(showError) {
+      if (!uiLogContent) return;
+      try {
+        const response = await fetch('/api/logs/ui?lines=200');
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = data.detail || response.statusText || response.status;
+          throw new Error(String(detail));
+        }
+        const lines = Array.isArray(data.lines) ? data.lines : [];
+        const updatedAt = data.updated_at ? formatIso(data.updated_at) : '–';
+        if (uiLogMeta) {
+          const path = data.path || '/app/data/logs/ui.log';
+          uiLogMeta.textContent = `${path} · Letzte Aktualisierung: ${updatedAt}`;
+        }
+        uiLogContent.textContent = lines.length ? lines.join('\n') : 'Noch keine Logeinträge.';
+        uiLogContent.scrollTop = uiLogContent.scrollHeight;
+        if (uiLogBadge) {
+          if (data.exists === false) {
+            setBadge(uiLogBadge, 'pending', 'Keine Datei');
+          } else if (lines.length) {
+            setBadge(uiLogBadge, true, `${lines.length} Zeilen`);
+          } else {
+            setBadge(uiLogBadge, 'pending', 'Leer');
+          }
+        }
+      } catch (error) {
+        if (uiLogBadge) {
+          setBadge(uiLogBadge, false, 'Fehler');
+        }
+        if (uiLogMeta) {
+          const message = error instanceof Error ? error.message : String(error);
+          uiLogMeta.textContent = `Fehler: ${message}`;
+        }
+        uiLogContent.textContent = 'Log konnte nicht geladen werden.';
+        if (showError) {
+          const message = error instanceof Error ? error.message : String(error);
+          showInfoModal('Logfehler', message, 'error');
+        }
       }
     }
 
@@ -2058,6 +2113,7 @@
     loadOsUpdateStatus(false).catch(() => {});
     loadUpdateStatus(false).catch(() => {});
     loadHealthSummary(false).catch(() => {});
+    loadUiLog(false).catch(() => {});
   </script>
 </body>
 </html>

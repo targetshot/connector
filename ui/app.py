@@ -4,6 +4,7 @@ import ipaddress
 import json
 import hashlib
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import secrets
@@ -47,8 +48,6 @@ from update_agent_utils import get_update_agent_token
 from update_state import UpdateStateManager
 
 logger = logging.getLogger("ts-connect-ui")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
 
 
 def _env_int(name: str, default: int | None) -> int | None:
@@ -81,6 +80,9 @@ DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = DATA_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+UI_LOG_FILE = LOG_DIR / "ui.log"
+UI_LOG_MAX_BYTES = max(_env_int("TS_CONNECT_UI_LOG_MAX_BYTES", 5 * 1024 * 1024) or 5 * 1024 * 1024, 1024)
+UI_LOG_BACKUP_COUNT = max(_env_int("TS_CONNECT_UI_LOG_BACKUP_COUNT", 3) or 3, 1)
 ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
 ADMIN_PASSWORD_GENERATED_FILE = DATA_DIR / "admin_password.generated"
 SESSION_SECRET_FILE = DATA_DIR / "session_secret"
@@ -93,6 +95,35 @@ HOST_AGENT_TOKEN = get_host_agent_token(DATA_DIR)
 HOST_REBOOT_DELAY_SECONDS = int(os.getenv("TS_CONNECT_HOST_REBOOT_DELAY", "60"))
 SECRETS_FILE_UID = _env_int("TS_CONNECT_SECRETS_UID", 1000)
 SECRETS_FILE_GID = _env_int("TS_CONNECT_SECRETS_GID", 1000)
+
+
+def _configure_logging() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO)
+    has_file_handler = False
+    target_path = str(UI_LOG_FILE.resolve())
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler):
+            base_filename = getattr(handler, "baseFilename", "")
+            if base_filename == target_path:
+                has_file_handler = True
+                break
+    if not has_file_handler:
+        file_handler = RotatingFileHandler(
+            UI_LOG_FILE,
+            maxBytes=UI_LOG_MAX_BYTES,
+            backupCount=UI_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        logger.addHandler(file_handler)
+    logger.setLevel(logging.INFO)
+
+
+_configure_logging()
+logger.info("UI logging enabled at %s", UI_LOG_FILE)
 
 
 def _generate_admin_password(length: int = 24) -> str:
@@ -253,7 +284,7 @@ DEFAULT_BACKUP_HOST = os.getenv("TS_CONNECT_BACKUP_HOST", "backup-db")
 DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
 DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
 DEFAULT_BACKUP_USER = os.getenv("TS_CONNECT_BACKUP_USER", "targetshot")
-DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mysql")
+DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mariadb-mirror")
 STREAMS_TARGET_PREFIX = (os.getenv("TS_STREAMS_TARGET_PREFIX", "ts.sds-test") or "ts.sds-test").strip() or "ts.sds-test"
 LEMON_LICENSE_API_URL = os.getenv(
     "TS_LICENSE_API_URL",
@@ -268,7 +299,6 @@ LEMON_VARIANT_PLAN_MAP_RAW = os.getenv("TS_LICENSE_VARIANT_PLAN_MAP", "")
 LEMON_INSTANCE_NAME = os.getenv("TS_LICENSE_INSTANCE_NAME", "").strip()
 LEMON_INSTANCE_ID = os.getenv("TS_LICENSE_INSTANCE_ID", "").strip()
 LEMON_ACTIVATION_ENABLED = os.getenv("TS_LICENSE_AUTO_ACTIVATE", "true").lower() in {"1", "true", "yes", "on"}
-ELASTIC_AGENT_ENABLED = os.getenv("ELASTIC_AGENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _license_status_snapshot(settings: dict) -> dict:
@@ -339,6 +369,14 @@ def _write_json_log(filename: str, payload: dict) -> None:
     line = json.dumps(payload, ensure_ascii=False)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def _tail_log_lines(path: Path, line_limit: int) -> list[str]:
+    if line_limit <= 0:
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+    return [line.rstrip("\n") for line in lines[-line_limit:]]
 
 def _load_version_defaults() -> tuple[str, str]:
     version = os.getenv("TS_CONNECT_VERSION")
@@ -572,15 +610,15 @@ _HTTP_ERROR_PREFIX_RE = re.compile(r"^(GET|POST|PUT|DELETE)\s+\S+\s*->\s*\d{3}:\
 _APPLY_ERROR_HINTS = (
     (
         ("communications link failure", "unable to connect", "jdbc:mysql"),
-        "Keine Verbindung zur Vereinsdatenbank (MySQL). Bitte Host, Port, VPN oder Firewall prüfen.",
+        "Keine Verbindung zur lokalen Mirror-MariaDB. Bitte Host, Port oder Container-Status prüfen.",
     ),
     (
         ("connection refused",),
-        "Die Vereinsdatenbank lehnt Verbindungen ab. Ist der Dienst gestartet und der Port freigegeben?",
+        "Die lokale Mirror-MariaDB lehnt Verbindungen ab. Ist der Dienst gestartet und der Port freigegeben?",
     ),
     (
         ("connect timed out", "connection timed out", "timeout"),
-        "Zeitüberschreitung bei der Verbindung zur Vereinsdatenbank. Netzwerkpfad prüfen.",
+        "Zeitüberschreitung bei der Verbindung zur lokalen Mirror-MariaDB. Netzwerkpfad prüfen.",
     ),
 )
 
@@ -1556,6 +1594,14 @@ async def _ensure_latest_release(force: bool = False) -> dict[str, Any] | None:
     return release
 
 
+def _detect_env_file_name() -> str | None:
+    for candidate in (".env",):
+        candidate_path = WORKSPACE_PATH / candidate
+        if candidate_path.exists():
+            return candidate
+    return None
+
+
 async def _build_update_status(force: bool = False) -> dict[str, Any]:
     await ensure_update_state()
     state = await get_update_state_snapshot()
@@ -1565,7 +1611,8 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
     connect_version, connect_release = _load_version_defaults()
     prereq = await _detect_prerequisites(workspace_info)
     repo_slug = await _determine_repo_slug()
-    compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
+    env_file_name = _detect_env_file_name()
+    compose_env_exists = env_file_name is not None
     current_marker = connect_version or workspace_info.get("current_ref") or workspace_info.get("current_commit")
     latest_tag = release.get("tag_name") if isinstance(release, dict) else None
     remote_digest = release.get("digest") if isinstance(release, dict) else None
@@ -1610,6 +1657,7 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         "prerequisites": prereq,
         "repo_slug": repo_slug,
         "compose_env": compose_env_exists,
+        "env_file": env_file_name,
         "job_started": state.get("job_started"),
         "current_image": os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE),
         "auto_update": {
@@ -1745,11 +1793,12 @@ def _os_update_task_done(task: asyncio.Task) -> None:
         logger.exception("Systemupdate Hintergrundtask fehlgeschlagen: %s", exc)
 
 
-async def _start_update_runner(target_ref: str | None, repo_slug: str | None, compose_env: bool) -> str:
+async def _start_update_runner(target_ref: str | None, repo_slug: str | None, env_file: str | None) -> str:
     payload = {
         "target_ref": target_ref,
         "repo_slug": repo_slug,
-        "compose_env": compose_env,
+        "env_file": env_file,
+        "compose_env": bool(env_file),
         "project_name": PROJECT_NAME,
     }
     result = await _update_agent_request("POST", "/api/v1/run", json_payload=payload, timeout=10)
@@ -1776,7 +1825,7 @@ async def _launch_update_job(
             return {"ok": False, "error": detail, "code": 400}
         release = await _ensure_latest_release(force=force_release_refresh)
         repo_slug = await _determine_repo_slug()
-        compose_env_exists = (WORKSPACE_PATH / "compose.env").exists()
+        env_file_name = _detect_env_file_name()
         selected_target = target_ref or (release.get("tag_name") if isinstance(release, dict) else None)
         job_started = _now_utc_iso()
         log_lines = [f"{label} Update ausgelöst um {job_started}", f"Initiator: {initiated_by}"]
@@ -1793,7 +1842,7 @@ async def _launch_update_job(
             updates["auto_update_last_run"] = job_started
         await merge_update_state_async(**updates)
         try:
-            job_identifier = await _start_update_runner(selected_target, repo_slug, compose_env_exists)
+            job_identifier = await _start_update_runner(selected_target, repo_slug, env_file_name)
         except Exception as exc:  # noqa: BLE001
             message = _short_error_message(str(exc), 200)
             result_updates: dict[str, Any] = {
@@ -2011,7 +2060,7 @@ def get_db():
             """,
             (
                 1,
-                os.getenv("TS_CONNECT_DEFAULT_DB_HOST", "192.168.10.200"),
+                os.getenv("TS_CONNECT_DEFAULT_DB_HOST", "mariadb-mirror"),
                 3306,
                 os.getenv("TS_CONNECT_DEFAULT_DB_USER", "debezium_sync"),
                 CONFLUENT_BOOTSTRAP_DEFAULT,
@@ -3257,14 +3306,14 @@ def _friendly_meyton_error(exc: Exception, host: str | None = None) -> str:
             code = first
     host_hint = f" ({host})" if host else ""
     if code == 2003 or "can't connect" in lowered or "timed out" in lowered:
-        return f"Keine Antwort von der MeytonDB{host_hint}. Netzwerk oder IP prüfen."
+        return f"Keine Antwort von der Mirror-MariaDB{host_hint}. Netzwerk oder Container prüfen."
     if code == 2005 or "getaddrinfo failed" in lowered or "name or service not known" in lowered:
-        return f"MeytonDB-Host{host_hint} nicht gefunden. Adresse kontrollieren."
+        return f"Mirror-MariaDB-Host{host_hint} nicht gefunden. Adresse kontrollieren."
     if code == 1045 or "access denied" in lowered:
-        return "MeytonDB-Anmeldung abgelehnt. Benutzer oder Passwort prüfen."
+        return "Mirror-MariaDB-Anmeldung abgelehnt. Benutzer oder Passwort prüfen."
     if "unknown database" in lowered:
-        return "MeytonDB-Datenbank nicht gefunden. Datenbanknamen prüfen."
-    return f"MeytonDB-Fehler: {_short_error_message(message, 120)}"
+        return "Mirror-MariaDB-Datenbank nicht gefunden. Datenbanknamen prüfen."
+    return f"Mirror-MariaDB-Fehler: {_short_error_message(message, 120)}"
 
 
 async def _check_database_health() -> dict[str, str]:
@@ -3359,23 +3408,6 @@ async def _check_license_health() -> dict[str, str]:
     if status in {"unknown", ""}:
         return {"status": "warn", "message": message}
     return {"status": "ok", "message": message}
-
-
-async def _check_elastic_agent_health() -> dict[str, str]:
-    if not ELASTIC_AGENT_ENABLED:
-        return {"status": "skipped", "message": "Deaktiviert"}
-    try:
-        status = await _container_status("ts-elastic-agent")
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "message": _short_error_message(str(exc), 140)}
-    if not status.get("exists"):
-        return {"status": "warn", "message": "Agent nicht gestartet"}
-    status_text = (status.get("status") or "").strip()
-    if "Up" in status_text:
-        return {"status": "ok", "message": status_text}
-    if "Exited" in status_text or "Dead" in status_text:
-        return {"status": "error", "message": status_text}
-    return {"status": "warn", "message": status_text}
 
 
 async def _check_connector_health() -> dict[str, str]:
@@ -3653,7 +3685,7 @@ async def save(
 
     if section_key == "db":
         if not all([db_host, db_port is not None, db_user]):
-            request.session["error_message"] = "Bitte alle MeytonDB-Felder ausfüllen."
+            request.session["error_message"] = "Bitte alle Mirror-MariaDB-Felder ausfüllen."
             return RedirectResponse("/", status_code=303)
 
         db_host = db_host.strip()
@@ -3665,7 +3697,7 @@ async def save(
         else:
             db_password_value = submitted_password
         if not db_password_value:
-            request.session["error_message"] = "Bitte das MeytonDB-Passwort angeben."
+            request.session["error_message"] = "Bitte das Mirror-MariaDB-Passwort angeben."
             return RedirectResponse("/", status_code=303)
 
         conn = get_db()
@@ -3693,16 +3725,16 @@ async def save(
 
         try:
             await apply_connector_config()
-            request.session["flash_message"] = "MeytonDB-Einstellungen gespeichert & Connector aktualisiert."
+            request.session["flash_message"] = "Mirror-MariaDB-Einstellungen gespeichert & Connector aktualisiert."
         except DeferredApplyError as exc:
             request.session["flash_message"] = (
-                "MeytonDB-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
-                "sobald die Vereinsdatenbank erreichbar ist. "
+                "Mirror-MariaDB-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
+                "sobald die lokale Mirror-MariaDB erreichbar ist. "
                 f"Letzter Fehler: {exc}"
             )
         except ValueError as exc:
             request.session["flash_message"] = (
-                "MeytonDB-Einstellungen gespeichert. Connector-Update übersprungen: "
+                "Mirror-MariaDB-Einstellungen gespeichert. Connector-Update übersprungen: "
                 f"{exc}"
             )
         except Exception as exc:
@@ -3715,7 +3747,7 @@ async def save(
             await apply_connector_config()
         except DeferredApplyError as exc:
             request.session["flash_message"] = (
-                "Offline-Puffer wird erneut angewendet, sobald die Vereinsdatenbank erreichbar ist. "
+                "Offline-Puffer wird erneut angewendet, sobald die lokale Mirror-MariaDB erreichbar ist. "
                 f"Letzter Fehler: {exc}"
             )
         except Exception as exc:  # noqa: BLE001
@@ -3776,7 +3808,7 @@ async def save(
         else:
             db_password_val = secrets_data.get("db_password")
         if not db_password_val:
-            request.session["error_message"] = "Bitte zuerst die MeytonDB-Zugangsdaten speichern (DB-Passwort fehlt)."
+            request.session["error_message"] = "Bitte zuerst die Mirror-MariaDB-Zugangsdaten speichern (DB-Passwort fehlt)."
             return RedirectResponse("/", status_code=303)
 
         secrets_data.update(
@@ -3794,7 +3826,7 @@ async def save(
         except DeferredApplyError as exc:
             request.session["flash_message"] = (
                 "Confluent-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
-                "sobald die Vereinsdatenbank erreichbar ist. "
+                "sobald die lokale Mirror-MariaDB erreichbar ist. "
                 f"Letzter Fehler: {exc}"
             )
             return RedirectResponse("/", status_code=303)
@@ -3866,7 +3898,7 @@ async def connector_resnapshot(pw: str = Form(...)):
             "ok": True,
             "pending": True,
             "message": (
-                "Connector-Neuanlage wurde geplant. Sobald die Vereinsdatenbank erreichbar ist, "
+                "Connector-Neuanlage wurde geplant. Sobald die lokale Mirror-MariaDB erreichbar ist, "
                 "startet Debezium automatisch. "
                 f"Letzter Fehler: {exc}"
             ),
@@ -3929,13 +3961,12 @@ async def update_status(force: bool = False):
 
 @app.get("/api/health/summary", dependencies=[Depends(require_session)])
 async def health_summary():
-    database, confluent, connector, backup, license, elastic_agent = await asyncio.gather(
+    database, confluent, connector, backup, license = await asyncio.gather(
         _check_database_health(),
         _check_confluent_health(),
         _check_connector_health(),
         _check_backup_health(),
         _check_license_health(),
-        _check_elastic_agent_health(),
     )
     snapshot = {
         "timestamp": _now_utc_iso(),
@@ -3944,7 +3975,6 @@ async def health_summary():
         "connector": connector,
         "backup": backup,
         "license": license,
-        "elastic_agent": elastic_agent,
     }
     try:
         _write_json_log("health.log", snapshot)
@@ -3956,7 +3986,29 @@ async def health_summary():
         "connector": connector,
         "backup": backup,
         "license": license,
-        "elastic_agent": elastic_agent,
+    }
+
+
+@app.get("/api/logs/ui", dependencies=[Depends(require_session)])
+async def ui_logs(lines: int = 200):
+    line_limit = max(10, min(lines, 500))
+    if not UI_LOG_FILE.exists():
+        return {
+            "path": str(UI_LOG_FILE),
+            "exists": False,
+            "updated_at": None,
+            "lines": [],
+        }
+    try:
+        log_lines = await asyncio.to_thread(_tail_log_lines, UI_LOG_FILE, line_limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 180))
+    modified = datetime.utcfromtimestamp(UI_LOG_FILE.stat().st_mtime).replace(microsecond=0).isoformat() + "Z"
+    return {
+        "path": str(UI_LOG_FILE),
+        "exists": True,
+        "updated_at": modified,
+        "lines": log_lines,
     }
 
 

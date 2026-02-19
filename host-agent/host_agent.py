@@ -27,9 +27,27 @@ STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
 TOKEN_FILE = Path(os.getenv("TS_HOST_AGENT_TOKEN_FILE", "/etc/ts-connect-host-agent/token"))
 
 WORKSPACE_PATH = Path(os.getenv("TS_HOST_WORKSPACE", "/opt/ts-connect"))
-COMPOSE_ENV = os.getenv("TS_HOST_COMPOSE_ENV", "compose.env")
 UPDATE_AGENT_PATH = Path(os.getenv("TS_HOST_UPDATE_AGENT_PATH", WORKSPACE_PATH / "update-agent"))
-UPDATE_AGENT_ENV = os.getenv("TS_HOST_UPDATE_AGENT_ENV", "../compose.env")
+
+_raw_compose_env = os.getenv("TS_HOST_COMPOSE_ENV")
+if _raw_compose_env is not None:
+    COMPOSE_ENV = _raw_compose_env.strip() or None
+else:
+    COMPOSE_ENV = None
+    for candidate in (".env",):
+        if (WORKSPACE_PATH / candidate).exists():
+            COMPOSE_ENV = candidate
+            break
+
+_raw_update_env = os.getenv("TS_HOST_UPDATE_AGENT_ENV")
+if _raw_update_env is not None:
+    UPDATE_AGENT_ENV = _raw_update_env.strip() or None
+else:
+    UPDATE_AGENT_ENV = None
+    for candidate in (".env", "../.env"):
+        if (UPDATE_AGENT_PATH / candidate).exists():
+            UPDATE_AGENT_ENV = candidate
+            break
 COMPOSE_TIMEOUT = int(os.getenv("TS_HOST_AGENT_COMPOSE_TIMEOUT", "120"))
 REBOOT_DELAY_SECONDS = int(os.getenv("TS_HOST_AGENT_REBOOT_DELAY", "60"))
 HOST_LOG_LIMIT = int(os.getenv("TS_HOST_AGENT_LOG_LIMIT", "400"))
