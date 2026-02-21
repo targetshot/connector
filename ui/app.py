@@ -3,6 +3,7 @@ import html
 import ipaddress
 import json
 import hashlib
+import gzip
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -1249,7 +1250,13 @@ _REGISTRY_MANIFEST_ACCEPT = ",".join(
         "application/vnd.oci.image.manifest.v1+json",
     )
 )
-_REGISTRY_CONFIG_ACCEPT = "application/vnd.docker.container.image.v1+json"
+_REGISTRY_CONFIG_ACCEPT = ",".join(
+    (
+        "application/vnd.oci.image.config.v1+json",
+        "application/vnd.docker.container.image.v1+json",
+        "application/json",
+    )
+)
 _AUTH_PARAM_RE = re.compile(r'(\w+)=(".*?"|[^,]+)')
 
 
@@ -1392,8 +1399,18 @@ async def _registry_fetch_blob_json(
     )
     try:
         return response.json()
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Registry lieferte einen ungültigen Image-Config-Blob") from exc
+    except json.JSONDecodeError:
+        # Some registries return gzip-compressed blob bytes without usable JSON headers.
+        payload = response.content
+        if payload.startswith(b"\x1f\x8b"):
+            try:
+                decompressed = gzip.decompress(payload)
+                decoded = decompressed.decode("utf-8", "replace")
+                return json.loads(decoded)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                pass
+        content_type = response.headers.get("content-type", "").strip() or "unbekannt"
+        raise RuntimeError(f"Registry lieferte einen ungültigen Image-Config-Blob ({content_type})")
 
 
 def _select_manifest_entry(manifest: dict[str, Any]) -> dict[str, Any] | None:
@@ -1573,7 +1590,7 @@ async def _fetch_latest_release() -> dict[str, Any] | None:
         return await _fetch_release_via_registry_http(image_ref)
     except Exception as exc:  # noqa: BLE001
         registry_error = _short_error_message(str(exc), 200)
-        logger.info("Registry-API für %s konnte nicht gelesen werden (%s), versuche Docker CLI", image_ref, registry_error)
+        logger.debug("Registry-API fallback auf Docker CLI für %s (%s)", image_ref, registry_error)
     try:
         return await _fetch_release_via_docker_cli(image_ref)
     except Exception as exc:  # noqa: BLE001
