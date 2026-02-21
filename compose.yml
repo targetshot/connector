@@ -24,7 +24,7 @@ services:
     container_name: ts-schema-registry
     restart: unless-stopped
     environment:
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://redpanda:9092
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: ${SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS:-PLAINTEXT://redpanda:9092}
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
@@ -82,7 +82,7 @@ services:
       - "8083:8083"             # Connect REST (nur intern nutzen)
     environment:
       # Worker nutzt NUR den lokalen Broker (damit immer startbar)
-      CONNECT_BOOTSTRAP_SERVERS: redpanda:9092
+      CONNECT_BOOTSTRAP_SERVERS: ${CONNECT_BOOTSTRAP_SERVERS:-redpanda:9092}
       CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
       CONNECT_GROUP_ID: targetshot-connect
       CONNECT_CONFIG_STORAGE_TOPIC: _ts_connect_configs
@@ -95,9 +95,9 @@ services:
       CONNECT_OFFSET_STORAGE_TOPIC_CONFIG: cleanup.policy=compact,segment.bytes=67108864,retention.ms=604800000
       CONNECT_STATUS_STORAGE_TOPIC_CONFIG: cleanup.policy=compact,segment.bytes=67108864,retention.ms=1209600000
       # Single-Node => RF=1 (wichtig!)
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: ${CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR:-1}
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: ${CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR:-1}
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: ${CONNECT_STATUS_STORAGE_REPLICATION_FACTOR:-1}
 
       CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
@@ -137,27 +137,27 @@ services:
       KAFKA_LOG4J_OPTS: "-Dlog4j.configuration=file:/etc/kafka/connect-log4j.properties"
       KAFKA_LOG4J_LOGGERS: "org.apache.zookeeper=ERROR,org.I0Itec.zkclient=ERROR"
     entrypoint: /bin/bash
-    command: >
-      -lc "
-      trap 'exit 0' TERM INT
-      while true; do
-        if [ ! -s /app/data/mm2.properties ]; then
-          echo 'Warte auf MirrorMaker-Konfiguration...'
-          sleep 5
-          continue
-        fi
-        if ! grep -Eq '^remote\\.bootstrap\\.servers\\s*=\\s*\\S+' /app/data/mm2.properties; then
-          echo 'Ungültige MirrorMaker-Konfiguration (remote.bootstrap.servers fehlt) - Retry in 10s'
+    command:
+      - -lc
+      - |
+        trap 'exit 0' TERM INT
+        while true; do
+          if [ ! -s /app/data/mm2.properties ]; then
+            echo 'Warte auf MirrorMaker-Konfiguration...'
+            sleep 5
+            continue
+          fi
+          if ! grep -Eq '^remote\\.bootstrap\\.servers\\s*=\\s*\\S+' /app/data/mm2.properties; then
+            echo 'Ungültige MirrorMaker-Konfiguration (remote.bootstrap.servers fehlt) - Retry in 10s'
+            sleep 10
+            continue
+          fi
+          echo 'Starte MirrorMaker2...'
+          connect-mirror-maker /app/data/mm2.properties
+          rc=$?
+          echo "MirrorMaker2 beendet (exit $rc) - Retry in 10s"
           sleep 10
-          continue
-        fi
-        echo 'Starte MirrorMaker2...'
-        connect-mirror-maker /app/data/mm2.properties
-        rc=$?
-        echo \"MirrorMaker2 beendet (exit $rc) - Retry in 10s\"
-        sleep 10
-      done
-      "
+        done
     volumes:
       - ./ui/data:/app/data
     depends_on:
