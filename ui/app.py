@@ -284,6 +284,12 @@ DEFAULT_BACKUP_HOST = os.getenv("TS_CONNECT_BACKUP_HOST", "backup-db")
 DEFAULT_BACKUP_PORT = int(os.getenv("TS_CONNECT_BACKUP_PORT", "5432"))
 DEFAULT_BACKUP_DB = os.getenv("TS_CONNECT_BACKUP_DB", "targetshot_backup")
 DEFAULT_BACKUP_USER = os.getenv("TS_CONNECT_BACKUP_USER", "targetshot")
+DEFAULT_MIRROR_DB_HOST = (os.getenv("TS_CONNECT_DEFAULT_DB_HOST", "mariadb-mirror") or "mariadb-mirror").strip() or "mariadb-mirror"
+DEFAULT_MIRROR_DB_PORT = _env_int("TS_CONNECT_DEFAULT_DB_PORT", 3306) or 3306
+if DEFAULT_MIRROR_DB_PORT <= 0:
+    logger.warning("Ungültiger TS_CONNECT_DEFAULT_DB_PORT=%s, nutze 3306", DEFAULT_MIRROR_DB_PORT)
+    DEFAULT_MIRROR_DB_PORT = 3306
+DEFAULT_MIRROR_DB_USER = (os.getenv("TS_CONNECT_DEFAULT_DB_USER", "debezium_sync") or "debezium_sync").strip() or "debezium_sync"
 DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mariadb-mirror")
 DEFAULT_SOURCE_DB_HOST = os.getenv("TS_CONNECT_SOURCE_DB_HOST", "").strip()
 DEFAULT_SOURCE_DB_PORT = int(os.getenv("TS_CONNECT_SOURCE_DB_PORT", "3306"))
@@ -2074,9 +2080,9 @@ def get_db():
             """,
             (
                 1,
-                os.getenv("TS_CONNECT_DEFAULT_DB_HOST", "mariadb-mirror"),
-                3306,
-                os.getenv("TS_CONNECT_DEFAULT_DB_USER", "debezium_sync"),
+                DEFAULT_MIRROR_DB_HOST,
+                DEFAULT_MIRROR_DB_PORT,
+                DEFAULT_MIRROR_DB_USER,
                 DEFAULT_SOURCE_DB_HOST,
                 DEFAULT_SOURCE_DB_PORT,
                 DEFAULT_SOURCE_DB_REPL_USER,
@@ -2458,12 +2464,22 @@ def fetch_settings() -> dict:
     conn.close()
     if row is None:
         raise RuntimeError("settings row missing")
+    db_host = (os.getenv("TS_CONNECT_DEFAULT_DB_HOST") or "").strip() or (row["db_host"] or DEFAULT_MIRROR_DB_HOST)
+    env_db_port = _env_int("TS_CONNECT_DEFAULT_DB_PORT", None)
+    if env_db_port is not None and env_db_port > 0:
+        db_port = env_db_port
+    else:
+        try:
+            db_port = int(row["db_port"] or DEFAULT_MIRROR_DB_PORT)
+        except (TypeError, ValueError):
+            db_port = DEFAULT_MIRROR_DB_PORT
+    db_user = (os.getenv("TS_CONNECT_DEFAULT_DB_USER") or "").strip() or (row["db_user"] or DEFAULT_MIRROR_DB_USER)
     license_tier = normalize_license_tier(row["license_tier"])
     retention_days = LICENSE_RETENTION_DAYS.get(license_tier, LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER])
     return {
-        "db_host": row["db_host"],
-        "db_port": row["db_port"],
-        "db_user": row["db_user"],
+        "db_host": db_host,
+        "db_port": db_port,
+        "db_user": db_user,
         "source_db_host": row["source_db_host"] or "",
         "source_db_port": row["source_db_port"] or DEFAULT_SOURCE_DB_PORT,
         "source_db_repl_user": row["source_db_repl_user"] or "",
@@ -2613,6 +2629,27 @@ def read_secrets_file() -> dict:
         key, value = line.split("=", 1)
         data[key.strip()] = value.strip()
     return data
+
+
+def _resolve_mirror_db_password(secrets_data: dict[str, str] | None = None) -> str:
+    env_password = (os.getenv("TS_CONNECT_MIRROR_DB_PASSWORD") or os.getenv("MARIADB_PASSWORD") or "").strip()
+    if env_password:
+        return env_password
+    if not secrets_data:
+        return ""
+    return str(secrets_data.get("db_password") or "").strip()
+
+
+def _ensure_mirror_db_secret(secrets_data: dict[str, str]) -> tuple[str, dict[str, str]]:
+    resolved_password = _resolve_mirror_db_password(secrets_data)
+    if not resolved_password:
+        return "", secrets_data
+    if secrets_data.get("db_password") == resolved_password:
+        return resolved_password, secrets_data
+    updated = dict(secrets_data)
+    updated["db_password"] = resolved_password
+    write_secrets_file(updated)
+    return resolved_password, updated
 
 
 def store_license_key(value: str) -> None:
@@ -3008,10 +3045,12 @@ async def apply_connector_config(*, allow_defer: bool = True) -> None:
     await ensure_offline_buffer_ready()
     settings = fetch_settings()
     secrets = read_secrets_file()
+    db_password, secrets = _ensure_mirror_db_secret(secrets)
+    if not db_password:
+        raise ValueError("Mirror-MariaDB-Passwort fehlt. Bitte TS_CONNECT_MIRROR_DB_PASSWORD setzen.")
     offline_enabled = True
 
     required = {
-        "db_password": "DB-Passwort",
         "confluent_bootstrap": "Confluent Bootstrap",
         "confluent_sasl_username": "Confluent API Key",
         "confluent_sasl_password": "Confluent API Secret",
@@ -3098,7 +3137,6 @@ def build_index_context(request: Request) -> dict:
         data["confluent_bootstrap"] = CONFLUENT_BOOTSTRAP_DEFAULT
 
     has_secrets = SECRETS_PATH.exists()
-    db_password_saved = bool(secrets_data.get("db_password"))
     source_repl_password_saved = bool(secrets_data.get(SOURCE_DB_REPL_PASSWORD_KEY))
     flash_message = request.session.pop("flash_message", None)
     error_message = request.session.pop("error_message", None)
@@ -3191,8 +3229,6 @@ def build_index_context(request: Request) -> dict:
         "flash_message": flash_message,
         "error_message": error_message,
         "docs_url": DOCS_URL,
-        "db_password_placeholder": PASSWORD_PLACEHOLDER if db_password_saved else "",
-        "db_password_saved": db_password_saved,
         "source_repl_password_placeholder": PASSWORD_PLACEHOLDER if source_repl_password_saved else "",
         "source_repl_password_saved": source_repl_password_saved,
         "default_server_name": DEFAULT_SERVER_NAME,
@@ -3231,13 +3267,29 @@ async def logout(request: Request):
 
 # --------- Preflight Tests ----------
 @app.get("/api/test/db", dependencies=[Depends(require_session)])
-async def test_db(host: str, port: int, user: str, password: str):
+async def test_db(
+    host: str | None = None,
+    port: int | None = None,
+    user: str | None = None,
+    password: str | None = None,
+):
     import pymysql
+    settings = fetch_settings()
     secrets_data = read_secrets_file()
-    if password == PASSWORD_PLACEHOLDER and secrets_data.get("db_password"):
-        password = secrets_data["db_password"]
+    resolved_password, secrets_data = _ensure_mirror_db_secret(secrets_data)
+    host_value = (host or settings.get("db_host") or "").strip()
+    user_value = (user or settings.get("db_user") or "").strip()
+    port_value = int(port or settings.get("db_port") or DEFAULT_MIRROR_DB_PORT)
+    submitted_password = (password or "").strip()
+    if submitted_password == PASSWORD_PLACEHOLDER:
+        submitted_password = str(secrets_data.get("db_password") or "").strip()
+    password_value = submitted_password or resolved_password
+    if not host_value or not user_value or port_value <= 0:
+        return {"ok": False, "msg": "Mirror-MariaDB-Konfiguration unvollständig"}
+    if not password_value:
+        return {"ok": False, "msg": "Mirror-MariaDB-Passwort fehlt (TS_CONNECT_MIRROR_DB_PASSWORD)."}
     try:
-        conn = pymysql.connect(host=host, port=port, user=user, password=password,
+        conn = pymysql.connect(host=host_value, port=port_value, user=user_value, password=password_value,
                                connect_timeout=3, read_timeout=3, write_timeout=3)
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
@@ -3442,9 +3494,9 @@ async def _check_database_health() -> dict[str, str]:
     if not host or not user or not port:
         return {"status": "unknown", "message": "Nicht konfiguriert"}
     secrets = read_secrets_file()
-    password = secrets.get("db_password")
+    password, _ = _ensure_mirror_db_secret(secrets)
     if not password:
-        return {"status": "warn", "message": "Kein Passwort gespeichert"}
+        return {"status": "warn", "message": "Mirror-DB-Passwort fehlt (TS_CONNECT_MIRROR_DB_PASSWORD)"}
 
     def _connect() -> None:
         import pymysql  # local import to avoid global dependency at import time
@@ -3810,61 +3862,9 @@ async def save(
         return RedirectResponse("/", status_code=303)
 
     if section_key == "db":
-        if not all([db_host, db_port is not None, db_user]):
-            request.session["error_message"] = "Bitte alle Mirror-MariaDB-Felder ausfüllen."
-            return RedirectResponse("/", status_code=303)
-
-        db_host = db_host.strip()
-        db_user = db_user.strip()
-        submitted_password = (db_password or "").strip() if db_password is not None else ""
-        existing_password = secrets_data.get("db_password", "")
-        if submitted_password == PASSWORD_PLACEHOLDER and existing_password:
-            db_password_value = existing_password
-        else:
-            db_password_value = submitted_password
-        if not db_password_value:
-            request.session["error_message"] = "Bitte das Mirror-MariaDB-Passwort angeben."
-            return RedirectResponse("/", status_code=303)
-
-        conn = get_db()
-        conn.execute(
-            "UPDATE settings SET db_host=?, db_port=?, db_user=? WHERE id=1",
-            (db_host, db_port, db_user),
+        request.session["flash_message"] = (
+            "Mirror-MariaDB-Verbindung wird intern aus der .env gelesen und ist in der UI nicht editierbar."
         )
-        conn.commit()
-        conn.close()
-
-        settings = fetch_settings()
-        confluent_bootstrap_val = settings["confluent_bootstrap"] or CONFLUENT_BOOTSTRAP_DEFAULT
-        confluent_user_val = settings["confluent_sasl_username"] or secrets_data.get("confluent_sasl_username", "")
-        confluent_pass_val = secrets_data.get("confluent_sasl_password", "")
-
-        secrets_data.update(
-            {
-                "db_password": db_password_value,
-                "confluent_bootstrap": confluent_bootstrap_val,
-                "confluent_sasl_username": confluent_user_val,
-                "confluent_sasl_password": confluent_pass_val,
-            }
-        )
-        write_secrets_file(secrets_data)
-
-        try:
-            await apply_connector_config()
-            request.session["flash_message"] = "Mirror-MariaDB-Einstellungen gespeichert & Connector aktualisiert."
-        except DeferredApplyError as exc:
-            request.session["flash_message"] = (
-                "Mirror-MariaDB-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
-                "sobald die lokale Mirror-MariaDB erreichbar ist. "
-                f"Letzter Fehler: {exc}"
-            )
-        except ValueError as exc:
-            request.session["flash_message"] = (
-                "Mirror-MariaDB-Einstellungen gespeichert. Connector-Update übersprungen: "
-                f"{exc}"
-            )
-        except Exception as exc:
-            request.session["error_message"] = f"Connector-Update fehlgeschlagen: {exc}"
         return RedirectResponse("/", status_code=303)
 
     if section_key == "source":
@@ -3878,30 +3878,13 @@ async def save(
                 request.session["error_message"] = "Source-Port muss eine Zahl sein."
                 return RedirectResponse("/", status_code=303)
         source_user_value = (source_db_repl_user or "").strip()
-        source_gtid_mode_value = _parse_bool(source_db_gtid_mode, default=True)
-        source_log_file_value = (source_db_log_file or "").strip()
-        source_log_pos_raw = (source_db_log_pos or "").strip()
+        source_gtid_mode_value = True
+        source_log_file_value = ""
         source_log_pos_value = None
-        if source_log_pos_raw:
-            try:
-                source_log_pos_value = int(source_log_pos_raw)
-            except ValueError:
-                request.session["error_message"] = "Binlog-Position muss eine Zahl sein."
-                return RedirectResponse("/", status_code=303)
-        source_connect_retry_raw = (source_db_connect_retry or "").strip()
         source_connect_retry_value = DEFAULT_SOURCE_DB_CONNECT_RETRY
-        if source_connect_retry_raw:
-            try:
-                source_connect_retry_value = int(source_connect_retry_raw)
-            except ValueError:
-                request.session["error_message"] = "Connect-Retry muss eine Zahl sein."
-                return RedirectResponse("/", status_code=303)
 
         if source_port_value <= 0 or source_port_value > 65535:
             request.session["error_message"] = "Source-Port muss zwischen 1 und 65535 liegen."
-            return RedirectResponse("/", status_code=303)
-        if source_connect_retry_value <= 0:
-            request.session["error_message"] = "Connect-Retry muss größer als 0 sein."
             return RedirectResponse("/", status_code=303)
 
         submitted_password = (source_db_repl_password or "").strip() if source_db_repl_password is not None else ""
@@ -3918,19 +3901,9 @@ async def save(
             if not source_password_value:
                 request.session["error_message"] = "Bitte das Replikations-Passwort der Vereins-MainDB angeben."
                 return RedirectResponse("/", status_code=303)
-            if not source_gtid_mode_value:
-                if not source_log_file_value:
-                    request.session["error_message"] = "Für non-GTID muss eine Binlog-Datei gesetzt sein."
-                    return RedirectResponse("/", status_code=303)
-                if source_log_pos_value is None or source_log_pos_value <= 0:
-                    request.session["error_message"] = "Für non-GTID muss eine gültige Binlog-Position gesetzt sein."
-                    return RedirectResponse("/", status_code=303)
         else:
             source_user_value = ""
             source_password_value = ""
-            source_gtid_mode_value = True
-            source_log_file_value = ""
-            source_log_pos_value = None
 
         conn = get_db()
         conn.execute(
@@ -4036,15 +4009,11 @@ async def save(
         conn.close()
 
         settings = fetch_settings()
-        submitted_password = (db_password or "").strip()
-        if submitted_password == PASSWORD_PLACEHOLDER and secrets_data.get("db_password"):
-            db_password_val = secrets_data.get("db_password")
-        elif submitted_password:
-            db_password_val = submitted_password
-        else:
-            db_password_val = secrets_data.get("db_password")
+        db_password_val, secrets_data = _ensure_mirror_db_secret(secrets_data)
         if not db_password_val:
-            request.session["error_message"] = "Bitte zuerst die Mirror-MariaDB-Zugangsdaten speichern (DB-Passwort fehlt)."
+            request.session["error_message"] = (
+                "Mirror-MariaDB-Passwort fehlt. Bitte TS_CONNECT_MIRROR_DB_PASSWORD in der .env setzen."
+            )
             return RedirectResponse("/", status_code=303)
 
         secrets_data.update(

@@ -116,7 +116,8 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 
 ### Notes
 - UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `.env` for localhost-only access.
-- Debezium sollte auf die lokale Mirror-DB zeigen (`TS_CONNECT_DEFAULT_DB_HOST=mariadb-mirror`, Port intern `3306`, extern standardmäßig `${TS_CONNECT_MIRROR_PORT:-3307}`).
+- Debezium nutzt die lokale Mirror-DB ausschließlich über `.env` (`TS_CONNECT_DEFAULT_DB_HOST`, `TS_CONNECT_DEFAULT_DB_PORT`, `TS_CONNECT_DEFAULT_DB_USER`, `TS_CONNECT_MIRROR_DB_PASSWORD`).
+- Port intern bleibt standardmäßig `3306`, extern `${TS_CONNECT_MIRROR_PORT:-3307}`.
 - On first start the UI now generates a random admin password and stores it inside `ui/data/admin_password.generated` (container path `/app/data/admin_password.generated`). Read the file once, log in, and immediately rotate the password via the Admin section or by setting `UI_ADMIN_PASSWORD` in `.env`.
 - Sessions are signed with `UI_SESSION_SECRET`. If the variable is absent, a random value is written to `/app/data/session_secret`. Supplying your own secret in `.env` keeps logins valid across re-installs.
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
@@ -130,7 +131,9 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Feintuning (Application ID, Pattern, Threads, Commit-Intervalle) erfolgt über die optionalen `TS_STREAMS_*` Variablen in `.env`.
 
 ### Mirror-MariaDB Replikation
+- Die Debezium-Connector-Zugangsdaten für die lokale Mirror-DB werden nicht über die UI geändert, sondern über `.env` gesetzt.
 - Die Replikationsquelle kann direkt in der UI unter **Vereins-MainDB-Replikation** gepflegt und live angewendet werden.
+- GTID/Binlog/Connect-Retry werden in der UI nicht mehr abgefragt und intern mit stabilen Defaults betrieben.
 - Der Container `mariadb-mirror` kann beim ersten Start automatisch als Replikat der Vereins-Meyton-DB konfiguriert werden.
 - Dafür in `.env` setzen:
   - `TS_CONNECT_SOURCE_DB_HOST`, `TS_CONNECT_SOURCE_DB_PORT`
