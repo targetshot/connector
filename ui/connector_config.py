@@ -9,28 +9,11 @@ CONNECT_SECRETS_PATH = "/app/data/secrets.properties"
 DB_INCLUDE_LIST = os.getenv("TS_CONNECT_DB_INCLUDE_LIST", "SMDB,SSMDB2")
 TABLE_INCLUDE_LIST = os.getenv(
     "TS_CONNECT_TABLE_INCLUDE_LIST",
-    "SMDB.Schuetze,SSMDB2.Scheiben,SSMDB2.Serien,SSMDB2.Treffer",
+    "",
 )
 COLUMN_INCLUDE_LIST = os.getenv(
     "TS_CONNECT_COLUMN_INCLUDE_LIST",
-    (
-        "SMDB.Schuetze.SportpassID,SMDB.Schuetze.VereinsID,SMDB.Schuetze.Nachname,"
-        "SMDB.Schuetze.Vorname,SMDB.Schuetze.EMail,SSMDB2.Scheiben.ScheibenID,"
-        "SSMDB2.Scheiben.Starterliste,SSMDB2.Scheiben.StarterlistenID,"
-        "SSMDB2.Scheiben.Nachname,SSMDB2.Scheiben.Vorname,"
-        "SSMDB2.Scheiben.SportpassID,SSMDB2.Scheiben.Disziplin,"
-        "SSMDB2.Scheiben.DisziplinID,SSMDB2.Scheiben.KlassenID,"
-        "SSMDB2.Scheiben.Klasse,SSMDB2.Scheiben.Verein,SSMDB2.Scheiben.VereinsID,"
-        "SSMDB2.Scheiben.Trefferzahl,SSMDB2.Scheiben.TotalRing,"
-        "SSMDB2.Scheiben.TotalRing01,SSMDB2.Scheiben.BesterTeiler01,"
-        "SSMDB2.Scheiben.Zeitstempel,SSMDB2.Serien.ScheibenID,"
-        "SSMDB2.Serien.Stellung,SSMDB2.Serien.Serie,SSMDB2.Serien.Ring,"
-        "SSMDB2.Serien.Ring01,SSMDB2.Treffer.ScheibenID,SSMDB2.Treffer.Stellung,"
-        "SSMDB2.Treffer.Treffer,SSMDB2.Treffer.x,SSMDB2.Treffer.y,"
-        "SSMDB2.Treffer.Innenzehner,SSMDB2.Treffer.Ring,SSMDB2.Treffer.Ring01,"
-        "SSMDB2.Treffer.Teiler01,SSMDB2.Treffer.Zeitstempel,"
-        "SSMDB2.Treffer.Millisekunden"
-    ),
+    "",
 )
 DB_CONNECTION_TZ = os.getenv("TS_CONNECT_DB_CONNECTION_TZ", "Europe/Berlin")
 SNAPSHOT_MODE = os.getenv("TS_CONNECT_SNAPSHOT_MODE", "initial")
@@ -54,11 +37,12 @@ def build_connector_config(settings: dict, *, offline_mode: bool = False) -> dic
     """
     transforms = ["unwrap", "addsrc"]
 
+    schema_group = "(?:SMDB|SSMDB2)"
     router_configs = [
-        ("route_schuetze", r"^.+\.SMDB\.Schuetze$", "ts.raw.schuetze"),
-        ("route_scheiben", r"^.+\.SSMDB2\.Scheiben$", "ts.raw.scheiben"),
-        ("route_serien", r"^.+\.SSMDB2\.Serien$", "ts.raw.serien"),
-        ("route_treffer", r"^.+\.SSMDB2\.Treffer$", "ts.raw.treffer"),
+        ("route_schuetze", rf"(?i)^.+\.{schema_group}\.Schuetze$", "ts.raw.schuetze"),
+        ("route_scheiben", rf"(?i)^.+\.{schema_group}\.Scheiben$", "ts.raw.scheiben"),
+        ("route_serien", rf"(?i)^.+\.{schema_group}\.Serien$", "ts.raw.serien"),
+        ("route_treffer", rf"(?i)^.+\.{schema_group}\.Treffer$", "ts.raw.treffer"),
     ]
 
     if not SINGLE_TOPIC_MODE:
@@ -105,9 +89,6 @@ def build_connector_config(settings: dict, *, offline_mode: bool = False) -> dic
             f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_key}}:"
             f"${{file:{CONNECT_SECRETS_PATH}:schema_registry_secret}}"
         ),
-        "database.include.list": DB_INCLUDE_LIST,
-        "table.include.list": TABLE_INCLUDE_LIST,
-        "column.include.list": COLUMN_INCLUDE_LIST,
         "database.connectionTimeZone": DB_CONNECTION_TZ,
         "snapshot.mode": SNAPSHOT_MODE,
         "topic.creation.default.replication.factor": TOPIC_REPLICATION_FACTOR,
@@ -121,6 +102,12 @@ def build_connector_config(settings: dict, *, offline_mode: bool = False) -> dic
         "transforms.addsrc.type": "org.apache.kafka.connect.transforms.InsertField$Value",
         "transforms.addsrc.topic.field": "source_topic",
     }
+    if DB_INCLUDE_LIST.strip():
+        cfg["database.include.list"] = DB_INCLUDE_LIST
+    if TABLE_INCLUDE_LIST.strip():
+        cfg["table.include.list"] = TABLE_INCLUDE_LIST
+    if COLUMN_INCLUDE_LIST.strip():
+        cfg["column.include.list"] = COLUMN_INCLUDE_LIST
 
     if offline_mode:
         cfg.update(

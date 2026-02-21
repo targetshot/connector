@@ -265,8 +265,8 @@
               <div class="flex items-start gap-3">
                 <span class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/15 font-semibold text-accent-dark dark:bg-accent/25 dark:text-white">1</span>
                 <div>
-                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">Mirror-MariaDB verbinden</h2>
-                  <p>Debezium liest aus der lokalen Mirror-MariaDB auf dem Server. Trage dafür Host, Port und Zugangsdaten ein.</p>
+                  <h2 class="brand-sub text-base font-semibold text-zinc-800 dark:text-zinc-100">Mirror-MariaDB Status prüfen</h2>
+                  <p>Debezium nutzt intern die lokale Mirror-MariaDB. Prüfe oben nur den Status auf "OK".</p>
                 </div>
               </div>
               <div class="flex items-start gap-3">
@@ -345,32 +345,6 @@
           {% endif %}
 
           <div class="grid grid-cols-1 gap-7 lg:grid-cols-2">
-            <section class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
-              <div>
-                <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Mirror-MariaDB-Verbindung (intern)</h2>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Wird aus der `.env` geladen und intern für Debezium genutzt.</p>
-              </div>
-              <div class="grid gap-6 md:grid-cols-2">
-                <div>
-                  <label class="input-label" for="mirror_db_host">DB Host</label>
-                  <input id="mirror_db_host" class="ts-input" value="{{ data.db_host }}" readonly />
-                </div>
-                <div>
-                  <label class="input-label" for="mirror_db_port">DB Port</label>
-                  <input id="mirror_db_port" type="number" class="ts-input" value="{{ data.db_port }}" readonly />
-                </div>
-              </div>
-              <div>
-                <label class="input-label" for="mirror_db_user">DB User</label>
-                <input id="mirror_db_user" class="ts-input" value="{{ data.db_user }}" readonly />
-                <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Passwort kommt aus `TS_CONNECT_MIRROR_DB_PASSWORD`.</p>
-              </div>
-              <div class="flex flex-wrap items-center gap-3 pt-1">
-                <button type="button" id="btnTestDb" class="btn-secondary">Test interne DB</button>
-                <span id="dbBadge" class="badge">…</span>
-              </div>
-            </section>
-
           <form method="post" action="/save" class="rounded-[28px] border border-zinc-200/70 bg-white/80 p-7 shadow-2xl shadow-zinc-900/10 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-white/10 dark:bg-ink-800/70 dark:shadow-black/30 space-y-6">
             <input type="hidden" name="section" value="source" />
             <div>
@@ -1071,15 +1045,6 @@
         setBadge(badge, ok, ok ? '' : (j.error || 'Worker down'));
       }
     };
-    const btnTestDb = document.getElementById('btnTestDb');
-    const dbBadge = document.getElementById('dbBadge');
-    if (btnTestDb && dbBadge) {
-      btnTestDb.onclick = async () => {
-        const r = await fetch('/api/test/db');
-        const j = await r.json();
-        setBadge(dbBadge, j.ok, j.msg);
-      };
-    }
     const btnTestSourceDb = document.getElementById('btnTestSourceDb');
     const sourceDbBadge = document.getElementById('sourceDbBadge');
     if (btnTestSourceDb && sourceDbBadge) {
