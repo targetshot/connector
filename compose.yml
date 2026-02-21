@@ -14,6 +14,8 @@ services:
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
     restart: unless-stopped
+    volumes:
+      - ./ui/data/redpanda:/var/lib/redpanda/data
     ports:
       - "9092:9092"  # optional für Debug von außen
 
@@ -137,11 +139,24 @@ services:
     entrypoint: /bin/bash
     command: >
       -lc "
-      while [ ! -f /app/data/mm2.properties ]; do
-        echo 'Warte auf MirrorMaker-Konfiguration...';
-        sleep 5;
-      done;
-      exec connect-mirror-maker /app/data/mm2.properties
+      trap 'exit 0' TERM INT
+      while true; do
+        if [ ! -s /app/data/mm2.properties ]; then
+          echo 'Warte auf MirrorMaker-Konfiguration...'
+          sleep 5
+          continue
+        fi
+        if ! grep -Eq '^remote\\.bootstrap\\.servers\\s*=\\s*\\S+' /app/data/mm2.properties; then
+          echo 'Ungültige MirrorMaker-Konfiguration (remote.bootstrap.servers fehlt) - Retry in 10s'
+          sleep 10
+          continue
+        fi
+        echo 'Starte MirrorMaker2...'
+        connect-mirror-maker /app/data/mm2.properties
+        rc=$?
+        echo \"MirrorMaker2 beendet (exit $rc) - Retry in 10s\"
+        sleep 10
+      done
       "
     volumes:
       - ./ui/data:/app/data

@@ -293,6 +293,7 @@ def _build_change_master_sql(request: MirrorReplicationApplyRequest) -> str:
             f"MASTER_USER='{user}', "
             f"MASTER_PASSWORD='{password}', "
             f"MASTER_CONNECT_RETRY={connect_retry}, "
+            "MASTER_SSL=0, "
             "MASTER_USE_GTID=slave_pos;"
         )
     if not request.log_file or request.log_pos is None:
@@ -308,6 +309,7 @@ def _build_change_master_sql(request: MirrorReplicationApplyRequest) -> str:
         f"MASTER_USER='{user}', "
         f"MASTER_PASSWORD='{password}', "
         f"MASTER_CONNECT_RETRY={connect_retry}, "
+        "MASTER_SSL=0, "
         f"MASTER_LOG_FILE='{log_file}', "
         f"MASTER_LOG_POS={log_pos};"
     )

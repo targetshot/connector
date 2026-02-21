@@ -61,7 +61,7 @@ source_pass_esc="$(sql_escape "$SOURCE_PASSWORD")"
 
 change_stmt=""
 if is_true "${TS_CONNECT_SOURCE_DB_GTID_MODE:-true}"; then
-  change_stmt="CHANGE MASTER TO MASTER_HOST='${source_host_esc}', MASTER_PORT=${SOURCE_PORT}, MASTER_USER='${source_user_esc}', MASTER_PASSWORD='${source_pass_esc}', MASTER_CONNECT_RETRY=${CONNECT_RETRY}, MASTER_USE_GTID=slave_pos;"
+  change_stmt="CHANGE MASTER TO MASTER_HOST='${source_host_esc}', MASTER_PORT=${SOURCE_PORT}, MASTER_USER='${source_user_esc}', MASTER_PASSWORD='${source_pass_esc}', MASTER_CONNECT_RETRY=${CONNECT_RETRY}, MASTER_SSL=0, MASTER_USE_GTID=slave_pos;"
 else
   SOURCE_LOG_FILE="${TS_CONNECT_SOURCE_DB_LOG_FILE:-}"
   SOURCE_LOG_POS="${TS_CONNECT_SOURCE_DB_LOG_POS:-}"
@@ -70,7 +70,7 @@ else
     exit 0
   fi
   source_log_file_esc="$(sql_escape "$SOURCE_LOG_FILE")"
-  change_stmt="CHANGE MASTER TO MASTER_HOST='${source_host_esc}', MASTER_PORT=${SOURCE_PORT}, MASTER_USER='${source_user_esc}', MASTER_PASSWORD='${source_pass_esc}', MASTER_CONNECT_RETRY=${CONNECT_RETRY}, MASTER_LOG_FILE='${source_log_file_esc}', MASTER_LOG_POS=${SOURCE_LOG_POS};"
+  change_stmt="CHANGE MASTER TO MASTER_HOST='${source_host_esc}', MASTER_PORT=${SOURCE_PORT}, MASTER_USER='${source_user_esc}', MASTER_PASSWORD='${source_pass_esc}', MASTER_CONNECT_RETRY=${CONNECT_RETRY}, MASTER_SSL=0, MASTER_LOG_FILE='${source_log_file_esc}', MASTER_LOG_POS=${SOURCE_LOG_POS};"
 fi
 
 set +e

@@ -2348,7 +2348,6 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         "remote.ssl.endpoint.identification.algorithm = https",
         "local->remote.enabled = true",
         "remote->local.enabled = false",
-        f"local->remote.enabled = true",
         f"local->remote.topics = {STREAMS_TARGET_PREFIX}.*",
         "local->remote.groups = _ts.*",
         "local->remote.emit.heartbeats.interval.seconds = 15",
@@ -2373,6 +2372,8 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         MM2_CONFIG_PATH,
         "\n".join(config_lines) + "\n",
         mode=stat.S_IRUSR | stat.S_IWUSR,
+        uid=SECRETS_FILE_UID,
+        gid=SECRETS_FILE_GID,
     )
 
 
