@@ -110,7 +110,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - `ui`: FastAPI web UI to manage connector, tests, secrets
 - `update-agent`: Sidecar API (jetzt als eigenes Compose-Projekt unter `update-agent/compose.yml`) – kümmert sich um Pull/Restart, ohne sich selbst zu stoppen
 - `schema-registry`: lokaler Schema Registry Dienst für Avro/JSON Converter
-- `mirror-maker`: Kafka MirrorMaker 2, spiegelt `ts.raw.*`-Topics in die Confluent Cloud sobald erreichbar
+- `mirror-maker`: Kafka MirrorMaker 2, spiegelt die normalisierten Topics (`ts.sds-test.*`) in die Confluent Cloud sobald erreichbar
 - `streams-transform`: Kafka Streams Anwendung, die Vereins-Topics auf einheitliche Confluent-Topics mapped
 - `backup-db`: lokaler PostgreSQL-Puffer für Offline-Backups
 
@@ -125,7 +125,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - UI und Health schreiben Logs nach `/app/data/logs/` (u. a. `ui.log`, `health.log`); `ui.log` lässt sich direkt im UI-Bereich "System-Logs" anzeigen.
 
 ### Kafka Streams Transformation
-- Der Dienst `streams-transform` abonniert alle Topics nach dem Muster `<Vereinsnummer>.SMDB.(Schuetze|Treffer|Scheiben|Serien)` und leitet sie in die Standard-Topics `ts.sds-test.{schuetze,treffer,scheiben,serien}` weiter.
+- Der Dienst `streams-transform` abonniert sowohl Legacy-Debezium-Topics (`<Vereinsnummer>.(SMDB|SSMDB2).(Schuetze|Treffer|Scheiben|Serien)`) als auch geroutete `ts.raw.*`-Topics und leitet sie in die Standard-Topics `ts.sds-test.{schuetze,treffer,scheiben,serien}` weiter.
 - Standardmäßig verbindet sich die Anwendung mit `redpanda:9092`; per `TS_STREAMS_TARGET_PREFIX` lässt sich das Zielpräfix anpassen.
 - Die erzeugten Ziele werden zusätzlich über MirrorMaker 2 in die Confluent Cloud repliziert (`ts.sds-test.*`).
 - Feintuning (Application ID, Pattern, Threads, Commit-Intervalle) erfolgt über die optionalen `TS_STREAMS_*` Variablen in `.env`.

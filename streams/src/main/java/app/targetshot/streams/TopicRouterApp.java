@@ -22,19 +22,28 @@ import java.util.concurrent.CountDownLatch;
 import java.util.regex.Pattern;
 
 /**
- * Kafka Streams application that consumes all Vereins-Topics matching
- * &lt;Vereinsnummer&gt;.SMDB.(Schuetze|Treffer|Scheiben|Serien) and forwards
- * them to unified Confluent Cloud topics (e.g. ts.sds-test.schuetze).
+ * Kafka Streams application that consumes all Verein topics matching
+ * either legacy Debezium topics (&lt;Vereinsnummer&gt;.(SMDB|SSMDB2).*) or
+ * routed raw topics (ts.raw.*), then forwards them to unified Confluent
+ * Cloud topics (e.g. ts.sds-test.schuetze).
  */
 public final class TopicRouterApp {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TopicRouterApp.class);
 
-    private static final Map<String, String> TARGET_SUFFIX = Map.of(
-        ".SMDB.Schuetze", ".schuetze",
-        ".SMDB.Treffer", ".treffer",
-        ".SMDB.Scheiben", ".scheiben",
-        ".SMDB.Serien", ".serien"
+    private static final Map<String, String> TARGET_SUFFIX = Map.ofEntries(
+        Map.entry(".smdb.schuetze", ".schuetze"),
+        Map.entry(".smdb.treffer", ".treffer"),
+        Map.entry(".smdb.scheiben", ".scheiben"),
+        Map.entry(".smdb.serien", ".serien"),
+        Map.entry(".ssmdb2.schuetze", ".schuetze"),
+        Map.entry(".ssmdb2.treffer", ".treffer"),
+        Map.entry(".ssmdb2.scheiben", ".scheiben"),
+        Map.entry(".ssmdb2.serien", ".serien"),
+        Map.entry("ts.raw.schuetze", ".schuetze"),
+        Map.entry("ts.raw.treffer", ".treffer"),
+        Map.entry("ts.raw.scheiben", ".scheiben"),
+        Map.entry("ts.raw.serien", ".serien")
     );
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -130,8 +139,9 @@ public final class TopicRouterApp {
     }
 
     private static String normalizeTopic(String sourceTopic, String targetPrefix) {
+        String lowerTopic = sourceTopic.toLowerCase(Locale.ROOT);
         for (Map.Entry<String, String> entry : TARGET_SUFFIX.entrySet()) {
-            if (sourceTopic.endsWith(entry.getKey())) {
+            if (lowerTopic.endsWith(entry.getKey())) {
                 return targetPrefix + entry.getValue();
             }
         }
@@ -139,7 +149,9 @@ public final class TopicRouterApp {
     }
 
     private static final class Config {
-        private static final String DEFAULT_PATTERN = "^[0-9]+\\.SMDB\\.(Schuetze|Treffer|Scheiben|Serien)$";
+        private static final String DEFAULT_PATTERN =
+            "(?i)^(?:[0-9]+\\.(?:SMDB|SSMDB2)\\.(?:Schuetze|Treffer|Scheiben|Serien)|"
+                + "ts\\.raw\\.(?:schuetze|treffer|scheiben|serien))$";
 
         private final String bootstrapServers;
         private final String applicationId;
