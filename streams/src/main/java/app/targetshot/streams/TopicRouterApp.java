@@ -91,7 +91,7 @@ public final class TopicRouterApp {
         props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
             org.apache.kafka.streams.errors.LogAndContinueExceptionHandler.class);
         props.put(StreamsConfig.DEFAULT_PRODUCTION_EXCEPTION_HANDLER_CLASS_CONFIG,
-            org.apache.kafka.streams.errors.LogAndContinueExceptionHandler.class);
+            org.apache.kafka.streams.errors.DefaultProductionExceptionHandler.class);
         props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, config.retryBackoffMs());
         props.put(StreamsConfig.RETRIES_CONFIG, config.producerRetries());
         props.put("auto.offset.reset", config.autoOffsetReset());

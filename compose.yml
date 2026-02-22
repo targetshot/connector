@@ -147,7 +147,7 @@ services:
             sleep 5
             continue
           fi
-          if ! grep -Eq '^remote\\.bootstrap\\.servers\\s*=\\s*\\S+' /app/data/mm2.properties; then
+          if ! grep -q "remote.bootstrap.servers" /app/data/mm2.properties; then
             echo 'Ungültige MirrorMaker-Konfiguration (remote.bootstrap.servers fehlt) - Retry in 10s'
             sleep 10
             continue
@@ -155,7 +155,7 @@ services:
           echo 'Starte MirrorMaker2...'
           connect-mirror-maker /app/data/mm2.properties
           rc=$?
-          echo "MirrorMaker2 beendet (exit $rc) - Retry in 10s"
+          echo "MirrorMaker2 beendet (exit $$rc) - Retry in 10s"
           sleep 10
         done
     volumes:
