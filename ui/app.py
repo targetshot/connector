@@ -304,6 +304,7 @@ STREAMS_TARGET_PREFIX = (os.getenv("TS_STREAMS_TARGET_PREFIX", "ts.sds-test") or
 MM2_INTERNAL_REPLICATION_FACTOR = max(_env_int("TS_CONNECT_MM2_INTERNAL_REPLICATION_FACTOR", 1) or 1, 1)
 MM2_OFFSET_STORAGE_PARTITIONS = max(_env_int("TS_CONNECT_MM2_OFFSET_STORAGE_PARTITIONS", 5) or 5, 1)
 MM2_STATUS_STORAGE_PARTITIONS = max(_env_int("TS_CONNECT_MM2_STATUS_STORAGE_PARTITIONS", 3) or 3, 1)
+MM2_STATE_TOPIC_PREFIX = (os.getenv("TS_CONNECT_MM2_STATE_TOPIC_PREFIX", "_ts_mm2_v3") or "_ts_mm2_v3").strip() or "_ts_mm2_v3"
 LEMON_LICENSE_API_URL = os.getenv(
     "TS_LICENSE_API_URL",
     "https://api.lemonsqueezy.com/v1/licenses/validate",
@@ -2353,19 +2354,23 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         "local->remote.enabled = true",
         "remote->local.enabled = false",
         f"local->remote.topics = {STREAMS_TARGET_PREFIX}.*",
-        "local->remote.groups = _ts.*",
+        "emit.heartbeats.enabled = false",
+        "emit.checkpoints.enabled = false",
+        "sync.group.offsets.enabled = false",
+        "refresh.groups.enabled = false",
         "local->remote.emit.heartbeats.enabled = false",
         "local->remote.emit.checkpoints.enabled = false",
         "local->remote.sync.group.offsets.enabled = false",
+        "local->remote.refresh.groups.enabled = false",
         "local->remote.emit.heartbeats.interval.seconds = 0",
-        "offset.storage.topic = _ts_mm2_offsets",
+        f"offset.storage.topic = {MM2_STATE_TOPIC_PREFIX}_offsets",
         f"offset.storage.partitions = {MM2_OFFSET_STORAGE_PARTITIONS}",
         f"offset.storage.replication.factor = {mm2_rf}",
         "offset.storage.cluster.alias = local",
-        "config.storage.topic = _ts_mm2_configs",
+        f"config.storage.topic = {MM2_STATE_TOPIC_PREFIX}_configs",
         f"config.storage.replication.factor = {mm2_rf}",
         "config.storage.cluster.alias = local",
-        "status.storage.topic = _ts_mm2_status",
+        f"status.storage.topic = {MM2_STATE_TOPIC_PREFIX}_status",
         f"status.storage.partitions = {MM2_STATUS_STORAGE_PARTITIONS}",
         f"status.storage.replication.factor = {mm2_rf}",
         "status.storage.cluster.alias = local",
@@ -2376,7 +2381,6 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         "replication.policy.class = org.apache.kafka.connect.mirror.IdentityReplicationPolicy",
         "tasks.max = 1",
         "sync.topic.acls.enabled = false",
-        "emit.checkpoints.enabled = false",
         "refresh.topics.interval.seconds = 30",
     ]
     _atomic_write_text(
