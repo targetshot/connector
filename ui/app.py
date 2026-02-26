@@ -301,6 +301,9 @@ DEFAULT_SOURCE_DB_LOG_POS = _env_int("TS_CONNECT_SOURCE_DB_LOG_POS", None)
 DEFAULT_SOURCE_DB_CONNECT_RETRY = int(os.getenv("TS_CONNECT_SOURCE_DB_CONNECT_RETRY", "10"))
 SOURCE_DB_REPL_PASSWORD_KEY = "source_db_repl_password"
 STREAMS_TARGET_PREFIX = (os.getenv("TS_STREAMS_TARGET_PREFIX", "ts.sds-test") or "ts.sds-test").strip() or "ts.sds-test"
+MM2_INTERNAL_REPLICATION_FACTOR = max(_env_int("TS_CONNECT_MM2_INTERNAL_REPLICATION_FACTOR", 1) or 1, 1)
+MM2_OFFSET_STORAGE_PARTITIONS = max(_env_int("TS_CONNECT_MM2_OFFSET_STORAGE_PARTITIONS", 5) or 5, 1)
+MM2_STATUS_STORAGE_PARTITIONS = max(_env_int("TS_CONNECT_MM2_STATUS_STORAGE_PARTITIONS", 3) or 3, 1)
 LEMON_LICENSE_API_URL = os.getenv(
     "TS_LICENSE_API_URL",
     "https://api.lemonsqueezy.com/v1/licenses/validate",
@@ -2334,6 +2337,7 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
     sasl_password = secrets.get("confluent_sasl_password")
     if not (confluent_bootstrap and sasl_user and sasl_password):
         raise RuntimeError("MirrorMaker benötigt gültige Confluent Zugangsdaten (Bootstrap, API Key & Secret).")
+    mm2_rf = str(MM2_INTERNAL_REPLICATION_FACTOR)
     config_lines = [
         "clusters = local,remote",
         "local.bootstrap.servers = redpanda:9092",
@@ -2350,23 +2354,29 @@ def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
         "remote->local.enabled = false",
         f"local->remote.topics = {STREAMS_TARGET_PREFIX}.*",
         "local->remote.groups = _ts.*",
-        "local->remote.emit.heartbeats.interval.seconds = 15",
+        "local->remote.emit.heartbeats.enabled = false",
+        "local->remote.emit.checkpoints.enabled = false",
+        "local->remote.sync.group.offsets.enabled = false",
+        "local->remote.emit.heartbeats.interval.seconds = 0",
         "offset.storage.topic = _ts_mm2_offsets",
-        "offset.storage.partitions = 5",
+        f"offset.storage.partitions = {MM2_OFFSET_STORAGE_PARTITIONS}",
+        f"offset.storage.replication.factor = {mm2_rf}",
         "offset.storage.cluster.alias = local",
         "config.storage.topic = _ts_mm2_configs",
+        f"config.storage.replication.factor = {mm2_rf}",
         "config.storage.cluster.alias = local",
         "status.storage.topic = _ts_mm2_status",
-        "status.storage.partitions = 3",
+        f"status.storage.partitions = {MM2_STATUS_STORAGE_PARTITIONS}",
+        f"status.storage.replication.factor = {mm2_rf}",
         "status.storage.cluster.alias = local",
-        "checkpoint.topic.replication.factor = 3",
-        "heartbeats.topic.replication.factor = 3",
-        "offset.syncs.topic.replication.factor = 3",
-        "replication.factor = 3",
+        f"checkpoint.topic.replication.factor = {mm2_rf}",
+        f"heartbeats.topic.replication.factor = {mm2_rf}",
+        f"offset.syncs.topic.replication.factor = {mm2_rf}",
+        f"replication.factor = {mm2_rf}",
         "replication.policy.class = org.apache.kafka.connect.mirror.IdentityReplicationPolicy",
         "tasks.max = 1",
         "sync.topic.acls.enabled = false",
-        "emit.checkpoints.enabled = true",
+        "emit.checkpoints.enabled = false",
         "refresh.topics.interval.seconds = 30",
     ]
     _atomic_write_text(

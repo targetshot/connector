@@ -55,6 +55,7 @@ services:
     command:
       - --server-id=${TS_CONNECT_MIRROR_SERVER_ID:-5401}
       - --log-bin=mysql-bin
+      - --log-slave-updates=1
       - --binlog-format=ROW
       - --binlog-row-image=FULL
       - --sync-binlog=1
