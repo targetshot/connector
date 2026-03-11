@@ -107,9 +107,15 @@ def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> s
     return "\n".join(output_lines)
 
 
-def _inspect_container_state(name: str, *, cwd: Path) -> str | None:
+def _inspect_container_details(name: str, *, cwd: Path) -> tuple[str | None, str | None]:
     result = subprocess.run(
-        ["docker", "inspect", name, "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}"],
+        [
+            "docker",
+            "inspect",
+            name,
+            "--format",
+            "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}{{end}}",
+        ],
         cwd=str(cwd),
         text=True,
         capture_output=True,
@@ -117,8 +123,17 @@ def _inspect_container_state(name: str, *, cwd: Path) -> str | None:
         check=False,
     )
     if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
+        return (None, None)
+    raw = result.stdout.strip()
+    if not raw:
+        return (None, None)
+    status, _, health = raw.partition("|")
+    return (status or None, health or None)
+
+
+def _inspect_container_state(name: str, *, cwd: Path) -> str | None:
+    status, health = _inspect_container_details(name, cwd=cwd)
+    return health or status
 
 
 def _wait_for_container_state(
@@ -141,6 +156,41 @@ def _wait_for_container_state(
         f"Container {name} wurde nach {timeout_seconds}s nicht bereit "
         f"(letzter Status: {last_state or 'nicht gefunden'})"
     )
+
+
+def _wait_for_container_running_stable(
+    name: str,
+    *,
+    timeout_seconds: int,
+    stable_seconds: int,
+    cwd: Path,
+    manager: UpdateStateManager,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    stable_since: float | None = None
+    last_status: str | None = None
+    last_health: str | None = None
+    while time.monotonic() < deadline:
+        status, health = _inspect_container_details(name, cwd=cwd)
+        last_status = status
+        last_health = health
+        if status == "running" and health != "unhealthy":
+            if stable_since is None:
+                stable_since = time.monotonic()
+            elif time.monotonic() - stable_since >= stable_seconds:
+                health_suffix = f", health={health}" if health else ""
+                manager.merge(log_append=[f"Container {name} läuft stabil (status=running{health_suffix})."])
+                return
+        else:
+            stable_since = None
+        time.sleep(2)
+    details = []
+    if last_status:
+        details.append(f"status={last_status}")
+    if last_health:
+        details.append(f"health={last_health}")
+    suffix = ", ".join(details) if details else "nicht gefunden"
+    raise CommandError(f"Container {name} wurde nach {timeout_seconds}s nicht stabil laufend ({suffix})")
 
 
 def _ensure_workspace(workspace: Path) -> None:
@@ -350,10 +400,10 @@ def run_update() -> int:
             cwd=workspace,
             manager=manager,
         )
-        _wait_for_container_state(
+        _wait_for_container_running_stable(
             "ts-mirror-maker",
-            expected={"healthy"},
             timeout_seconds=150,
+            stable_seconds=12,
             cwd=workspace,
             manager=manager,
         )

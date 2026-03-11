@@ -174,7 +174,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "if [ ! -s /app/data/mm2.properties ] || ! grep -q 'remote.bootstrap.servers' /app/data/mm2.properties; then exit 0; fi; ps -eo args | grep -F 'connect-mirror-maker /app/data/mm2.properties' | grep -v grep >/dev/null",
+          "if [ ! -s /app/data/mm2.properties ] || ! grep -q 'remote.bootstrap.servers' /app/data/mm2.properties; then exit 0; fi; ps -eo args | grep -E '[o]rg\\.apache\\.kafka\\.connect\\.mirror\\.MirrorMaker|[c]onnect-mirror-maker /app/data/mm2.properties' >/dev/null",
         ]
       interval: 20s
       timeout: 5s
