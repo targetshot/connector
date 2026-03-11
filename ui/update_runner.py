@@ -319,8 +319,11 @@ def run_update() -> int:
                 except CommandError as exc:  # noqa: PERF203
                     raise RuntimeError(str(exc)) from exc
             _run_command(compose_cmd + ["pull"], cwd=workspace, manager=manager)
-        manager.merge(log_append=["Stoppe Dienste"], current_action="docker compose down")
-        _run_command(compose_cmd + ["down", "--remove-orphans"], cwd=workspace, manager=manager)
+        manager.merge(
+            log_append=["Stoppe Haupt-Stack ohne Orphan-Cleanup, damit der Update-Agent weiterläuft"],
+            current_action="docker compose down",
+        )
+        _run_command(compose_cmd + ["down"], cwd=workspace, manager=manager)
         compose_down_called = True
         for name in (
             "ts-kafka-connect",
