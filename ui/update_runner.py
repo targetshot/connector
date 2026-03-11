@@ -340,17 +340,17 @@ def run_update() -> int:
             _run_command(compose_cmd + ["build", "--pull"], cwd=workspace, manager=manager)
         manager.merge(log_append=["Starte Dienste neu"], current_action="docker compose up")
         _run_command(compose_cmd + ["up", "-d"], cwd=workspace, manager=manager)
-        manager.merge(log_append=["Prüfe Neustart von UI und MirrorMaker"], current_action="Container-Status prüfen")
+        manager.merge(log_append=["Prüfe Healthchecks von UI und MirrorMaker"], current_action="Container-Health prüfen")
         _wait_for_container_state(
             "ts-connect-ui",
-            expected={"running", "healthy"},
+            expected={"healthy"},
             timeout_seconds=90,
             cwd=workspace,
             manager=manager,
         )
         _wait_for_container_state(
             "ts-mirror-maker",
-            expected={"running", "healthy"},
+            expected={"healthy"},
             timeout_seconds=90,
             cwd=workspace,
             manager=manager,

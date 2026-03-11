@@ -200,6 +200,11 @@ async def agent_health(_: Any = Depends(_auth_guard)):
     return {"ok": True, "running": bool(_current_job_id)}
 
 
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
+
 @app.get("/api/v1/status")
 async def agent_status(_: Any = Depends(_auth_guard)):
     return {"running": bool(_current_job_id), "job_id": _current_job_id}

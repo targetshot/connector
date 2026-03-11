@@ -4250,6 +4250,11 @@ async def health_summary():
     }
 
 
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
+
 @app.get("/api/source-replication/status", dependencies=[Depends(require_session)])
 async def source_replication_status():
     settings = fetch_settings()

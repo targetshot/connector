@@ -164,6 +164,16 @@ services:
       - ./ui/data:/app/data
     depends_on:
       - redpanda
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if [ ! -s /app/data/mm2.properties ] || ! grep -q 'remote.bootstrap.servers' /app/data/mm2.properties; then exit 0; fi; ps -eo args | grep -F 'connect-mirror-maker /app/data/mm2.properties' | grep -v grep >/dev/null",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   streams-transform:
     build:
@@ -234,6 +244,16 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "${TS_CONNECT_HOST_GATEWAY_OVERRIDE:-host.docker.internal:host-gateway}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).getcode() == 200 else 1)\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
 
 networks:
   default:
