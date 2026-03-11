@@ -1637,9 +1637,35 @@ def _detect_env_file_name() -> str | None:
     return None
 
 
-async def _build_update_status(force: bool = False) -> dict[str, Any]:
+async def _read_update_agent_status(timeout: float = 3.0) -> dict[str, Any] | None:
+    try:
+        result = await _update_agent_request("GET", "/api/v1/status", timeout=timeout)
+    except Exception:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+async def _reconcile_stale_update_state() -> dict[str, Any]:
     await ensure_update_state()
     state = await get_update_state_snapshot()
+    if state.get("status") != "running":
+        return state
+    agent_status = await _read_update_agent_status()
+    if agent_status and not agent_status.get("running"):
+        await merge_update_state_async(
+            status="idle",
+            update_in_progress=False,
+            current_action=None,
+            job_started=None,
+            last_error=None,
+            log_append=["Verwaister Update-Status erkannt und automatisch zurückgesetzt"],
+        )
+        return await get_update_state_snapshot()
+    return state
+
+
+async def _build_update_status(force: bool = False) -> dict[str, Any]:
+    state = await _reconcile_stale_update_state()
     release = await _ensure_latest_release(force=force)
     workspace_info = await _collect_workspace_info()
     local_image_digest, local_image_ref = await _read_local_ui_image_details()
