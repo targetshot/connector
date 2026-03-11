@@ -270,7 +270,6 @@ def run_update() -> int:
         job_started=start_ts,
         log_append=[f"Update-Runner gestartet um {start_ts}", f"Workspace: {workspace}"],
     )
-    compose_down_called = False
     try:
         _ensure_workspace(workspace)
         try:
@@ -319,29 +318,12 @@ def run_update() -> int:
                 except CommandError as exc:  # noqa: PERF203
                     raise RuntimeError(str(exc)) from exc
             _run_command(compose_cmd + ["pull"], cwd=workspace, manager=manager)
-        manager.merge(
-            log_append=["Stoppe Haupt-Stack ohne Orphan-Cleanup, damit der Update-Agent weiterläuft"],
-            current_action="docker compose down",
-        )
-        _run_command(compose_cmd + ["down"], cwd=workspace, manager=manager)
-        compose_down_called = True
-        for name in (
-            "ts-kafka-connect",
-            "ts-connect-ui",
-            "ts-redpanda",
-            "ts-streams-transform",
-            "workspace-kafka-connect",
-            "workspace-ui",
-            "workspace-redpanda-1",
-            "workspace-streams-transform-1",
-        ):
-            try:
-                _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
-            except CommandError:
-                continue
         if prefer_local_build:
             _run_command(compose_cmd + ["build", "--pull"], cwd=workspace, manager=manager)
-        manager.merge(log_append=["Starte Dienste neu"], current_action="docker compose up")
+        manager.merge(
+            log_append=["Aktualisiere Haupt-Stack im laufenden Betrieb ohne globales compose down"],
+            current_action="docker compose up",
+        )
         _run_command(compose_cmd + ["up", "-d"], cwd=workspace, manager=manager)
         manager.merge(
             log_append=["Prüfe Healthchecks von Schema Registry, Kafka Connect, UI und MirrorMaker"],
@@ -377,22 +359,6 @@ def run_update() -> int:
         )
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
-        if compose_down_called:
-            for name in (
-                "ts-kafka-connect",
-                "ts-connect-ui",
-                "ts-redpanda",
-                "ts-streams-transform",
-                "workspace-kafka-connect",
-                "workspace-ui",
-                "workspace-redpanda-1",
-                "workspace-streams-transform-1",
-            ):
-                try:
-                    _run_command(["docker", "rm", "-f", name], cwd=workspace, manager=manager)
-                except CommandError:
-                    manager.merge(log_append=[f"Hinweis: Container {name} konnte nicht gelöscht werden"])
-                    continue
         manager.merge(
             status="error",
             update_in_progress=False,
