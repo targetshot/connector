@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -104,6 +105,42 @@ def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> s
     if return_code != 0:
         raise CommandError(f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}")
     return "\n".join(output_lines)
+
+
+def _inspect_container_state(name: str, *, cwd: Path) -> str | None:
+    result = subprocess.run(
+        ["docker", "inspect", name, "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}"],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        env=_command_env(),
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _wait_for_container_state(
+    name: str,
+    *,
+    expected: set[str],
+    timeout_seconds: int,
+    cwd: Path,
+    manager: UpdateStateManager,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_state = _inspect_container_state(name, cwd=cwd)
+    while time.monotonic() < deadline:
+        if last_state in expected:
+            manager.merge(log_append=[f"Container {name} ist {last_state}."])
+            return
+        time.sleep(2)
+        last_state = _inspect_container_state(name, cwd=cwd)
+    raise CommandError(
+        f"Container {name} wurde nach {timeout_seconds}s nicht bereit "
+        f"(letzter Status: {last_state or 'nicht gefunden'})"
+    )
 
 
 def _ensure_workspace(workspace: Path) -> None:
@@ -303,6 +340,21 @@ def run_update() -> int:
             _run_command(compose_cmd + ["build", "--pull"], cwd=workspace, manager=manager)
         manager.merge(log_append=["Starte Dienste neu"], current_action="docker compose up")
         _run_command(compose_cmd + ["up", "-d"], cwd=workspace, manager=manager)
+        manager.merge(log_append=["Prüfe Neustart von UI und MirrorMaker"], current_action="Container-Status prüfen")
+        _wait_for_container_state(
+            "ts-connect-ui",
+            expected={"running", "healthy"},
+            timeout_seconds=90,
+            cwd=workspace,
+            manager=manager,
+        )
+        _wait_for_container_state(
+            "ts-mirror-maker",
+            expected={"running", "healthy"},
+            timeout_seconds=90,
+            cwd=workspace,
+            manager=manager,
+        )
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
         if compose_down_called:

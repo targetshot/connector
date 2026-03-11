@@ -133,6 +133,7 @@ services:
     image: confluentinc/cp-kafka:7.7.0
     container_name: ts-mirror-maker
     restart: unless-stopped
+    stop_grace_period: 45s
     environment:
       KAFKA_LOG4J_ROOT_LOGLEVEL: INFO
       KAFKA_LOG4J_OPTS: "-Dlog4j.configuration=file:/etc/kafka/connect-log4j.properties"

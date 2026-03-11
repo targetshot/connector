@@ -1308,6 +1308,8 @@
     const btnSaveAuto = document.getElementById('btnSaveAuto');
     let updatePollTimer = null;
     let updateModalVisible = false;
+    const UPDATE_RELOAD_PENDING_KEY = 'tsConnectPendingUiReload';
+    const UPDATE_RELOAD_DISCONNECT_KEY = 'tsConnectPendingUiReloadSawDisconnect';
     const osUpdateBadge = document.getElementById('osUpdateBadge');
     const osUpdateSummary = document.getElementById('osUpdateSummary');
     const osUpdateList = document.getElementById('osUpdateList');
@@ -1486,18 +1488,27 @@
     }
 
     function scheduleUpdateReload() {
-      if (updateReloadTimer) return;
+      if (updateReloadTimer || sessionStorage.getItem(UPDATE_RELOAD_PENDING_KEY) !== '1') return;
       const probe = async () => {
+        updateReloadTimer = null;
         try {
           const response = await fetch('/api/status', { cache: 'no-store' });
           if (response.ok) {
-            window.location.reload();
-            return;
+            if (sessionStorage.getItem(UPDATE_RELOAD_DISCONNECT_KEY) === '1') {
+              sessionStorage.removeItem(UPDATE_RELOAD_PENDING_KEY);
+              sessionStorage.removeItem(UPDATE_RELOAD_DISCONNECT_KEY);
+              window.location.reload();
+              return;
+            }
+          } else {
+            sessionStorage.setItem(UPDATE_RELOAD_DISCONNECT_KEY, '1');
           }
         } catch (error) {
-          // UI likely restarting; keep polling
+          sessionStorage.setItem(UPDATE_RELOAD_DISCONNECT_KEY, '1');
         }
-        updateReloadTimer = setTimeout(probe, 4000);
+        if (sessionStorage.getItem(UPDATE_RELOAD_PENDING_KEY) === '1') {
+          updateReloadTimer = setTimeout(probe, 4000);
+        }
       };
       updateReloadTimer = setTimeout(probe, 4000);
     }
@@ -2008,6 +2019,9 @@
           updatePollTimer = setTimeout(() => {
             loadUpdateStatus(false).catch(() => {});
           }, 5000);
+        } else if (sessionStorage.getItem(UPDATE_RELOAD_DISCONNECT_KEY) !== '1') {
+          sessionStorage.removeItem(UPDATE_RELOAD_PENDING_KEY);
+          sessionStorage.removeItem(UPDATE_RELOAD_DISCONNECT_KEY);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -2021,6 +2035,10 @@
             lines.push('Hinweis: ' + message);
           }
           setUpdateModalLogContent(lines);
+          if (sessionStorage.getItem(UPDATE_RELOAD_PENDING_KEY) === '1') {
+            sessionStorage.setItem(UPDATE_RELOAD_DISCONNECT_KEY, '1');
+            scheduleUpdateReload();
+          }
         } else {
           setUpdateBadge('error', 'Status kann nicht abgerufen werden', message);
         }
@@ -2063,6 +2081,8 @@
             'Update-Runner wird gestartet…',
             'Docker Compose wird neu gebaut. Bitte diese Ansicht geöffnet lassen.'
           ]);
+          sessionStorage.setItem(UPDATE_RELOAD_PENDING_KEY, '1');
+          sessionStorage.removeItem(UPDATE_RELOAD_DISCONNECT_KEY);
           scheduleUpdateReload();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -2173,6 +2193,9 @@
 
     hydrateLicenseTimestamp();
     hydrateShooterTimestamp();
+    if (sessionStorage.getItem(UPDATE_RELOAD_PENDING_KEY) === '1') {
+      scheduleUpdateReload();
+    }
     loadOsUpdateStatus(false).catch(() => {});
     loadUpdateStatus(false).catch(() => {});
     loadHealthSummary(false).catch(() => {});
