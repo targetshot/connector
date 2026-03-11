@@ -123,6 +123,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
 - Docker socket access moved into the dedicated `update-agent` service. The UI talks to it via `TS_CONNECT_UPDATE_AGENT_URL` (defaults to `http://update-agent:9000`) and authenticates with `TS_CONNECT_UPDATE_AGENT_TOKEN`. Leave the token empty to auto-generate a shared secret in `ui/data/update-agent.token`.
 - UI und Health schreiben Logs nach `/app/data/logs/` (u. a. `ui.log`, `health.log`); `ui.log` lässt sich direkt im UI-Bereich "System-Logs" anzeigen.
+- Gespeicherte Confluent-Zugangsdaten bleiben in `secrets.properties` erhalten; beim UI-/Container-Start wird die Connector-/MirrorMaker-Konfiguration automatisch erneut angewendet, sobald Lizenz und lokale Mirror-DB verfügbar sind.
 
 ### Kafka Streams Transformation
 - Der Dienst `streams-transform` abonniert sowohl Legacy-Debezium-Topics (`<Vereinsnummer>.(SMDB|SSMDB2).(Schuetze|Treffer|Scheiben|Serien)`) als auch geroutete `ts.raw.*`-Topics und leitet sie in die Standard-Topics `ts.sds-test.{schuetze,treffer,scheiben,serien}` weiter.

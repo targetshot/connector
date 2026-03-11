@@ -2952,7 +2952,17 @@ async def init_admin_password() -> None:
             logger.info("Synchronized license.key with stored license settings")
     except Exception as exc:  # noqa: BLE001
         logger.warning("License file sync failed: %s", exc)
-    await update_remote_replication_state(_license_is_active(current_settings))
+    cloud_replication_active = _license_is_active(current_settings)
+    if cloud_replication_active:
+        try:
+            await apply_connector_config()
+        except DeferredApplyError as exc:
+            logger.warning("Automatic connector apply deferred on startup: %s", exc)
+        except ValueError as exc:
+            logger.info("Skipping automatic connector apply on startup: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Automatic connector apply failed on startup: %s", exc)
+    await update_remote_replication_state(cloud_replication_active)
     await configure_git_safety()
     await ensure_update_state()
     state = await get_update_state_snapshot()
@@ -3270,6 +3280,8 @@ def build_index_context(request: Request) -> dict:
         "docs_url": DOCS_URL,
         "source_repl_password_placeholder": PASSWORD_PLACEHOLDER if source_repl_password_saved else "",
         "source_repl_password_saved": source_repl_password_saved,
+        "confluent_password_placeholder": PASSWORD_PLACEHOLDER if secrets_data.get("confluent_sasl_password") else "",
+        "confluent_password_saved": bool(secrets_data.get("confluent_sasl_password")),
         "default_server_name": DEFAULT_SERVER_NAME,
         "license": license_info,
         "license_activation_enabled": LEMON_ACTIVATION_ENABLED,
@@ -4006,10 +4018,15 @@ async def save(
 
     if section_key == "confluent":
         confluent_sasl_username = (confluent_sasl_username or "").strip()
-        confluent_sasl_password = (confluent_sasl_password or "").strip()
+        submitted_confluent_password = (confluent_sasl_password or "").strip()
+        existing_confluent_password = str(secrets_data.get("confluent_sasl_password") or "").strip()
+        if submitted_confluent_password == PASSWORD_PLACEHOLDER and existing_confluent_password:
+            confluent_password_value = existing_confluent_password
+        else:
+            confluent_password_value = submitted_confluent_password
         bootstrap_value = (confluent_bootstrap or settings["confluent_bootstrap"] or CONFLUENT_BOOTSTRAP_DEFAULT).strip()
 
-        if not confluent_sasl_username or not confluent_sasl_password:
+        if not confluent_sasl_username or not confluent_password_value:
             request.session["error_message"] = "Bitte API Key und Secret für Confluent ausfüllen."
             return RedirectResponse("/", status_code=303)
 
@@ -4060,7 +4077,7 @@ async def save(
                 "db_password": db_password_val,
                 "confluent_bootstrap": settings["confluent_bootstrap"],
                 "confluent_sasl_username": confluent_sasl_username,
-                "confluent_sasl_password": confluent_sasl_password,
+                "confluent_sasl_password": confluent_password_value,
             }
         )
         write_secrets_file(secrets_data)

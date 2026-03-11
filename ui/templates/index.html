@@ -421,7 +421,12 @@
               </div>
                 <div>
                   <label class="input-label" for="confluent_sasl_password">Cloud-API Secret (Confluent)</label>
-                  <input id="confluent_sasl_password" name="confluent_sasl_password" type="password" class="ts-input" placeholder="••••••••" required />
+                  <input id="confluent_sasl_password" name="confluent_sasl_password" type="password" class="ts-input" placeholder="••••••••" value="{{ confluent_password_placeholder }}" required autocomplete="current-password" />
+                  {% if confluent_password_saved %}
+                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                    Secret ist bereits gespeichert. Nur neu eintragen, wenn es sich geändert hat.
+                  </p>
+                  {% endif %}
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-3 pt-1">
