@@ -122,6 +122,9 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
 - Docker socket access moved into the dedicated `update-agent` service. The UI talks to it via `TS_CONNECT_UPDATE_AGENT_URL` (defaults to `http://update-agent:9000`) and authenticates with `TS_CONNECT_UPDATE_AGENT_TOKEN`. Leave the token empty to auto-generate a shared secret in `ui/data/update-agent.token`.
 - Operative Logs werden standardmäßig host-persistent nach `${TS_CONNECT_LOGS_HOST:-./ui/logs}` gemountet und liegen im Container unter `${TS_CONNECT_LOG_DIR:-/app/logs}`.
+- Der separate `update-agent` nutzt absichtlich eigene Host-Pfad-Overrides, damit relative Pfade aus der Haupt-`.env` nicht im Unterprojekt falsch aufgelöst werden:
+  - `${TS_CONNECT_UPDATE_AGENT_LOGS_HOST:-../ui/logs}`
+  - `${TS_CONNECT_UPDATE_AGENT_WORKSPACE_HOST:-..}`
 - Wichtige Dateien dort:
   - `ui.log`
   - `health.log`
