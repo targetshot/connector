@@ -8,7 +8,6 @@ This package bundles TargetShot Connect (Kafka Connect + local mirror MariaDB + 
 git clone https://github.com/targetshot/connector.git
 cd connector
 cp .env.example .env  # adjust secrets
-cp ui/.env.example ui/.env  # optional: UI-specific overrides
 docker compose up -d
 # Update-Agent separat starten (damit `docker compose down` den Runner nicht stoppt)
 cd update-agent
@@ -118,12 +117,41 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `.env` for localhost-only access.
 - Debezium nutzt die lokale Mirror-DB ausschließlich über `.env` (`TS_CONNECT_DEFAULT_DB_HOST`, `TS_CONNECT_DEFAULT_DB_PORT`, `TS_CONNECT_DEFAULT_DB_USER`, `TS_CONNECT_MIRROR_DB_PASSWORD`).
 - Port intern bleibt standardmäßig `3306`, extern `${TS_CONNECT_MIRROR_PORT:-3307}`.
-- On first start the UI now generates a random admin password and stores it inside `ui/data/admin_password.generated` (container path `/app/data/admin_password.generated`). Read the file once, log in, and immediately rotate the password via the Admin section or by setting `UI_ADMIN_PASSWORD` in `.env`.
-- Sessions are signed with `UI_SESSION_SECRET`. If the variable is absent, a random value is written to `/app/data/session_secret`. Supplying your own secret in `.env` keeps logins valid across re-installs.
+- On first start the UI now generates a random admin password and stores it inside `ui/data/admin_password.generated` (container path `/app/data/admin_password.generated`). Read the file once, log in, and immediately rotate the password via the Admin section or by setting `TS_CONNECT_UI_ADMIN_PASSWORD` in `.env`. The legacy alias `UI_ADMIN_PASSWORD` is still accepted for compatibility.
+- Sessions are signed with `TS_CONNECT_UI_SESSION_SECRET`. If the variable is absent, a random value is written to `/app/data/session_secret`. Supplying your own secret in `.env` keeps logins valid across re-installs. The legacy alias `UI_SESSION_SECRET` is still accepted for compatibility.
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
 - Docker socket access moved into the dedicated `update-agent` service. The UI talks to it via `TS_CONNECT_UPDATE_AGENT_URL` (defaults to `http://update-agent:9000`) and authenticates with `TS_CONNECT_UPDATE_AGENT_TOKEN`. Leave the token empty to auto-generate a shared secret in `ui/data/update-agent.token`.
 - UI und Health schreiben Logs nach `/app/data/logs/` (u. a. `ui.log`, `health.log`); `ui.log` lässt sich direkt im UI-Bereich "System-Logs" anzeigen.
 - Gespeicherte Confluent-Zugangsdaten bleiben in `secrets.properties` erhalten; beim UI-/Container-Start wird die Connector-/MirrorMaker-Konfiguration automatisch erneut angewendet, sobald Lizenz und lokale Mirror-DB verfügbar sind.
+
+### Secret Inventory
+- Kanonische Laufzeit-Secrets liegen ausschließlich in `ts-connect/.env`.
+- GitHub-Actions-Secrets für Releases leben ausschließlich im Repository `targetshot/connector` unter `Settings -> Secrets and variables -> Actions`:
+  - `AZURE_CLIENT_ID`
+  - `AZURE_TENANT_ID`
+- Wichtige Laufzeit-Secrets in `.env`:
+  - `TS_CONNECT_UI_ADMIN_PASSWORD`
+  - `TS_CONNECT_UI_SESSION_SECRET`
+  - `TS_CONNECT_UPDATE_AGENT_TOKEN`
+  - `TS_CONNECT_HOST_AGENT_TOKEN`
+  - `TS_CONNECT_ACR_USERNAME`, `TS_CONNECT_ACR_PASSWORD`
+  - `TS_CONNECT_MIRROR_ROOT_PASSWORD`, `TS_CONNECT_MIRROR_DB_PASSWORD`
+  - `TS_CONNECT_SOURCE_DB_REPL_PASSWORD`
+  - `TS_CONNECT_BACKUP_PASSWORD`
+  - `TS_CONNECT_KEYGEN_ACCOUNT`, `TS_CONNECT_KEYGEN_POLICY_ID`
+  - optional `TS_CONNECT_KEYGEN_LICENSE_TOKEN`
+  - optional `TS_CONNECT_GITHUB_TOKEN`
+- Automatisch erzeugte lokale Secret-Dateien:
+  - `ui/data/admin_password.generated`
+  - `ui/data/session_secret`
+  - `ui/data/update-agent.token`
+  - `ui/data/host-agent.token`
+  - `ui/data/license.key`
+  - `/etc/ts-connect-host-agent/token`
+- Persistierte Connector-/Cloud-Secrets:
+  - `ui/data/secrets.properties`
+  - enthaltend u. a. `db_password`, `source_db_repl_password`, `confluent_sasl_password`, `schema_registry_secret`, `backup_pg_password`
+- `ui/.env.example` wird nicht mehr verwendet und wurde entfernt. Pflege erfolgt nur noch über `./.env`.
 
 ### Kafka Streams Transformation
 - Der Dienst `streams-transform` abonniert sowohl Legacy-Debezium-Topics (`<Vereinsnummer>.(SMDB|SSMDB2).(Schuetze|Treffer|Scheiben|Serien)`) als auch geroutete `ts.raw.*`-Topics und leitet sie in die Standard-Topics `ts.sds-test.{schuetze,treffer,scheiben,serien}` weiter.
@@ -154,21 +182,23 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Das Backup-Passwort wird beim ersten Start zufällig generiert und intern verwaltet. Optional kann ein initialer Wert über `TS_CONNECT_BACKUP_PASSWORD` gesetzt werden.
 - Über den Button *Backup exportieren* in der UI lässt sich ein NDJSON-Dump der Tabelle `buffer_events` herunterladen.
 - Die Aufbewahrungszeit richtet sich nach der Lizenz:
-  - **Basic**: 14 Tage
-  - **Plus**: 30 Tage
-  - **Pro**: 90 Tage
+  - **Nicht lizenziert**: 14 Tage
+  - **Club Plus**: 30 Tage
 - Standard-Credentials für den Postgres-Puffer können über `TS_CONNECT_BACKUP_DB/USER/PORT` in `.env` angepasst werden.
 - Die UI legt die Tabelle `buffer_events` automatisch an und entfernt alte Einträge gemäß Lizenzlaufzeit.
 
-### Lizenzprüfung (Lemon Squeezy)
-- Hinterlege deinen Lemon-Squeezy-Lizenzschlüssel im neuen Abschnitt *Lizenzverwaltung*. Die UI prüft den Schlüssel gegen die Lemon-Squeezy-API und zeigt Status, Laufzeit und den zugehörigen Plan an.
-- Der aktive Plan (Basic / Plus / Pro) steuert automatisch die Aufbewahrungsdauer des Offline-Puffers. Abgelaufene oder ungültige Lizenzen fallen auf den Basisplan zurück.
+### Lizenzprüfung (Keygen)
+- Hinterlege den vereinsgebundenen Club-Plus-Lizenzschlüssel im Abschnitt *Lizenzverwaltung*. Die UI prüft den Schlüssel gegen Keygen und kann die aktuelle Installation als Maschine aktivieren.
+- Eine aktive Club-Plus-Lizenz steuert die Aufbewahrungsdauer des Offline-Puffers. Ohne aktive Lizenz bleibt TargetShot Connect im lokalen Pufferbetrieb.
 - Umgebungskonfiguration:
-  - `TS_LICENSE_API_KEY`: (optional, empfohlen) Lemon-Squeezy API-Key für die Lizenzprüfung.
-  - `TS_LICENSE_VARIANT_PLAN_MAP`: Zuordnung von Produkt- oder Varianten-IDs zum Plan, z.&nbsp;B. `123=basic,234=plus`.
-  - `TS_LICENSE_INSTANCE_NAME` / `TS_LICENSE_INSTANCE_ID`: optionale Angaben, die an Lemon Squeezy übertragen werden.
-  - `TS_LICENSE_AUTO_ACTIVATE`: aktiviert nach erfolgreicher Prüfung automatisch eine neue Installation (Standard: `true`).
-  - `TS_LICENSE_ACTIVATION_URL`: Endpoint für Aktivierungen (Standard: `https://api.lemonsqueezy.com/v1/licenses/activate`).
+  - `TS_CONNECT_KEYGEN_ACCOUNT`: Keygen Account-ID oder Slug.
+  - `TS_CONNECT_KEYGEN_API_URL`: optionaler Override für die Keygen-API-URL.
+  - `TS_CONNECT_KEYGEN_POLICY_ID`: Policy-ID der Club-Plus-Lizenz.
+  - `TS_CONNECT_KEYGEN_POLICY_NAME`: Anzeigename der Policy (optional, Standard: `Club Plus`).
+  - `TS_CONNECT_KEYGEN_LICENSE_TOKEN`: optionaler Keygen-Token. Für die Aktivierung reicht in der Regel die Lizenzschlüssel-Authentifizierung.
+  - `TS_CONNECT_KEYGEN_MACHINE_NAME`: optionaler Anzeigename der Maschine.
+  - `TS_CONNECT_KEYGEN_MACHINE_FINGERPRINT`: optionaler fester Fingerprint. Ohne Override wird ein stabiler Fingerprint lokal erzeugt und unter `/app/data/machine_fingerprint` gespeichert.
+  - `TS_CONNECT_KEYGEN_AUTO_ACTIVATE`: aktiviert die Maschine nach erfolgreicher Prüfung (Standard: `true`).
 - Die Cloud-Replikation (MirrorMaker) startet erst, wenn die Lizenz aktiviert wurde; bis dahin verbleiben alle Events ausschließlich im lokalen Puffer.
 
 ## Folder Structure

@@ -5,6 +5,7 @@ import json
 import hashlib
 import gzip
 import logging
+import platform
 from logging.handlers import RotatingFileHandler
 import os
 import re
@@ -64,6 +65,14 @@ def _env_int(name: str, default: int | None) -> int | None:
         logger.warning("Ungültiger Integer-Wert für %s: %s", name, trimmed)
         return default
 
+
+def _env_first(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None:
+            return value
+    return None
+
 APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
 DEFAULT_CONNECTOR_NAME = os.getenv("DEFAULT_CONNECTOR_NAME", "targetshot-debezium")
@@ -79,6 +88,7 @@ WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
 DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+MACHINE_FINGERPRINT_FILE = DATA_DIR / "machine_fingerprint"
 LOG_DIR = DATA_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 UI_LOG_FILE = LOG_DIR / "ui.log"
@@ -133,7 +143,7 @@ def _generate_admin_password(length: int = 24) -> str:
 
 
 def _resolve_env_admin_password() -> str | None:
-    value = os.getenv("UI_ADMIN_PASSWORD")
+    value = _env_first("TS_CONNECT_UI_ADMIN_PASSWORD", "UI_ADMIN_PASSWORD")
     if value is None:
         return None
     trimmed = value.strip()
@@ -171,7 +181,7 @@ def _clear_generated_admin_password_file() -> None:
 
 
 def _resolve_session_secret() -> str:
-    env_secret = os.getenv("UI_SESSION_SECRET", "").strip()
+    env_secret = (_env_first("TS_CONNECT_UI_SESSION_SECRET", "UI_SESSION_SECRET") or "").strip()
     if env_secret and env_secret != DEFAULT_SESSION_SECRET:
         return env_secret
     try:
@@ -193,7 +203,7 @@ def _resolve_session_secret() -> str:
         logger.warning("Session-Secret konnte nicht persistiert werden: %s", exc)
     else:
         logger.warning(
-            "UI_SESSION_SECRET nicht gesetzt – zufälliges Secret wurde in %s hinterlegt.",
+            "TS_CONNECT_UI_SESSION_SECRET nicht gesetzt – zufälliges Secret wurde in %s hinterlegt.",
             SESSION_SECRET_FILE,
         )
     return generated
@@ -305,19 +315,23 @@ MM2_INTERNAL_REPLICATION_FACTOR = max(_env_int("TS_CONNECT_MM2_INTERNAL_REPLICAT
 MM2_OFFSET_STORAGE_PARTITIONS = max(_env_int("TS_CONNECT_MM2_OFFSET_STORAGE_PARTITIONS", 5) or 5, 1)
 MM2_STATUS_STORAGE_PARTITIONS = max(_env_int("TS_CONNECT_MM2_STATUS_STORAGE_PARTITIONS", 3) or 3, 1)
 MM2_STATE_TOPIC_PREFIX = (os.getenv("TS_CONNECT_MM2_STATE_TOPIC_PREFIX", "_ts_mm2_v3") or "_ts_mm2_v3").strip() or "_ts_mm2_v3"
-LEMON_LICENSE_API_URL = os.getenv(
-    "TS_LICENSE_API_URL",
-    "https://api.lemonsqueezy.com/v1/licenses/validate",
-).strip()
-LEMON_ACTIVATION_URL = os.getenv(
-    "TS_LICENSE_ACTIVATION_URL",
-    "https://api.lemonsqueezy.com/v1/licenses/activate",
-).strip()
-LEMON_LICENSE_API_KEY = os.getenv("TS_LICENSE_API_KEY", "").strip()
-LEMON_VARIANT_PLAN_MAP_RAW = os.getenv("TS_LICENSE_VARIANT_PLAN_MAP", "")
-LEMON_INSTANCE_NAME = os.getenv("TS_LICENSE_INSTANCE_NAME", "").strip()
-LEMON_INSTANCE_ID = os.getenv("TS_LICENSE_INSTANCE_ID", "").strip()
-LEMON_ACTIVATION_ENABLED = os.getenv("TS_LICENSE_AUTO_ACTIVATE", "true").lower() in {"1", "true", "yes", "on"}
+KEYGEN_ACCOUNT = (_env_first("TS_CONNECT_KEYGEN_ACCOUNT", "TS_KEYGEN_ACCOUNT", "KEYGEN_ACCOUNT") or "").strip()
+KEYGEN_BASE_URL = (
+    _env_first("TS_CONNECT_KEYGEN_API_URL", "TS_KEYGEN_API_URL", "KEYGEN_API_URL")
+    or (f"https://api.keygen.sh/v1/accounts/{KEYGEN_ACCOUNT}" if KEYGEN_ACCOUNT else "")
+).strip().rstrip("/")
+KEYGEN_LICENSE_TOKEN = (_env_first("TS_CONNECT_KEYGEN_LICENSE_TOKEN", "TS_KEYGEN_LICENSE_TOKEN") or "").strip()
+KEYGEN_POLICY_ID = (_env_first("TS_CONNECT_KEYGEN_POLICY_ID", "TS_KEYGEN_POLICY_ID", "KEYGEN_POLICY_ID") or "").strip()
+KEYGEN_POLICY_NAME = (_env_first("TS_CONNECT_KEYGEN_POLICY_NAME", "TS_KEYGEN_POLICY_NAME", "KEYGEN_POLICY_NAME") or "").strip()
+KEYGEN_MACHINE_NAME = (_env_first("TS_CONNECT_KEYGEN_MACHINE_NAME", "TS_KEYGEN_MACHINE_NAME") or "").strip()
+KEYGEN_MACHINE_FINGERPRINT = (_env_first("TS_CONNECT_KEYGEN_MACHINE_FINGERPRINT", "TS_KEYGEN_MACHINE_FINGERPRINT") or "").strip()
+KEYGEN_ACTIVATION_ENABLED = (
+    (_env_first("TS_CONNECT_KEYGEN_AUTO_ACTIVATE", "TS_KEYGEN_AUTO_ACTIVATE") or "true").lower()
+    in {"1", "true", "yes", "on"}
+)
+
+LICENSE_PROVIDER = "keygen"
+LICENSE_MACHINE_ACTIVATION_ENABLED = KEYGEN_ACTIVATION_ENABLED
 
 
 def _license_status_snapshot(settings: dict) -> dict:
@@ -360,27 +374,208 @@ def _normalize_license_expiry(value: str | None) -> str | None:
     return None
 
 
-def _parse_variant_plan_map(raw: str) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for entry in raw.split(","):
-        if not entry.strip():
-            continue
-        if "=" not in entry:
-            continue
-        key, value = entry.split("=", 1)
-        key = key.strip()
-        value = normalize_license_tier(value)
-        if key:
-            mapping[key.lower()] = value
-    return mapping
-
-
-_DEFAULT_VARIANT_MAP = {
-    "1056369": "basic",
-    "1056375": "plus",
-    "1056379": "pro",
+KEYGEN_ACTIVATABLE_STATUSES = {
+    "valid",
+    "active",
+    "no_machine",
+    "no_machines",
+    "fingerprint_scope_required",
+    "fingerprint_scope_mismatch",
+    "machine_scope_required",
+    "machine_scope_mismatch",
 }
-LEMON_VARIANT_PLAN_MAP = _parse_variant_plan_map(LEMON_VARIANT_PLAN_MAP_RAW)
+
+
+def _normalize_provider_status(value: str | None) -> str:
+    return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _read_machine_fingerprint_file() -> str:
+    try:
+        return MACHINE_FINGERPRINT_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _write_machine_fingerprint_file(value: str) -> None:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return
+    _atomic_write_text(
+        MACHINE_FINGERPRINT_FILE,
+        cleaned + "\n",
+        mode=stat.S_IRUSR | stat.S_IWUSR,
+    )
+
+
+def _compute_machine_fingerprint() -> str:
+    machine_id = ""
+    for candidate in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
+        try:
+            machine_id = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            machine_id = ""
+        if machine_id:
+            break
+    seed_parts = [
+        machine_id,
+        socket.gethostname(),
+        platform.node(),
+        platform.system(),
+        platform.release(),
+    ]
+    seed = "|".join(part for part in seed_parts if part)
+    if not seed:
+        seed = "ts-connect"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _resolve_machine_fingerprint() -> str:
+    explicit = (KEYGEN_MACHINE_FINGERPRINT or "").strip()
+    if explicit:
+        return explicit
+    stored = _read_machine_fingerprint_file()
+    if stored:
+        return stored
+    computed = _compute_machine_fingerprint()
+    _write_machine_fingerprint_file(computed)
+    return computed
+
+
+def _resolve_machine_fingerprint_scope() -> list[str]:
+    candidates: list[str] = []
+    for value in (
+        (KEYGEN_MACHINE_FINGERPRINT or "").strip(),
+        _read_machine_fingerprint_file(),
+        _compute_machine_fingerprint(),
+    ):
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+    if not candidates:
+        candidates.append(_resolve_machine_fingerprint())
+    return candidates
+
+
+def _resolve_machine_name(*, settings: dict[str, Any] | None = None, fallback: str | None = None) -> str:
+    for value in (
+        KEYGEN_MACHINE_NAME,
+        fallback or "",
+        str((settings or {}).get("server_name") or "").strip(),
+        str((settings or {}).get("topic_prefix") or "").strip(),
+        socket.gethostname(),
+        platform.node(),
+        "ts-connect",
+    ):
+        cleaned = (value or "").strip()
+        if cleaned:
+            return cleaned
+    return "ts-connect"
+
+
+def _extract_keygen_message(payload: dict[str, Any], meta: dict[str, Any]) -> str | None:
+    if isinstance(meta.get("detail"), str) and meta.get("detail"):
+        return str(meta.get("detail"))
+    if isinstance(meta.get("message"), str) and meta.get("message"):
+        return str(meta.get("message"))
+    errors_obj = payload.get("errors")
+    if isinstance(errors_obj, list) and errors_obj:
+        first = errors_obj[0]
+        if isinstance(first, dict):
+            for key in ("detail", "title", "code"):
+                if isinstance(first.get(key), str) and first.get(key):
+                    return str(first.get(key))
+        return str(first)
+    if isinstance(errors_obj, dict) and errors_obj:
+        return ", ".join(str(v) for v in errors_obj.values())
+    if payload.get("error"):
+        return str(payload.get("error"))
+    if payload.get("message"):
+        return str(payload.get("message"))
+    return None
+
+
+def _parse_keygen_license_validation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    data_section = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    attributes = data_section.get("attributes") if isinstance(data_section.get("attributes"), dict) else {}
+    relationships = data_section.get("relationships") if isinstance(data_section.get("relationships"), dict) else {}
+    metadata = attributes.get("metadata") if isinstance(attributes.get("metadata"), dict) else {}
+
+    raw_status = meta.get("code") or meta.get("status") or attributes.get("status")
+    status = _normalize_provider_status(str(raw_status or "invalid"))
+    valid_flag = meta.get("valid")
+    valid = bool(valid_flag) if isinstance(valid_flag, bool) else status in {"valid", "active"}
+    policy_rel = relationships.get("policy") if isinstance(relationships.get("policy"), dict) else {}
+    policy_data = policy_rel.get("data") if isinstance(policy_rel.get("data"), dict) else {}
+    policy_id = policy_data.get("id")
+    expires_at = (
+        attributes.get("expiry")
+        or attributes.get("expires_at")
+        or meta.get("expiry")
+        or meta.get("expires_at")
+    )
+    customer_email = (
+        metadata.get("customerEmail")
+        or metadata.get("customer_email")
+        or metadata.get("billingContactEmail")
+        or metadata.get("billing_contact_email")
+    )
+    message = _extract_keygen_message(payload, meta)
+    entitlements = metadata.get("entitlements")
+    plan = "club_plus" if valid or status in KEYGEN_ACTIVATABLE_STATUSES else DEFAULT_LICENSE_TIER
+
+    return {
+        "valid": valid,
+        "plan": normalize_license_tier(plan),
+        "status": status or ("valid" if valid else "invalid"),
+        "variant_id": str(policy_id).strip() if policy_id else KEYGEN_POLICY_ID or None,
+        "variant_name": metadata.get("policyName") or metadata.get("policy_name") or KEYGEN_POLICY_NAME or None,
+        "expires_at": _normalize_license_expiry(str(expires_at).strip() if expires_at else None),
+        "raw_expires_at": expires_at,
+        "customer_email": customer_email,
+        "message": message,
+        "license_id": str(data_section.get("id")).strip() if data_section.get("id") else None,
+        "entitlements": entitlements,
+        "payload": payload,
+    }
+
+
+def _keygen_can_activate(validation: dict[str, Any]) -> bool:
+    return _normalize_provider_status(validation.get("status")) in KEYGEN_ACTIVATABLE_STATUSES
+
+
+async def _find_keygen_machine(
+    license_key: str,
+    fingerprints: list[str],
+) -> dict[str, Any] | None:
+    if not KEYGEN_BASE_URL:
+        return None
+    headers = {
+        "Accept": "application/vnd.api+json",
+        "Authorization": f"License {license_key}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(f"{KEYGEN_BASE_URL}/machines?page[size]=100", headers=headers)
+    except httpx.RequestError:
+        return None
+    if response.status_code >= 400:
+        return None
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        attributes = entry.get("attributes") if isinstance(entry.get("attributes"), dict) else {}
+        if str(attributes.get("fingerprint") or "").strip() in fingerprints:
+            return entry
+    return None
 
 
 def _write_json_log(filename: str, payload: dict) -> None:
@@ -450,6 +645,8 @@ AUTO_UPDATE_FORCE_RELEASE = os.getenv("TS_CONNECT_AUTO_UPDATE_FORCE_RELEASE", "1
 AUTO_UPDATE_STALE_SECONDS = int(os.getenv("TS_CONNECT_AUTO_UPDATE_STALE_SECONDS", "14400"))
 PROJECT_NAME = os.getenv("COMPOSE_PROJECT_NAME", "ts-connect")
 UI_CONTAINER_NAME = os.getenv("TS_CONNECT_UI_CONTAINER_NAME", "ts-connect-ui")
+UPDATE_AGENT_CONTAINER_NAME = os.getenv("TS_CONNECT_UPDATE_AGENT_CONTAINER_NAME", "ts-connect-update-agent")
+UPDATE_AGENT_SYNC_DELAY_SECONDS = max(_env_int("TS_CONNECT_UPDATE_AGENT_SYNC_DELAY", 12) or 12, 0)
 OS_UPDATE_STATE_PATH = DATA_DIR / "os_update_state.json"
 OS_UPDATE_MAX_AGE_SECONDS = int(os.getenv("TS_CONNECT_OS_UPDATE_MAX_AGE", "21600"))
 OS_UPDATE_LOG_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_LOG_LIMIT", "400"))
@@ -462,6 +659,8 @@ _update_state_lock = asyncio.Lock()
 _update_job_lock = asyncio.Lock()
 _cached_repo_slug: str | None = None
 _auto_update_task: asyncio.Task | None = None
+_update_agent_sync_task: asyncio.Task | None = None
+_update_agent_sync_lock = asyncio.Lock()
 _os_update_state_lock = asyncio.Lock()
 _os_update_refresh_lock = asyncio.Lock()
 _os_update_task: asyncio.Task | None = None
@@ -773,129 +972,33 @@ def _parse_repo_slug(remote_url: str) -> str | None:
     return None
 
 
-def _determine_plan_from_license(
-    *,
-    variant_id: str | None,
-    variant_name: str | None,
-    plan_hint: str | None,
-) -> str:
-    for candidate in (variant_id, variant_name, plan_hint):
-        if not candidate:
-            continue
-        key = str(candidate).strip().lower()
-        if not key:
-            continue
-        mapped = LEMON_VARIANT_PLAN_MAP.get(key) or _DEFAULT_VARIANT_MAP.get(key)
-        if mapped:
-            return mapped
-    for candidate in (plan_hint, variant_name):
-        if not candidate:
-            continue
-        lowered = str(candidate).strip().lower()
-        for plan in LICENSE_RETENTION_DAYS:
-            if plan in lowered:
-                return plan
-    return DEFAULT_LICENSE_TIER
-
-
 def _parse_license_validation_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    meta = payload.get("meta") or {}
-    data_section = payload.get("data") or {}
-    attributes = data_section.get("attributes") or {}
-    relationships = data_section.get("relationships") or {}
-    valid_flag: bool | None = None
-    if isinstance(meta, dict) and "valid" in meta:
-        valid_flag = bool(meta.get("valid"))
-    if valid_flag is None and "valid" in payload:
-        valid_flag = bool(payload.get("valid"))
-    status_raw = (meta.get("status") if isinstance(meta, dict) else None) or attributes.get("status")
-    status = (status_raw or "").strip() or ("valid" if valid_flag else "")
-    variant_id = attributes.get("variant_id") or meta.get("variant_id")
-    if not variant_id and isinstance(relationships, dict):
-        variant_rel = relationships.get("variant") or {}
-        if isinstance(variant_rel, dict):
-            variant_data = variant_rel.get("data") or {}
-            if isinstance(variant_data, dict):
-                variant_id = variant_data.get("id")
-    variant_name = meta.get("variant_name") if isinstance(meta, dict) else None
-    if not variant_name:
-        variant_name = attributes.get("variant_name")
-    plan_hint = (
-        meta.get("plan") if isinstance(meta, dict) else None
-    ) or (meta.get("plan_name") if isinstance(meta, dict) else None) or attributes.get("plan")
-    plan = _determine_plan_from_license(
-        variant_id=str(variant_id).strip() if variant_id else None,
-        variant_name=variant_name,
-        plan_hint=plan_hint,
-    )
-    expires_at = None
-    if isinstance(meta, dict):
-        expires_at = meta.get("expires_at") or meta.get("renews_at") or meta.get("renewal_at")
-    if not expires_at:
-        expires_at = attributes.get("expires_at")
-    if not expires_at and isinstance(payload, dict):
-        license_key_data = payload.get("license_key")
-        if isinstance(license_key_data, dict):
-            expires_at = license_key_data.get("expires_at")
-    customer_email = None
-    if isinstance(meta, dict):
-        customer_email = meta.get("customer_email") or meta.get("email")
-    if not customer_email and isinstance(relationships, dict):
-        customer_rel = relationships.get("customer") or {}
-        if isinstance(customer_rel, dict):
-            customer_data = customer_rel.get("data") or {}
-            if isinstance(customer_data, dict):
-                customer_attr = customer_data.get("attributes") or {}
-                if isinstance(customer_attr, dict):
-                    customer_email = customer_attr.get("email")
-    error_message = None
-    if isinstance(payload, dict):
-        if payload.get("error"):
-            error_message = str(payload.get("error"))
-        elif payload.get("message"):
-            error_message = str(payload.get("message"))
-        elif payload.get("errors"):
-            errors_obj = payload.get("errors")
-            if isinstance(errors_obj, list) and errors_obj:
-                error_message = str(errors_obj[0])
-            elif isinstance(errors_obj, dict):
-                error_message = ", ".join(str(v) for v in errors_obj.values())
-    message = (meta.get("message") if isinstance(meta, dict) else None) or error_message
-    normalized_expiry = _normalize_license_expiry(expires_at)
-    valid = bool(valid_flag if valid_flag is not None else status.lower() in {"active", "valid"})
-    return {
-        "valid": valid,
-        "plan": normalize_license_tier(plan),
-        "status": status or ("valid" if valid else "unbekannt"),
-        "variant_id": str(variant_id).strip() if variant_id else None,
-        "variant_name": variant_name,
-        "expires_at": normalized_expiry,
-        "raw_expires_at": expires_at,
-        "customer_email": customer_email,
-        "message": message,
-        "payload": payload,
-    }
+    return _parse_keygen_license_validation_payload(payload)
 
 
 async def validate_license_key_remote(license_key: str) -> dict[str, Any]:
     key = (license_key or "").strip()
     if not key:
         raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
-    headers = {"Accept": "application/json"}
-    if LEMON_LICENSE_API_KEY:
-        headers["Authorization"] = f"Bearer {LEMON_LICENSE_API_KEY}"
-    payload: dict[str, Any] = {"license_key": key}
-    if LEMON_INSTANCE_NAME:
-        payload["instance_name"] = LEMON_INSTANCE_NAME
-    if LEMON_INSTANCE_ID:
-        payload["instance_id"] = LEMON_INSTANCE_ID
-    payload["options"] = {"increment_uses_count": False}
+    meta: dict[str, Any] = {"key": key}
+    fingerprints = _resolve_machine_fingerprint_scope()
+    scope: dict[str, Any] = {}
+    if KEYGEN_POLICY_ID:
+        scope["policy"] = KEYGEN_POLICY_ID
+    if fingerprints:
+        scope["fingerprint"] = fingerprints[0]
+        scope["fingerprints"] = fingerprints
+    if scope:
+        meta["scope"] = scope
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(
-                LEMON_LICENSE_API_URL or "https://api.lemonsqueezy.com/v1/licenses/validate",
-                json=payload,
-                headers=headers,
+                f"{KEYGEN_BASE_URL}/licenses/actions/validate-key",
+                json={"meta": meta},
+                headers={
+                    "Accept": "application/vnd.api+json",
+                    "Content-Type": "application/vnd.api+json",
+                },
             )
     except httpx.RequestError as exc:  # noqa: BLE001
         raise RuntimeError(f"Lizenzserver nicht erreichbar: {exc}") from exc
@@ -907,12 +1010,23 @@ async def validate_license_key_remote(license_key: str) -> dict[str, Any]:
         data = response.json()
     except json.JSONDecodeError as exc:
         raise RuntimeError("Lizenzserver lieferte eine ungültige Antwort.") from exc
-    parsed = _parse_license_validation_payload(data if isinstance(data, dict) else {})
+    parsed = _parse_keygen_license_validation_payload(data if isinstance(data, dict) else {})
+    if parsed.get("license_id") and not parsed.get("valid"):
+        machine = await _find_keygen_machine(key, fingerprints)
+        if machine:
+            machine_attributes = machine.get("attributes") if isinstance(machine.get("attributes"), dict) else {}
+            parsed["activation_id"] = machine.get("id")
+            parsed["activation_at"] = (
+                machine_attributes.get("created")
+                or machine_attributes.get("createdAt")
+                or machine_attributes.get("created_at")
+                or machine_attributes.get("updated")
+                or machine_attributes.get("updatedAt")
+                or machine_attributes.get("updated_at")
+            )
     if not parsed.get("message") and isinstance(data, dict):
-        parsed["message"] = data.get("message")
-    if isinstance(data, dict) and data.get("error"):
-        parsed["error"] = str(data.get("error"))
-    elif parsed.get("message"):
+        parsed["message"] = _extract_keygen_message(data, data.get("meta") if isinstance(data.get("meta"), dict) else {})
+    if parsed.get("message"):
         parsed["error"] = parsed["message"]
     return parsed
 
@@ -922,61 +1036,92 @@ async def activate_license_key_remote(
     *,
     instance_name: str,
     instance_id: str,
+    validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     key = (license_key or "").strip()
     if not key:
         raise ValueError("Lizenzschlüssel fehlt für die Aktivierung.")
-    instance_id = (instance_id or "").strip()
-    if not instance_id:
-        raise ValueError("Lizenzaktivierung benötigt eine Instance ID.")
-    payload: dict[str, Any] = {
-        "license_key": key,
-        "instance_id": instance_id,
+    if not KEYGEN_BASE_URL:
+        raise RuntimeError("Keygen ist nicht konfiguriert.")
+    validation = validation or {}
+    license_id = str(validation.get("license_id") or "").strip()
+    if not license_id:
+        validation = await validate_license_key_remote(key)
+        license_id = str(validation.get("license_id") or "").strip()
+    if not license_id:
+        raise RuntimeError("Keygen-Lizenz konnte nicht aufgelöst werden.")
+
+    fingerprint = _resolve_machine_fingerprint()
+    fingerprints = _resolve_machine_fingerprint_scope()
+    machine_name = _resolve_machine_name(fallback=instance_name or instance_id)
+    headers = {
+        "Accept": "application/vnd.api+json",
+        "Content-Type": "application/vnd.api+json",
+        "Authorization": f"License {key}",
     }
-    if instance_name:
-        payload["instance_name"] = instance_name.strip()
-    headers = {"Accept": "application/json"}
-    if LEMON_LICENSE_API_KEY:
-        headers["Authorization"] = f"Bearer {LEMON_LICENSE_API_KEY}"
-    url = LEMON_ACTIVATION_URL or "https://api.lemonsqueezy.com/v1/activations"
+    payload = {
+        "data": {
+            "type": "machines",
+            "attributes": {
+                "name": machine_name,
+                "fingerprint": fingerprint,
+                "platform": platform.platform(),
+                "hostname": socket.gethostname(),
+            },
+            "relationships": {
+                "license": {
+                    "data": {
+                        "type": "licenses",
+                        "id": license_id,
+                    },
+                },
+            },
+        },
+    }
+
+    machine: dict[str, Any] | None = None
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await client.post(
+                f"{KEYGEN_BASE_URL}/machines",
+                json=payload,
+                headers=headers,
+            )
     except httpx.RequestError as exc:  # noqa: BLE001
         raise RuntimeError(f"Lizenzaktivierung fehlgeschlagen: {exc}") from exc
     if response.status_code >= 400:
-        raise RuntimeError(
-            f"Lizenzaktivierung fehlgeschlagen ({response.status_code}): {_extract_error_message(response)}"
-        )
-    try:
-        data = response.json()
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Lizenzaktivierung lieferte eine ungültige Antwort.") from exc
-    result: dict[str, Any] = {"payload": data}
-    if isinstance(data, dict):
-        payload_data = data.get("data") if isinstance(data.get("data"), dict) else None
-        if payload_data:
-            attributes = payload_data.get("attributes") if isinstance(payload_data.get("attributes"), dict) else {}
-            result.update(
-                {
-                    "activation_id": payload_data.get("id"),
-                    "status": attributes.get("status") or data.get("status"),
-                    "activated": bool(attributes.get("activated")),
-                    "activated_at": attributes.get("created_at") or attributes.get("activated_at"),
-                    "message": attributes.get("message") or data.get("message"),
-                }
+        detail = _extract_error_message(response)
+        machine = await _find_keygen_machine(key, fingerprints)
+        if not machine:
+            raise RuntimeError(
+                f"Lizenzaktivierung fehlgeschlagen ({response.status_code}): {detail}"
             )
-        else:
-            result.update(
-                {
-                    "activated": bool(data.get("activated")),
-                    "activation_id": data.get("id"),
-                    "status": data.get("status"),
-                    "activated_at": data.get("created_at") or data.get("activated_at"),
-                    "message": data.get("message"),
-                }
-            )
-    return result
+    else:
+        try:
+            data = response.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Lizenzaktivierung lieferte eine ungültige Antwort.") from exc
+        payload_data = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else None
+        machine = payload_data if isinstance(payload_data, dict) else None
+        if not machine:
+            machine = await _find_keygen_machine(key, fingerprints)
+
+    machine = machine or await _find_keygen_machine(key, fingerprints)
+    machine_attributes = machine.get("attributes") if isinstance(machine, dict) and isinstance(machine.get("attributes"), dict) else {}
+    activated_at = (
+        machine_attributes.get("created")
+        or machine_attributes.get("createdAt")
+        or machine_attributes.get("created_at")
+        or _now_utc_iso()
+    )
+    return {
+        "payload": machine,
+        "activation_id": machine.get("id") if isinstance(machine, dict) else None,
+        "status": machine_attributes.get("status") if isinstance(machine_attributes, dict) else "active",
+        "activated": True,
+        "activated_at": activated_at,
+        "message": "Maschine in Keygen aktiviert.",
+    }
 async def _run_command_capture(cmd: list[str], *, cwd: Path | None = None, timeout: float | None = None) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -996,6 +1141,112 @@ async def _run_command_text(cmd: list[str], *, cwd: Path | None = None, timeout:
     code, stdout, stderr = await _run_command_capture(cmd, cwd=cwd, timeout=timeout)
     output = stdout if stdout.strip() else stderr
     return code, output.strip()
+
+
+async def _docker_inspect_value(name: str, fmt: str) -> str | None:
+    code, output = await _run_command_text(
+        ["docker", "inspect", "--format", fmt, name],
+        timeout=10,
+    )
+    if code != 0:
+        return None
+    value = output.strip()
+    return value or None
+
+
+async def _docker_image_id(image_ref: str) -> str | None:
+    code, output = await _run_command_text(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
+        timeout=20,
+    )
+    if code != 0:
+        return None
+    value = output.strip()
+    return value or None
+
+
+def _update_agent_compose_base() -> tuple[Path, list[str]]:
+    compose_dir = WORKSPACE_PATH / "update-agent"
+    cmd = ["docker", "compose"]
+    if (WORKSPACE_PATH / ".env").exists():
+        cmd += ["--env-file", "../.env"]
+    return compose_dir, cmd
+
+
+async def _update_agent_refresh_needed() -> tuple[bool, str]:
+    compose_dir, _ = _update_agent_compose_base()
+    if not compose_dir.exists():
+        return (False, f"Update-Agent Verzeichnis fehlt: {compose_dir}")
+    state = await get_update_state_snapshot()
+    if state.get("status") == "running":
+        return (False, "Update läuft noch")
+    desired_image = (os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE) or DEFAULT_UPDATE_IMAGE).strip() or DEFAULT_UPDATE_IMAGE
+    desired_image_id = await _docker_image_id(desired_image)
+    current_agent_image_id = await _docker_inspect_value(UPDATE_AGENT_CONTAINER_NAME, "{{.Image}}")
+    if current_agent_image_id is None:
+        return (True, "Update-Agent Container fehlt")
+    if desired_image_id and current_agent_image_id != desired_image_id:
+        return (True, "Update-Agent nutzt noch ein altes Image")
+    return (False, "Update-Agent ist bereits aktuell")
+
+
+def _command_log_lines(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line.strip()]
+
+
+async def _refresh_update_agent_if_needed() -> None:
+    async with _update_agent_sync_lock:
+        needs_refresh, reason = await _update_agent_refresh_needed()
+        if not needs_refresh:
+            logger.info("Update-Agent Sync übersprungen: %s", reason)
+            return
+        desired_image = (os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE) or DEFAULT_UPDATE_IMAGE).strip() or DEFAULT_UPDATE_IMAGE
+        logger.info("Starte automatischen Update-Agent Sync: %s", reason)
+        try:
+            await _ensure_registry_login_for_release(desired_image)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Update-Agent Sync: Docker-Login fehlgeschlagen: %s", exc)
+        compose_dir, compose_cmd = _update_agent_compose_base()
+        pull_code, pull_stdout, pull_stderr = await _run_command_capture(
+            compose_cmd + ["pull", "update-agent"],
+            cwd=compose_dir,
+            timeout=300,
+        )
+        if pull_code != 0:
+            message = pull_stderr.strip() or pull_stdout.strip() or f"Exit {pull_code}"
+            raise RuntimeError(f"Update-Agent Pull fehlgeschlagen: {message}")
+        for line in _command_log_lines(pull_stdout) + _command_log_lines(pull_stderr):
+            logger.info("Update-Agent Sync: %s", line)
+        rm_code, rm_stdout, rm_stderr = await _run_command_capture(
+            ["docker", "rm", "-f", UPDATE_AGENT_CONTAINER_NAME],
+            timeout=60,
+        )
+        if rm_code == 0:
+            for line in _command_log_lines(rm_stdout) + _command_log_lines(rm_stderr):
+                logger.info("Update-Agent Sync: %s", line)
+        up_code, up_stdout, up_stderr = await _run_command_capture(
+            compose_cmd + ["up", "-d", "update-agent"],
+            cwd=compose_dir,
+            timeout=300,
+        )
+        if up_code != 0:
+            message = up_stderr.strip() or up_stdout.strip() or f"Exit {up_code}"
+            raise RuntimeError(f"Update-Agent Start fehlgeschlagen: {message}")
+        for line in _command_log_lines(up_stdout) + _command_log_lines(up_stderr):
+            logger.info("Update-Agent Sync: %s", line)
+        deadline = asyncio.get_running_loop().time() + 60
+        while asyncio.get_running_loop().time() < deadline:
+            if await _ping_update_agent(timeout=3.0):
+                logger.info("Update-Agent Sync erfolgreich abgeschlossen")
+                return
+            await asyncio.sleep(2)
+        raise RuntimeError("Update-Agent wurde nach dem automatischen Sync nicht erreichbar")
+
+
+async def _delayed_update_agent_sync() -> None:
+    if UPDATE_AGENT_SYNC_DELAY_SECONDS > 0:
+        await asyncio.sleep(UPDATE_AGENT_SYNC_DELAY_SECONDS)
+    await _refresh_update_agent_if_needed()
 
 
 def _sanitize_hour(value: Any, default: int = AUTO_UPDATE_DEFAULT_HOUR) -> int:
@@ -1852,6 +2103,15 @@ def _os_update_task_done(task: asyncio.Task) -> None:
         task.result()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Systemupdate Hintergrundtask fehlgeschlagen: %s", exc)
+
+
+def _update_agent_sync_task_done(task: asyncio.Task) -> None:
+    global _update_agent_sync_task
+    _update_agent_sync_task = None
+    try:
+        task.result()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Automatischer Update-Agent Sync fehlgeschlagen: %s", exc)
 
 
 async def _start_update_runner(target_ref: str | None, repo_slug: str | None, env_file: str | None) -> str:
@@ -2794,7 +3054,7 @@ def _license_is_active(settings: dict) -> bool:
     key = (settings.get("license_key") or "").strip()
     if not key:
         return False
-    status = (settings.get("license_status") or "").strip().lower()
+    status = _normalize_provider_status(settings.get("license_status"))
     if status in {"revoked", "cancelled", "disabled", "invalid"}:
         return False
     activation_id = (settings.get("license_activation_id") or "").strip()
@@ -2940,7 +3200,7 @@ def ensure_admin_password_file() -> None:
     if env_password:
         set_admin_password(env_password)
         _clear_generated_admin_password_file()
-        logger.info("Admin-Passwort aus UI_ADMIN_PASSWORD initialisiert.")
+        logger.info("Admin-Passwort aus TS_CONNECT_UI_ADMIN_PASSWORD initialisiert.")
         return
     generated_password = _read_generated_admin_password()
     if not generated_password:
@@ -3001,6 +3261,10 @@ async def init_admin_password() -> None:
     global _auto_update_task
     if _auto_update_task is None:
         _auto_update_task = asyncio.create_task(_auto_update_worker())
+    global _update_agent_sync_task
+    if _update_agent_sync_task is None:
+        _update_agent_sync_task = asyncio.create_task(_delayed_update_agent_sync())
+        _update_agent_sync_task.add_done_callback(_update_agent_sync_task_done)
 
 
 def _extract_error_message(resp: httpx.Response) -> str:
@@ -3246,6 +3510,12 @@ def build_index_context(request: Request) -> dict:
         "pending": "In Prüfung",
         "unknown": "Unbekannt",
         "invalid": "Ungültig",
+        "no_machine": "Noch nicht aktiviert",
+        "no_machines": "Noch nicht aktiviert",
+        "fingerprint_scope_required": "Maschinenabgleich erforderlich",
+        "fingerprint_scope_mismatch": "Falsche Maschine",
+        "machine_scope_required": "Maschinenabgleich erforderlich",
+        "machine_scope_mismatch": "Falsche Maschine",
     }
     license_status_label = status_labels.get(status_raw, (data.get("license_status") or "Unbekannt").capitalize())
     activation_id = data.get("license_activation_id") or ""
@@ -3260,7 +3530,7 @@ def build_index_context(request: Request) -> dict:
         "status": data.get("license_status", "unknown"),
         "status_label": license_status_label,
         "plan": data.get("license_tier", DEFAULT_LICENSE_TIER),
-        "plan_label": normalize_license_tier(data.get("license_tier")).capitalize(),
+        "plan_label": plan_display_name(data.get("license_tier")),
         "valid_until": license_valid_iso,
         "valid_until_display": license_valid_display,
         "days_remaining": license_days_remaining,
@@ -3273,6 +3543,8 @@ def build_index_context(request: Request) -> dict:
         "activation_id": activation_id,
         "activation_at": activation_iso,
         "activation_at_display": activation_display,
+        "provider": LICENSE_PROVIDER,
+        "provider_label": "Keygen",
         "meta": license_meta,
     }
 
@@ -3310,7 +3582,7 @@ def build_index_context(request: Request) -> dict:
         "confluent_password_saved": bool(secrets_data.get("confluent_sasl_password")),
         "default_server_name": DEFAULT_SERVER_NAME,
         "license": license_info,
-        "license_activation_enabled": LEMON_ACTIVATION_ENABLED,
+        "license_activation_enabled": LICENSE_MACHINE_ACTIVATION_ENABLED,
         "host_agent_configured": bool(HOST_AGENT_URL),
     }
 
@@ -3792,9 +4064,7 @@ async def save(
                     )
                 except Exception as exc:  # noqa: BLE001
                     prune_error = f"Backup-Bereinigung nach Lizenz-Reset fehlgeschlagen: {exc}"
-            request.session["flash_message"] = (
-                f"Lizenz entfernt. Plan auf {plan.capitalize()} zurückgesetzt."
-            )
+            request.session["flash_message"] = f"Lizenz entfernt. Plan auf {plan_display_name(plan)} zurückgesetzt."
             if prune_error:
                 request.session.setdefault("error_message", prune_error)
             await update_remote_replication_state(False)
@@ -3842,29 +4112,32 @@ async def save(
         activation_error: str | None = None
         activation_requested = license_action_value == "activate"
         if activation_requested:
-            if not LEMON_ACTIVATION_ENABLED:
+            if not LICENSE_MACHINE_ACTIVATION_ENABLED:
                 activation_error = "Lizenzaktivierungen sind deaktiviert."
             elif new_activation_id:
                 activation_error = "Lizenz ist bereits aktiviert."
-            elif not validation.get("valid"):
-                activation_error = "Lizenz kann erst nach erfolgreicher Prüfung aktiviert werden."
+            elif not _keygen_can_activate(validation):
+                activation_error = "Lizenz kann erst nach erfolgreicher Prüfung mit Keygen aktiviert werden."
             else:
-                instance_id_value = LEMON_INSTANCE_ID or verein_identifier
-                instance_name_value = LEMON_INSTANCE_NAME or verein_identifier or settings.get("server_name") or "ts-connect"
-                if not instance_id_value:
-                    activation_error = "Keine Instance ID für die Lizenzaktivierung konfiguriert."
-                else:
-                    try:
-                        activation_feedback = await activate_license_key_remote(
-                            license_key_value,
-                            instance_name=instance_name_value,
-                            instance_id=str(instance_id_value),
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        activation_error = _short_error_message(str(exc), 180)
+                instance_id_value = verein_identifier
+                instance_name_value = verein_identifier or settings.get("server_name") or "ts-connect"
+                try:
+                    activation_feedback = await activate_license_key_remote(
+                        license_key_value,
+                        instance_name=instance_name_value,
+                        instance_id=str(instance_id_value),
+                        validation=validation,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    activation_error = _short_error_message(str(exc), 180)
                 if activation_feedback and activation_feedback.get("activated"):
                     new_activation_id = activation_feedback.get("activation_id") or ""
                     new_activation_at = activation_feedback.get("activated_at") or _now_utc_iso()
+                    try:
+                        validation = await validate_license_key_remote(license_key_value)
+                        write_license_meta(validation)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Keygen validation after activation failed: %s", exc)
                 elif activation_feedback and activation_feedback.get("message") and not activation_error:
                     activation_error = str(activation_feedback.get("message"))
 
@@ -3911,7 +4184,7 @@ async def save(
         updated_settings = fetch_settings()
         await update_remote_replication_state(_license_is_active(updated_settings))
 
-        message_parts = [f"Plan: {plan.capitalize()}"]
+        message_parts = [f"Plan: {plan_display_name(plan)}"]
         if expires_at_norm:
             message_parts.append(f"gültig bis {expires_at_norm}")
         if new_activation_id:

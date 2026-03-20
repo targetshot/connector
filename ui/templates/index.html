@@ -443,19 +443,19 @@
               <div class="space-y-3">
                 <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">Lizenzverwaltung</h2>
                 <p class="text-sm text-zinc-600 dark:text-zinc-300">
-                  Prüfe deinen Lemon Squeezy Lizenzschlüssel. Der aktive Plan bestimmt automatisch die Aufbewahrungszeit des Offline-Puffers.
+                  Prüfe die vereinsgebundene Club-Plus-Lizenz und aktiviere diese Installation über {{ license.provider_label }}. Die Lizenz steuert die Aufbewahrungszeit des Offline-Puffers.
                 </p>
               </div>
               <div class="grid gap-6 md:grid-cols-2">
                 <div>
                   <label class="input-label" for="license_key">Lizenzschlüssel</label>
                   <input id="license_key" name="license_key" class="ts-input" value="{{ license.key }}" placeholder="XXXX-XXXX-XXXX" />
-                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Leer lassen, um die Lizenz zu entfernen und auf den Basic-Plan zurückzufallen.</p>
+                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Leer lassen, um die Lizenz zu entfernen und auf den unlizenzierten Zustand zurückzufallen.</p>
                 </div>
                 <div class="rounded-2xl border border-indigo-200/70 bg-indigo-50/80 p-4 text-sm shadow-inner dark:border-indigo-300/20 dark:bg-indigo-500/10 dark:text-indigo-100">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-200">Aktiver Plan</p>
+                  <p class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-200">Aktive Lizenz</p>
                   <p class="mt-1 text-lg font-semibold text-indigo-900 dark:text-white">{{ license.plan_label }}</p>
-                  <p class="mt-1 text-xs text-indigo-700/80 dark:text-indigo-200/80">Aufbewahrung: {{ data.retention_days }} Tage</p>
+                  <p class="mt-1 text-xs text-indigo-700/80 dark:text-indigo-200/80">{{ license.provider_label }} · Aufbewahrung: {{ data.retention_days }} Tage</p>
                 </div>
               </div>
               <input type="hidden" name="license_action" id="license_action" value="validate" />
@@ -551,16 +551,16 @@
               <div class="flex flex-wrap gap-3 pt-2">
                 <button type="submit" class="primary-button license-action" data-license-action="validate">Lizenz prüfen</button>
                 {% if license_activation_enabled %}
-                <button type="submit" id="btnActivateLicense" class="btn-secondary license-action {% if license.activation_id %}opacity-60 cursor-not-allowed{% endif %}" data-license-action="activate" {% if license.activation_id %}disabled aria-disabled="true"{% endif %}>Lizenz aktivieren</button>
+                <button type="submit" id="btnActivateLicense" class="btn-secondary license-action {% if license.activation_id %}opacity-60 cursor-not-allowed{% endif %}" data-license-action="activate" {% if license.activation_id %}disabled aria-disabled="true"{% endif %}>Installation aktivieren</button>
                 {% endif %}
               </div>
               {% if license.activation_id %}
-              <p class="text-xs text-emerald-600 dark:text-emerald-300">Aktiviert am {{ license.activation_at_display or 'unbekannt' }} (ID: {{ license.activation_id }}).</p>
+              <p class="text-xs text-emerald-600 dark:text-emerald-300">Installation aktiviert am {{ license.activation_at_display or 'unbekannt' }} (Maschine: {{ license.activation_id }}).</p>
               {% elif license_activation_enabled %}
-              <p class="text-xs text-zinc-500 dark:text-zinc-400">Hinweis: Der Aktivieren-Button vergibt einen Installationsslot bei Lemon Squeezy. Verwende ihn nur auf produktiven Systemen.</p>
+              <p class="text-xs text-zinc-500 dark:text-zinc-400">Hinweis: Der Aktivieren-Button registriert diese Installation als Maschine bei {{ license.provider_label }} und bindet sie an die aktuelle Umgebung.</p>
               {% else %}
               <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-                Hinweis: Nur ein gültiger Lizenzschlüssel aktiviert Features über den Basic-Plan hinaus. Bei abgelaufener Lizenz fällt die Aufbewahrung automatisch auf den Basiswert zurück.
+                Hinweis: Nur eine gültige Club-Plus-Lizenz schaltet die Cloud-Replikation frei. Ohne aktive Lizenz bleibt der Connector lokal gepuffert.
               </p>
               {% endif %}
               {% if license.key %}
@@ -591,7 +591,7 @@
               <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">Lizenzplan: {{ license.plan_label }}</p>
               <p class="text-xs text-zinc-500 dark:text-zinc-400">Vorhaltezeit aktuell: {{ data.retention_days }} Tage</p>
               {% if not license.key %}
-              <p class="mt-2 text-xs text-amber-600 dark:text-amber-300">Keine Lizenz hinterlegt – es gilt automatisch der Basisplan.</p>
+              <p class="mt-2 text-xs text-amber-600 dark:text-amber-300">Keine Lizenz hinterlegt – der Connector bleibt lokal im Pufferbetrieb.</p>
               {% endif %}
             </div>
             <div class="flex flex-wrap items-center gap-3 pt-1">
@@ -600,7 +600,7 @@
               <span id="backupBadge" class="badge">…</span>
             </div>
             <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-              Die Lizenzstufe legt die Vorhaltezeit fest (Basic 14 Tage, Plus 30 Tage, Pro 90 Tage). Der Export liefert eine <code>.ndjson</code>-Datei mit allen Einträgen der Tabelle <code>buffer_events</code>.
+              Die Club-Plus-Lizenz legt die Vorhaltezeit fest. Ohne aktive Lizenz werden Pufferdaten nur kurz vorgehalten. Der Export liefert eine <code>.ndjson</code>-Datei mit allen Einträgen der Tabelle <code>buffer_events</code>.
             </p>
           </section>
 

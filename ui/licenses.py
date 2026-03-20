@@ -2,22 +2,20 @@ from __future__ import annotations
 
 import os
 LICENSE_RETENTION_DAYS = {
-    "basic": 14,
-    "plus": 30,
-    "pro": 90,
+    "unlicensed": 14,
+    "club_plus": int((os.getenv("TS_CONNECT_LICENSE_RETENTION_DAYS", "30") or "30").strip() or "30"),
 }
 
 LICENSE_PLAN_RULES = {
-    "basic": {"min": 0, "max": 29, "label": "Bis 29 Schützen"},
-    "plus": {"min": 30, "max": 89, "label": "30 – 89 Schützen"},
-    "pro": {"min": 90, "max": None, "label": "Ab 90 Schützen"},
+    "unlicensed": {"min": None, "max": None, "label": "Keine aktive Lizenz"},
+    "club_plus": {"min": 0, "max": None, "label": "Vereinslizenz"},
 }
 
-LICENSE_PLAN_ORDER = ["basic", "plus", "pro"]
+LICENSE_PLAN_ORDER = ["unlicensed", "club_plus"]
 
-DEFAULT_LICENSE_TIER = os.getenv("TS_CONNECT_DEFAULT_LICENSE_TIER", "basic").strip().lower()
+DEFAULT_LICENSE_TIER = os.getenv("TS_CONNECT_DEFAULT_LICENSE_TIER", "unlicensed").strip().lower()
 if DEFAULT_LICENSE_TIER not in LICENSE_RETENTION_DAYS:
-    DEFAULT_LICENSE_TIER = "basic"
+    DEFAULT_LICENSE_TIER = "unlicensed"
 
 DEFAULT_RETENTION_DAYS = LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER]
 
@@ -26,6 +24,8 @@ def normalize_license_tier(value: str | None) -> str:
     if not value:
         return DEFAULT_LICENSE_TIER
     normalized = value.strip().lower()
+    if normalized in {"basic", "plus", "pro", "club", "clubplus"}:
+        return "club_plus"
     if normalized not in LICENSE_RETENTION_DAYS:
         return DEFAULT_LICENSE_TIER
     return normalized
@@ -38,12 +38,17 @@ def retention_for_license(value: str | None) -> int:
 def plan_display_name(plan: str | None) -> str:
     if not plan:
         return "Unbekannt"
-    return normalize_license_tier(plan).capitalize()
+    normalized = normalize_license_tier(plan)
+    if normalized == "club_plus":
+        return "Club Plus"
+    if normalized == "unlicensed":
+        return "Nicht lizenziert"
+    return normalized.capitalize()
 
 
 def plan_limit_label(plan: str) -> str:
     plan = normalize_license_tier(plan)
-    info = LICENSE_PLAN_RULES.get(plan, LICENSE_PLAN_RULES["basic"])
+    info = LICENSE_PLAN_RULES.get(plan, LICENSE_PLAN_RULES["unlicensed"])
     min_value = info.get("min")
     max_value = info.get("max")
     label = info.get("label")
@@ -59,11 +64,7 @@ def plan_limit_label(plan: str) -> str:
 
 
 def required_plan_for_shooter_count(count: int | None) -> str:
-    if count is None or count <= 29:
-        return "basic"
-    if count <= 89:
-        return "plus"
-    return "pro"
+    return "club_plus"
 
 
 def plan_allows_shooter_count(plan: str, count: int | None) -> bool:
