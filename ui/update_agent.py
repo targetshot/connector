@@ -13,14 +13,24 @@ from asyncio.subprocess import PIPE
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
+from log_utils import configure_rotating_logger, env_int_first, resolve_log_dir
 from update_agent_utils import get_update_agent_token
 
 logger = logging.getLogger("ts-update-agent")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
 
 WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = resolve_log_dir(data_dir=DATA_DIR)
+UPDATE_AGENT_LOG_FILE = LOG_DIR / "update-agent.log"
+LOG_MAX_BYTES = max(
+    env_int_first(("TS_CONNECT_LOG_MAX_BYTES", "TS_CONNECT_UI_LOG_MAX_BYTES"), 5 * 1024 * 1024),
+    1024,
+)
+LOG_BACKUP_COUNT = max(
+    env_int_first(("TS_CONNECT_LOG_BACKUP_COUNT", "TS_CONNECT_UI_LOG_BACKUP_COUNT"), 5),
+    1,
+)
 MODULE_DIR = Path(__file__).resolve().parent
 TOKEN = get_update_agent_token(DATA_DIR)
 MIRROR_CONTAINER_NAME = os.getenv("TS_CONNECT_MIRROR_CONTAINER_NAME", "ts-mariadb-mirror").strip() or "ts-mariadb-mirror"
@@ -30,6 +40,16 @@ app = FastAPI(title="TargetShot Update Agent")
 _job_lock = asyncio.Lock()
 _current_job_id: str | None = None
 _job_task: asyncio.Task | None = None
+
+
+configure_rotating_logger(
+    logger,
+    UPDATE_AGENT_LOG_FILE,
+    max_bytes=LOG_MAX_BYTES,
+    backup_count=LOG_BACKUP_COUNT,
+    level=logging.INFO,
+)
+logger.info("Update-Agent logging enabled at %s", UPDATE_AGENT_LOG_FILE)
 
 
 def _require_workspace() -> None:

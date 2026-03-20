@@ -6,7 +6,6 @@ import hashlib
 import gzip
 import logging
 import platform
-from logging.handlers import RotatingFileHandler
 import os
 import re
 import secrets
@@ -30,10 +29,19 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 import httpx
+import operations_runtime as ops_runtime
 from connector_config import CONNECT_SECRETS_PATH, build_connector_config
 from file_utils import atomic_write_text as _atomic_write_text
 from file_utils import fsync_directory as _fsync_directory
 from file_utils import tmp_path_for as _tmp_path_for
+from log_utils import append_rotating_json_line, configure_rotating_logger, env_int_first, resolve_log_dir
+from security_bootstrap import (
+    PASSWORD_PLACEHOLDER,
+    PRIVATE_SECRET_FILE_MODE,
+    UiSecurityBootstrap,
+    require_admin_password,
+    require_session_auth,
+)
 from licenses import (
     DEFAULT_LICENSE_TIER,
     DEFAULT_RETENTION_DAYS,
@@ -77,9 +85,6 @@ APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
 DEFAULT_CONNECTOR_NAME = os.getenv("DEFAULT_CONNECTOR_NAME", "targetshot-debezium")
 BACKUP_CONNECTOR_NAME = os.getenv("BACKUP_CONNECTOR_NAME", f"{DEFAULT_CONNECTOR_NAME}-backup-sink")
-DEFAULT_ADMIN_PASSWORD = "change-me"
-PASSWORD_PLACEHOLDER = "********"
-DEFAULT_SESSION_SECRET = "targetshot-connect-ui-secret"
 TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
@@ -88,15 +93,27 @@ WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
 DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+security_bootstrap = UiSecurityBootstrap(
+    DATA_DIR,
+    logger=logger,
+    atomic_write_text=_atomic_write_text,
+    fsync_directory=_fsync_directory,
+)
 MACHINE_FINGERPRINT_FILE = DATA_DIR / "machine_fingerprint"
-LOG_DIR = DATA_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = resolve_log_dir(data_dir=DATA_DIR)
 UI_LOG_FILE = LOG_DIR / "ui.log"
-UI_LOG_MAX_BYTES = max(_env_int("TS_CONNECT_UI_LOG_MAX_BYTES", 5 * 1024 * 1024) or 5 * 1024 * 1024, 1024)
-UI_LOG_BACKUP_COUNT = max(_env_int("TS_CONNECT_UI_LOG_BACKUP_COUNT", 3) or 3, 1)
-ADMIN_PASSWORD_FILE = DATA_DIR / "admin_password.txt"
-ADMIN_PASSWORD_GENERATED_FILE = DATA_DIR / "admin_password.generated"
-SESSION_SECRET_FILE = DATA_DIR / "session_secret"
+HEALTH_LOG_FILE = LOG_DIR / "health.log"
+LOG_MAX_BYTES = max(
+    env_int_first(("TS_CONNECT_LOG_MAX_BYTES", "TS_CONNECT_UI_LOG_MAX_BYTES"), 5 * 1024 * 1024),
+    1024,
+)
+LOG_BACKUP_COUNT = max(
+    env_int_first(("TS_CONNECT_LOG_BACKUP_COUNT", "TS_CONNECT_UI_LOG_BACKUP_COUNT"), 5),
+    1,
+)
+ADMIN_PASSWORD_FILE = security_bootstrap.admin_password_file
+ADMIN_PASSWORD_GENERATED_FILE = security_bootstrap.admin_password_generated_file
+SESSION_SECRET_FILE = security_bootstrap.session_secret_file
 UPDATE_AGENT_URL = os.getenv("TS_CONNECT_UPDATE_AGENT_URL", "http://update-agent:9000").rstrip("/")
 UPDATE_AGENT_TOKEN = get_update_agent_token(DATA_DIR)
 HOST_AGENT_URL = os.getenv("TS_CONNECT_HOST_AGENT_URL", "").strip()
@@ -109,104 +126,27 @@ SECRETS_FILE_GID = _env_int("TS_CONNECT_SECRETS_GID", 1000)
 
 
 def _configure_logging() -> None:
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO)
-    has_file_handler = False
-    target_path = str(UI_LOG_FILE.resolve())
-    for handler in logger.handlers:
-        if isinstance(handler, RotatingFileHandler):
-            base_filename = getattr(handler, "baseFilename", "")
-            if base_filename == target_path:
-                has_file_handler = True
-                break
-    if not has_file_handler:
-        file_handler = RotatingFileHandler(
-            UI_LOG_FILE,
-            maxBytes=UI_LOG_MAX_BYTES,
-            backupCount=UI_LOG_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-        )
-        logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
+    configure_rotating_logger(
+        logger,
+        UI_LOG_FILE,
+        max_bytes=LOG_MAX_BYTES,
+        backup_count=LOG_BACKUP_COUNT,
+        level=logging.INFO,
+    )
 
 
 _configure_logging()
 logger.info("UI logging enabled at %s", UI_LOG_FILE)
 
-
-def _generate_admin_password(length: int = 24) -> str:
-    alphabet = string.ascii_letters + string.digits + "-_"
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+def _ensure_private_file_permissions(path: Path) -> None:
+    security_bootstrap.ensure_private_file_permissions(path)
 
 
-def _resolve_env_admin_password() -> str | None:
-    value = _env_first("TS_CONNECT_UI_ADMIN_PASSWORD", "UI_ADMIN_PASSWORD")
-    if value is None:
-        return None
-    trimmed = value.strip()
-    if not trimmed or trimmed == DEFAULT_ADMIN_PASSWORD:
-        return None
-    return trimmed
+AgentRequestError = ops_runtime.AgentRequestError
 
 
-def _read_generated_admin_password() -> str | None:
-    if not ADMIN_PASSWORD_GENERATED_FILE.exists():
-        return None
-    try:
-        data = ADMIN_PASSWORD_GENERATED_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return data or None
-
-
-def _remember_generated_admin_password(password: str) -> None:
-    _atomic_write_text(
-        ADMIN_PASSWORD_GENERATED_FILE,
-        password + "\n",
-        mode=stat.S_IRUSR | stat.S_IWUSR,
-    )
-
-
-def _clear_generated_admin_password_file() -> None:
-    if ADMIN_PASSWORD_GENERATED_FILE.exists():
-        try:
-            ADMIN_PASSWORD_GENERATED_FILE.unlink()
-        except OSError:
-            pass
-        else:
-            _fsync_directory(ADMIN_PASSWORD_GENERATED_FILE.parent)
-
-
-def _resolve_session_secret() -> str:
-    env_secret = (_env_first("TS_CONNECT_UI_SESSION_SECRET", "UI_SESSION_SECRET") or "").strip()
-    if env_secret and env_secret != DEFAULT_SESSION_SECRET:
-        return env_secret
-    try:
-        stored = SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        stored = ""
-    except OSError:
-        stored = ""
-    if stored:
-        return stored
-    generated = secrets.token_urlsafe(48)
-    try:
-        _atomic_write_text(
-            SESSION_SECRET_FILE,
-            generated + "\n",
-            mode=stat.S_IRUSR | stat.S_IWUSR,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Session-Secret konnte nicht persistiert werden: %s", exc)
-    else:
-        logger.warning(
-            "TS_CONNECT_UI_SESSION_SECRET nicht gesetzt – zufälliges Secret wurde in %s hinterlegt.",
-            SESSION_SECRET_FILE,
-        )
-    return generated
+def _agent_error_status(exc: AgentRequestError, *, default_status: int = 502) -> int:
+    return ops_runtime.agent_error_status(exc, default_status=default_status)
 
 
 async def _update_agent_request(
@@ -216,31 +156,22 @@ async def _update_agent_request(
     json_payload: dict | None = None,
     timeout: float = 15.0,
 ) -> dict[str, Any]:
-    if not UPDATE_AGENT_URL:
-        raise RuntimeError("Update-Agent URL nicht konfiguriert")
-    url = f"{UPDATE_AGENT_URL}{path}"
-    headers: dict[str, str] = {}
-    if UPDATE_AGENT_TOKEN:
-        headers["X-Update-Agent-Token"] = UPDATE_AGENT_TOKEN
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.request(method, url, json=json_payload, headers=headers)
-    except httpx.RequestError as exc:
-        raise RuntimeError(f"Update-Agent nicht erreichbar: {_short_error_message(str(exc), 140)}") from exc
-    if response.status_code >= 400:
-        text = _short_error_message(response.text, 200)
-        raise RuntimeError(f"Update-Agent {response.status_code}: {text}")
-    if response.headers.get("content-type", "").startswith("application/json"):
-        return response.json()
-    return {"ok": True, "body": response.text}
+    return await ops_runtime.update_agent_request(
+        method,
+        path,
+        update_agent_url=UPDATE_AGENT_URL,
+        update_agent_token=UPDATE_AGENT_TOKEN,
+        short_error_message=_short_error_message,
+        json_payload=json_payload,
+        timeout=timeout,
+    )
 
 
 async def _ping_update_agent(timeout: float = 3.0) -> bool:
-    try:
-        result = await _update_agent_request("GET", "/api/v1/health", timeout=timeout)
-    except Exception:
-        return False
-    return bool(result.get("ok"))
+    return await ops_runtime.ping_update_agent(
+        update_agent_request_fn=_update_agent_request,
+        timeout=timeout,
+    )
 
 
 async def _host_agent_request(
@@ -250,34 +181,23 @@ async def _host_agent_request(
     json_payload: dict | None = None,
     timeout: float = 15.0,
 ) -> dict[str, Any]:
-    if not HOST_AGENT_URL:
-        raise RuntimeError("Host-Agent URL nicht konfiguriert")
-    url = f"{HOST_AGENT_URL}{path}"
-    headers: dict[str, str] = {}
-    token = HOST_AGENT_TOKEN
-    if token:
-        headers["X-Host-Agent-Token"] = token
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.request(method, url, json=json_payload, headers=headers)
-    except httpx.RequestError as exc:
-        raise RuntimeError(f"Host-Agent nicht erreichbar: {_short_error_message(str(exc), 140)}") from exc
-    if response.status_code >= 400:
-        text = _short_error_message(response.text, 200)
-        raise RuntimeError(f"Host-Agent {response.status_code}: {text}")
-    if response.headers.get("content-type", "").startswith("application/json"):
-        return response.json()
-    return {"ok": True, "body": response.text}
+    return await ops_runtime.host_agent_request(
+        method,
+        path,
+        host_agent_url=HOST_AGENT_URL,
+        host_agent_token=HOST_AGENT_TOKEN,
+        short_error_message=_short_error_message,
+        json_payload=json_payload,
+        timeout=timeout,
+    )
 
 
 async def _ping_host_agent(timeout: float = 3.0) -> bool:
-    if not HOST_AGENT_URL:
-        return False
-    try:
-        result = await _host_agent_request("GET", "/api/v1/health", timeout=timeout)
-    except Exception:
-        return False
-    return bool(result.get("ok"))
+    return await ops_runtime.ping_host_agent(
+        host_agent_url=HOST_AGENT_URL,
+        host_agent_request_fn=_host_agent_request,
+        timeout=timeout,
+    )
 
 
 async def _container_status(name: str, *, timeout: float = 5.0) -> dict[str, Any]:
@@ -580,9 +500,12 @@ async def _find_keygen_machine(
 
 def _write_json_log(filename: str, payload: dict) -> None:
     path = LOG_DIR / filename
-    line = json.dumps(payload, ensure_ascii=False)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
+    append_rotating_json_line(
+        path,
+        payload,
+        max_bytes=LOG_MAX_BYTES,
+        backup_count=LOG_BACKUP_COUNT,
+    )
 
 
 def _tail_log_lines(path: Path, line_limit: int) -> list[str]:
@@ -617,7 +540,7 @@ def _resolve_update_image() -> str:
     return DEFAULT_UPDATE_IMAGE
 
 
-SESSION_SECRET = _resolve_session_secret()
+SESSION_SECRET = security_bootstrap.resolve_session_secret()
 CONFLUENT_CLUSTER_URL = os.getenv(
     "TS_CONNECT_CLUSTER_URL",
     "https://pkc-w7d6j.germanywestcentral.azure.confluent.cloud",
@@ -671,8 +594,7 @@ _registry_login_lock = asyncio.Lock()
 _logged_in_registries: set[str] = set()
 
 
-class DeferredApplyError(RuntimeError):
-    """Raised when connector apply is deferred for a retry."""
+DeferredApplyError = ops_runtime.DeferredApplyError
 
 
 def _now_utc_iso() -> str:
@@ -1174,79 +1096,39 @@ def _update_agent_compose_base() -> tuple[Path, list[str]]:
 
 
 async def _update_agent_refresh_needed() -> tuple[bool, str]:
-    compose_dir, _ = _update_agent_compose_base()
-    if not compose_dir.exists():
-        return (False, f"Update-Agent Verzeichnis fehlt: {compose_dir}")
-    state = await get_update_state_snapshot()
-    if state.get("status") == "running":
-        return (False, "Update läuft noch")
-    desired_image = (os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE) or DEFAULT_UPDATE_IMAGE).strip() or DEFAULT_UPDATE_IMAGE
-    desired_image_id = await _docker_image_id(desired_image)
-    current_agent_image_id = await _docker_inspect_value(UPDATE_AGENT_CONTAINER_NAME, "{{.Image}}")
-    if current_agent_image_id is None:
-        return (True, "Update-Agent Container fehlt")
-    if desired_image_id and current_agent_image_id != desired_image_id:
-        return (True, "Update-Agent nutzt noch ein altes Image")
-    return (False, "Update-Agent ist bereits aktuell")
+    return await ops_runtime.update_agent_refresh_needed(
+        workspace_path=WORKSPACE_PATH,
+        get_update_state_snapshot_fn=get_update_state_snapshot,
+        default_update_image=DEFAULT_UPDATE_IMAGE,
+        update_agent_container_name=UPDATE_AGENT_CONTAINER_NAME,
+        docker_image_id_fn=_docker_image_id,
+        docker_inspect_value_fn=_docker_inspect_value,
+    )
 
 
 def _command_log_lines(output: str) -> list[str]:
-    return [line for line in output.splitlines() if line.strip()]
+    return ops_runtime.command_log_lines(output)
 
 
 async def _refresh_update_agent_if_needed() -> None:
-    async with _update_agent_sync_lock:
-        needs_refresh, reason = await _update_agent_refresh_needed()
-        if not needs_refresh:
-            logger.info("Update-Agent Sync übersprungen: %s", reason)
-            return
-        desired_image = (os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE) or DEFAULT_UPDATE_IMAGE).strip() or DEFAULT_UPDATE_IMAGE
-        logger.info("Starte automatischen Update-Agent Sync: %s", reason)
-        try:
-            await _ensure_registry_login_for_release(desired_image)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Update-Agent Sync: Docker-Login fehlgeschlagen: %s", exc)
-        compose_dir, compose_cmd = _update_agent_compose_base()
-        pull_code, pull_stdout, pull_stderr = await _run_command_capture(
-            compose_cmd + ["pull", "update-agent"],
-            cwd=compose_dir,
-            timeout=300,
-        )
-        if pull_code != 0:
-            message = pull_stderr.strip() or pull_stdout.strip() or f"Exit {pull_code}"
-            raise RuntimeError(f"Update-Agent Pull fehlgeschlagen: {message}")
-        for line in _command_log_lines(pull_stdout) + _command_log_lines(pull_stderr):
-            logger.info("Update-Agent Sync: %s", line)
-        rm_code, rm_stdout, rm_stderr = await _run_command_capture(
-            ["docker", "rm", "-f", UPDATE_AGENT_CONTAINER_NAME],
-            timeout=60,
-        )
-        if rm_code == 0:
-            for line in _command_log_lines(rm_stdout) + _command_log_lines(rm_stderr):
-                logger.info("Update-Agent Sync: %s", line)
-        up_code, up_stdout, up_stderr = await _run_command_capture(
-            compose_cmd + ["up", "-d", "update-agent"],
-            cwd=compose_dir,
-            timeout=300,
-        )
-        if up_code != 0:
-            message = up_stderr.strip() or up_stdout.strip() or f"Exit {up_code}"
-            raise RuntimeError(f"Update-Agent Start fehlgeschlagen: {message}")
-        for line in _command_log_lines(up_stdout) + _command_log_lines(up_stderr):
-            logger.info("Update-Agent Sync: %s", line)
-        deadline = asyncio.get_running_loop().time() + 60
-        while asyncio.get_running_loop().time() < deadline:
-            if await _ping_update_agent(timeout=3.0):
-                logger.info("Update-Agent Sync erfolgreich abgeschlossen")
-                return
-            await asyncio.sleep(2)
-        raise RuntimeError("Update-Agent wurde nach dem automatischen Sync nicht erreichbar")
+    await ops_runtime.refresh_update_agent_if_needed(
+        update_agent_sync_lock=_update_agent_sync_lock,
+        update_agent_refresh_needed_fn=_update_agent_refresh_needed,
+        default_update_image=DEFAULT_UPDATE_IMAGE,
+        logger=logger,
+        ensure_registry_login_for_release_fn=_ensure_registry_login_for_release,
+        update_agent_compose_base_fn=_update_agent_compose_base,
+        run_command_capture_fn=_run_command_capture,
+        update_agent_container_name=UPDATE_AGENT_CONTAINER_NAME,
+        ping_update_agent_fn=_ping_update_agent,
+    )
 
 
 async def _delayed_update_agent_sync() -> None:
-    if UPDATE_AGENT_SYNC_DELAY_SECONDS > 0:
-        await asyncio.sleep(UPDATE_AGENT_SYNC_DELAY_SECONDS)
-    await _refresh_update_agent_if_needed()
+    await ops_runtime.delayed_update_agent_sync(
+        update_agent_sync_delay_seconds=UPDATE_AGENT_SYNC_DELAY_SECONDS,
+        refresh_update_agent_if_needed_fn=_refresh_update_agent_if_needed,
+    )
 
 
 def _sanitize_hour(value: Any, default: int = AUTO_UPDATE_DEFAULT_HOUR) -> int:
@@ -1412,18 +1294,32 @@ async def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any
     git_available = _binary_found("git", ("/usr/bin/git", "/usr/local/bin/git"))
     workspace_ready = bool(workspace_info.get("exists") and workspace_info.get("git"))
     update_agent_ok = await _ping_update_agent()
+    update_agent_error: str | None = None
+    if not update_agent_ok:
+        try:
+            await _update_agent_request("GET", "/api/v1/health", timeout=3.0)
+        except Exception as exc:  # noqa: BLE001
+            update_agent_error = _short_error_message(str(exc), 160)
     host_agent_required = bool(HOST_AGENT_URL)
     host_agent_ok = True
+    host_agent_error: str | None = None
     if host_agent_required:
         host_agent_ok = await _ping_host_agent()
+        if not host_agent_ok:
+            try:
+                await _host_agent_request("GET", "/api/v1/health", timeout=3.0)
+            except Exception as exc:  # noqa: BLE001
+                host_agent_error = _short_error_message(str(exc), 160)
     overall = git_available and workspace_ready and update_agent_ok
     if host_agent_required:
         overall = overall and host_agent_ok
     return {
         "git": git_available,
         "update_agent": update_agent_ok,
+        "update_agent_error": update_agent_error,
         "workspace": workspace_ready,
         "host_agent": host_agent_ok if host_agent_required else None,
+        "host_agent_error": host_agent_error,
         "ok": overall,
     }
 
@@ -1889,99 +1785,40 @@ def _detect_env_file_name() -> str | None:
 
 
 async def _read_update_agent_status(timeout: float = 3.0) -> dict[str, Any] | None:
-    try:
-        result = await _update_agent_request("GET", "/api/v1/status", timeout=timeout)
-    except Exception:
-        return None
-    return result if isinstance(result, dict) else None
+    return await ops_runtime.read_update_agent_status(
+        update_agent_request_fn=_update_agent_request,
+        short_error_message=_short_error_message,
+        timeout=timeout,
+    )
 
 
 async def _reconcile_stale_update_state() -> dict[str, Any]:
-    await ensure_update_state()
-    state = await get_update_state_snapshot()
-    if state.get("status") != "running":
-        return state
-    agent_status = await _read_update_agent_status()
-    if agent_status and not agent_status.get("running"):
-        await merge_update_state_async(
-            status="idle",
-            update_in_progress=False,
-            current_action=None,
-            job_started=None,
-            last_error=None,
-            log_append=["Verwaister Update-Status erkannt und automatisch zurückgesetzt"],
-        )
-        return await get_update_state_snapshot()
-    return state
+    return await ops_runtime.reconcile_stale_update_state(
+        ensure_update_state_fn=ensure_update_state,
+        get_update_state_snapshot_fn=get_update_state_snapshot,
+        read_update_agent_status_fn=_read_update_agent_status,
+        merge_update_state_async_fn=merge_update_state_async,
+    )
 
 
 async def _build_update_status(force: bool = False) -> dict[str, Any]:
-    state = await _reconcile_stale_update_state()
-    release = await _ensure_latest_release(force=force)
-    workspace_info = await _collect_workspace_info()
-    local_image_digest, local_image_ref = await _read_local_ui_image_details()
-    connect_version, connect_release = _load_version_defaults()
-    prereq = await _detect_prerequisites(workspace_info)
-    repo_slug = await _determine_repo_slug()
-    env_file_name = _detect_env_file_name()
-    compose_env_exists = env_file_name is not None
-    current_marker = connect_version or workspace_info.get("current_ref") or workspace_info.get("current_commit")
-    latest_tag = release.get("tag_name") if isinstance(release, dict) else None
-    remote_digest = release.get("digest") if isinstance(release, dict) else None
-    update_available = False
-    if latest_tag and current_marker and latest_tag != current_marker:
-        update_available = True
-    elif remote_digest and local_image_digest and remote_digest != local_image_digest:
-        update_available = True
-    elif remote_digest and not local_image_digest:
-        update_available = True
-    auto_enabled = bool(state.get("auto_update_enabled"))
-    auto_hour = _sanitize_hour(state.get("auto_update_hour"))
-    auto_last_run = state.get("auto_update_last_run")
-    next_auto_run_iso = None
-    auto_last_run_local_display: str | None = None
-    if auto_last_run:
-        last_run_dt = _parse_iso8601(auto_last_run)
-        auto_last_run_local_display = _format_local_timestamp(last_run_dt)
-    next_auto_run_local_display: str | None = None
-    if auto_enabled:
-        next_dt_utc = _calculate_next_auto_run(auto_hour, auto_last_run)
-        next_auto_run_iso = next_dt_utc.isoformat().replace("+00:00", "Z")
-        next_auto_run_local_display = _format_local_timestamp(next_dt_utc)
-    status: dict[str, Any] = {
-        "ok": True,
-        "status": state.get("status", "idle"),
-        "current_action": state.get("current_action"),
-        "current_version": connect_version,
-        "current_release": connect_release,
-        "current_image": local_image_ref,
-        "current_image_digest": local_image_digest,
-        "latest_release": release,
-        "latest_release_digest": remote_digest,
-        "update_available": update_available,
-        "last_check": state.get("last_check"),
-        "last_check_error": state.get("last_check_error"),
-        "last_success": state.get("last_success"),
-        "last_error": state.get("last_error"),
-        "update_target": state.get("update_target"),
-        "log": state.get("log", []),
-        "workspace": workspace_info,
-        "prerequisites": prereq,
-        "repo_slug": repo_slug,
-        "compose_env": compose_env_exists,
-        "env_file": env_file_name,
-        "job_started": state.get("job_started"),
-        "current_image": os.getenv("TS_CONNECT_UI_IMAGE", DEFAULT_UPDATE_IMAGE),
-        "auto_update": {
-            "enabled": auto_enabled,
-            "hour": auto_hour,
-            "last_run": auto_last_run,
-            "last_run_local": auto_last_run_local_display,
-            "next_run": next_auto_run_iso,
-            "next_run_local": next_auto_run_local_display,
-        },
-    }
-    return status
+    return await ops_runtime.build_update_status(
+        reconcile_stale_update_state_fn=_reconcile_stale_update_state,
+        read_update_agent_status_fn=_read_update_agent_status,
+        ensure_latest_release_fn=_ensure_latest_release,
+        collect_workspace_info_fn=_collect_workspace_info,
+        read_local_ui_image_details_fn=_read_local_ui_image_details,
+        load_version_defaults_fn=_load_version_defaults,
+        detect_prerequisites_fn=_detect_prerequisites,
+        determine_repo_slug_fn=_determine_repo_slug,
+        detect_env_file_name_fn=_detect_env_file_name,
+        sanitize_hour_fn=_sanitize_hour,
+        parse_iso8601_fn=_parse_iso8601,
+        format_local_timestamp_fn=_format_local_timestamp,
+        calculate_next_auto_run_fn=_calculate_next_auto_run,
+        default_update_image=DEFAULT_UPDATE_IMAGE,
+        force=force,
+    )
 
 
 def _os_cmd_to_str(cmd: list[str]) -> str:
@@ -2115,15 +1952,13 @@ def _update_agent_sync_task_done(task: asyncio.Task) -> None:
 
 
 async def _start_update_runner(target_ref: str | None, repo_slug: str | None, env_file: str | None) -> str:
-    payload = {
-        "target_ref": target_ref,
-        "repo_slug": repo_slug,
-        "env_file": env_file,
-        "compose_env": bool(env_file),
-        "project_name": PROJECT_NAME,
-    }
-    result = await _update_agent_request("POST", "/api/v1/run", json_payload=payload, timeout=10)
-    return result.get("job_id") or "update-agent"
+    return await ops_runtime.start_update_runner(
+        target_ref,
+        repo_slug,
+        env_file,
+        project_name=PROJECT_NAME,
+        update_agent_request_fn=_update_agent_request,
+    )
 
 
 async def _launch_update_job(
@@ -2133,121 +1968,42 @@ async def _launch_update_job(
     force_release_refresh: bool,
     reset_log: bool,
 ) -> dict[str, Any]:
-    label = "Automatisches" if initiated_by == "auto" else "Manuelles"
-    async with _update_job_lock:
-        state = await get_update_state_snapshot()
-        if state.get("status") == "running":
-            return {"ok": False, "error": "Ein Update läuft bereits", "code": 409}
-        workspace_info = await _collect_workspace_info()
-        prereq = await _detect_prerequisites(workspace_info)
-        if not prereq.get("ok"):
-            missing = [name for name, available in prereq.items() if name != "ok" and not available]
-            detail = "Voraussetzungen fehlen: " + ", ".join(missing)
-            return {"ok": False, "error": detail, "code": 400}
-        release = await _ensure_latest_release(force=force_release_refresh)
-        repo_slug = await _determine_repo_slug()
-        env_file_name = _detect_env_file_name()
-        selected_target = target_ref or (release.get("tag_name") if isinstance(release, dict) else None)
-        job_started = _now_utc_iso()
-        log_lines = [f"{label} Update ausgelöst um {job_started}", f"Initiator: {initiated_by}"]
-        await append_update_log(log_lines, reset=reset_log)
-        updates: dict[str, Any] = {
-            "status": "running",
-            "update_in_progress": True,
-            "current_action": "Starte Update Runner",
-            "last_error": None,
-            "job_started": job_started,
-            "update_target": selected_target,
-        }
-        if initiated_by == "auto":
-            updates["auto_update_last_run"] = job_started
-        await merge_update_state_async(**updates)
-        try:
-            job_identifier = await _start_update_runner(selected_target, repo_slug, env_file_name)
-        except Exception as exc:  # noqa: BLE001
-            message = _short_error_message(str(exc), 200)
-            result_updates: dict[str, Any] = {
-                "status": "error",
-                "update_in_progress": False,
-                "current_action": None,
-                "last_error": message,
-                "log_append": [f"FEHLER: {message}"],
-            }
-            if initiated_by == "auto":
-                result_updates.setdefault("auto_update_last_run", job_started)
-            await merge_update_state_async(**result_updates)
-            return {"ok": False, "error": message, "code": 500}
-        await merge_update_state_async(
-            current_action="Update-Agent gestartet",
-            log_append=[f"Update-Agent Job: {job_identifier}"],
-        )
-        return {"ok": True, "container": job_identifier, "target": selected_target}
+    return await ops_runtime.launch_update_job(
+        target_ref=target_ref,
+        initiated_by=initiated_by,
+        force_release_refresh=force_release_refresh,
+        reset_log=reset_log,
+        update_job_lock=_update_job_lock,
+        get_update_state_snapshot_fn=get_update_state_snapshot,
+        collect_workspace_info_fn=_collect_workspace_info,
+        detect_prerequisites_fn=_detect_prerequisites,
+        ensure_latest_release_fn=_ensure_latest_release,
+        determine_repo_slug_fn=_determine_repo_slug,
+        detect_env_file_name_fn=_detect_env_file_name,
+        now_utc_iso_fn=_now_utc_iso,
+        append_update_log_fn=append_update_log,
+        merge_update_state_async_fn=merge_update_state_async,
+        start_update_runner_fn=_start_update_runner,
+        short_error_message=_short_error_message,
+    )
 
 
 async def _auto_update_worker() -> None:
-    await asyncio.sleep(15)
-    while True:
-        try:
-            state = await get_update_state_snapshot()
-            if state.get("status") == "running":
-                if AUTO_UPDATE_STALE_SECONDS > 0:
-                    age_seconds = _job_age_seconds(state.get("job_started"))
-                    if age_seconds is None or age_seconds >= AUTO_UPDATE_STALE_SECONDS:
-                        minutes = None
-                        if age_seconds is not None and age_seconds > 0:
-                            minutes = max(1, int(age_seconds // 60))
-                        suffix = f" (letzte Aktivität vor {minutes} Minuten)" if minutes is not None else ""
-                        reset_updates: dict[str, Any] = {
-                            "status": "idle",
-                            "update_in_progress": False,
-                            "current_action": None,
-                            "last_error": "Update-Status nach Timeout zurückgesetzt",
-                        }
-                        if state.get("auto_update_enabled"):
-                            reset_updates["auto_update_last_run"] = None
-                        await merge_update_state_async(
-                            log_append=[f"Update-Status automatisch auf idle gesetzt{suffix}"],
-                            **reset_updates,
-                        )
-                        state = await get_update_state_snapshot()
-                    else:
-                        await asyncio.sleep(AUTO_UPDATE_CHECK_SECONDS)
-                        continue
-                else:
-                    await asyncio.sleep(AUTO_UPDATE_CHECK_SECONDS)
-                    continue
-            if state.get("auto_update_enabled"):
-                auto_hour = _sanitize_hour(state.get("auto_update_hour"))
-                last_run_iso = state.get("auto_update_last_run")
-                now_local = _now_local()
-                today_run_local = now_local.replace(hour=auto_hour, minute=0, second=0, microsecond=0)
-                last_run_dt = _parse_iso8601(last_run_iso)
-                last_run_local = _to_local(last_run_dt)
-                already_today = last_run_local and last_run_local.date() == now_local.date()
-                if now_local >= today_run_local and not already_today:
-                    logger.info("Auto-Update: Starte geplanten Lauf für %s", today_run_local.isoformat())
-                    result = await _launch_update_job(
-                        target_ref=None,
-                        initiated_by="auto",
-                        force_release_refresh=AUTO_UPDATE_FORCE_RELEASE,
-                        reset_log=False,
-                    )
-                    if not result.get("ok"):
-                        await merge_update_state_async(
-                            log_append=[
-                                "Automatisches Update fehlgeschlagen: "
-                                + str(result.get("error")),
-                            ],
-                            auto_update_last_run=_now_utc_iso(),
-                        )
-                    await asyncio.sleep(60)
-                    continue
-            await asyncio.sleep(AUTO_UPDATE_CHECK_SECONDS)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Auto-Update Worker Fehler: %s", exc)
-            await asyncio.sleep(max(120, AUTO_UPDATE_CHECK_SECONDS))
+    await ops_runtime.auto_update_worker(
+        get_update_state_snapshot_fn=get_update_state_snapshot,
+        merge_update_state_async_fn=merge_update_state_async,
+        sanitize_hour_fn=_sanitize_hour,
+        parse_iso8601_fn=_parse_iso8601,
+        to_local_fn=_to_local,
+        now_local_fn=_now_local,
+        now_utc_iso_fn=_now_utc_iso,
+        launch_update_job_fn=_launch_update_job,
+        job_age_seconds_fn=_job_age_seconds,
+        logger=logger,
+        auto_update_check_seconds=AUTO_UPDATE_CHECK_SECONDS,
+        auto_update_stale_seconds=AUTO_UPDATE_STALE_SECONDS,
+        auto_update_force_release=AUTO_UPDATE_FORCE_RELEASE,
+    )
 
 
 TRANSIENT_HTTP_CODES = {500, 502, 503, 504}
@@ -2266,63 +2022,50 @@ TRANSIENT_ERROR_MARKERS = (
 
 
 def _is_transient_status(status_code: int, message: str | None) -> bool:
-    if status_code in TRANSIENT_HTTP_CODES:
-        return True
-    if status_code == 400 and message:
-        lowered = message.lower()
-        return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
-    if status_code == 409:
-        return True  # connector already in desired state - treat as non-fatal
-    return False
+    return ops_runtime.is_transient_status(
+        status_code,
+        message,
+        transient_http_codes=TRANSIENT_HTTP_CODES,
+        transient_error_markers=TRANSIENT_ERROR_MARKERS,
+    )
 
 
 def _is_transient_request_error(exc: httpx.RequestError) -> bool:
-    lowered = str(exc).lower()
-    return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
+    return ops_runtime.is_transient_request_error(
+        exc,
+        transient_error_markers=TRANSIENT_ERROR_MARKERS,
+    )
 
 
 async def _schedule_retry(err_msg: str) -> None:
-    message = _format_apply_error(err_msg)
-    await merge_apply_state(
-        pending=True,
-        last_error=message,
-        last_attempt=_now_utc_iso(),
-        next_retry=_next_retry_iso(),
+    await ops_runtime.schedule_retry(
+        err_msg,
+        format_apply_error_fn=_format_apply_error,
+        merge_apply_state_fn=merge_apply_state,
+        next_retry_iso_fn=_next_retry_iso,
+        now_utc_iso_fn=_now_utc_iso,
+        logger=logger,
     )
-    logger.warning("Connector apply deferred: %s", message)
 
 
 async def _mark_apply_success() -> None:
-    await merge_apply_state(
-        pending=False,
-        last_error=None,
-        last_attempt=_now_utc_iso(),
-        last_success=_now_utc_iso(),
-        next_retry=None,
+    await ops_runtime.mark_apply_success(
+        merge_apply_state_fn=merge_apply_state,
+        now_utc_iso_fn=_now_utc_iso,
     )
 
 
 async def _connector_retry_worker() -> None:
-    if APPLY_RETRY_SECONDS <= 0:
-        logger.info("Connector retry worker disabled (APPLY_RETRY_SECONDS=%s)", APPLY_RETRY_SECONDS)
-        return
-    await asyncio.sleep(APPLY_RETRY_SECONDS)
-    while True:
-        state = await get_apply_state()
-        if state.get("pending"):
-            try:
-                await apply_connector_config(allow_defer=False)
-            except Exception as exc:  # noqa: BLE001
-                await merge_apply_state(
-                    pending=True,
-                    last_error=_format_apply_error(str(exc)),
-                    last_attempt=_now_utc_iso(),
-                    next_retry=_next_retry_iso(),
-                )
-                logger.warning("Retrying connector apply failed: %s", exc)
-            else:
-                logger.info("Deferred connector apply succeeded on retry")
-        await asyncio.sleep(APPLY_RETRY_SECONDS)
+    await ops_runtime.connector_retry_worker(
+        apply_retry_seconds=APPLY_RETRY_SECONDS,
+        get_apply_state_fn=get_apply_state,
+        apply_connector_config_fn=apply_connector_config,
+        merge_apply_state_fn=merge_apply_state,
+        format_apply_error_fn=_format_apply_error,
+        now_utc_iso_fn=_now_utc_iso,
+        next_retry_iso_fn=_next_retry_iso,
+        logger=logger,
+    )
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -2603,169 +2346,62 @@ def _build_source_replication_payload(settings: dict, secrets: dict[str, str]) -
 
 
 async def apply_source_replication_config(settings: dict, secrets: dict[str, str]) -> dict[str, Any]:
-    payload = _build_source_replication_payload(settings, secrets)
-    if payload is None:
-        return await _update_agent_request("POST", "/api/v1/mirror-replication/disable", timeout=25)
-    return await _update_agent_request(
-        "POST",
-        "/api/v1/mirror-replication/apply",
-        json_payload=payload,
-        timeout=35,
+    return await ops_runtime.apply_source_replication_config(
+        settings,
+        secrets,
+        build_source_replication_payload_fn=_build_source_replication_payload,
+        update_agent_request_fn=_update_agent_request,
     )
 
 
 async def source_replication_status_snapshot() -> dict[str, Any]:
-    return await _update_agent_request("GET", "/api/v1/mirror-replication/status", timeout=12)
+    return await ops_runtime.source_replication_status_snapshot(
+        update_agent_request_fn=_update_agent_request,
+    )
 
 
 def _write_mirror_maker_config(settings: dict, secrets: dict) -> None:
-    confluent_bootstrap = settings.get("confluent_bootstrap") or secrets.get("confluent_bootstrap") or CONFLUENT_BOOTSTRAP_DEFAULT
-    sasl_user = secrets.get("confluent_sasl_username")
-    sasl_password = secrets.get("confluent_sasl_password")
-    if not (confluent_bootstrap and sasl_user and sasl_password):
-        raise RuntimeError("MirrorMaker benötigt gültige Confluent Zugangsdaten (Bootstrap, API Key & Secret).")
-    mm2_rf = str(MM2_INTERNAL_REPLICATION_FACTOR)
-    config_lines = [
-        "clusters = local,remote",
-        "local.bootstrap.servers = redpanda:9092",
-        f"remote.bootstrap.servers = {confluent_bootstrap}",
-        "local.security.protocol = PLAINTEXT",
-        "remote.security.protocol = SASL_SSL",
-        "remote.sasl.mechanism = PLAIN",
-        (
-            "remote.sasl.jaas.config = org.apache.kafka.common.security.plain.PlainLoginModule required "
-            f"username='{_escape_jaas(sasl_user)}' password='{_escape_jaas(sasl_password)}';"
-        ),
-        "remote.ssl.endpoint.identification.algorithm = https",
-        "local->remote.enabled = true",
-        "remote->local.enabled = false",
-        f"local->remote.topics = {STREAMS_TARGET_PREFIX}.*",
-        "emit.heartbeats.enabled = false",
-        "emit.checkpoints.enabled = false",
-        "sync.group.offsets.enabled = false",
-        "refresh.groups.enabled = false",
-        "emit.heartbeats.interval.seconds = -1",
-        "local->remote.emit.heartbeats.enabled = false",
-        "local->remote.emit.checkpoints.enabled = false",
-        "local->remote.sync.group.offsets.enabled = false",
-        "local->remote.refresh.groups.enabled = false",
-        "local->remote.emit.heartbeats.interval.seconds = -1",
-        "remote->local.emit.heartbeats.enabled = false",
-        "remote->local.emit.checkpoints.enabled = false",
-        "remote->local.sync.group.offsets.enabled = false",
-        "remote->local.refresh.groups.enabled = false",
-        "remote->local.emit.heartbeats.interval.seconds = -1",
-        f"offset.storage.topic = {MM2_STATE_TOPIC_PREFIX}_offsets",
-        f"offset.storage.partitions = {MM2_OFFSET_STORAGE_PARTITIONS}",
-        f"offset.storage.replication.factor = {mm2_rf}",
-        "offset.storage.cluster.alias = local",
-        f"config.storage.topic = {MM2_STATE_TOPIC_PREFIX}_configs",
-        f"config.storage.replication.factor = {mm2_rf}",
-        "config.storage.cluster.alias = local",
-        f"status.storage.topic = {MM2_STATE_TOPIC_PREFIX}_status",
-        f"status.storage.partitions = {MM2_STATUS_STORAGE_PARTITIONS}",
-        f"status.storage.replication.factor = {mm2_rf}",
-        "status.storage.cluster.alias = local",
-        f"checkpoint.topic.replication.factor = {mm2_rf}",
-        f"heartbeats.topic.replication.factor = {mm2_rf}",
-        f"offset.syncs.topic.replication.factor = {mm2_rf}",
-        f"replication.factor = {mm2_rf}",
-        "replication.policy.class = org.apache.kafka.connect.mirror.IdentityReplicationPolicy",
-        "tasks.max = 1",
-        "sync.topic.acls.enabled = false",
-        "refresh.topics.interval.seconds = 30",
-    ]
-    _atomic_write_text(
-        MM2_CONFIG_PATH,
-        "\n".join(config_lines) + "\n",
-        mode=stat.S_IRUSR | stat.S_IWUSR,
-        uid=SECRETS_FILE_UID,
-        gid=SECRETS_FILE_GID,
+    ops_runtime.write_mirror_maker_config(
+        settings,
+        secrets,
+        confluent_bootstrap_default=CONFLUENT_BOOTSTRAP_DEFAULT,
+        stream_target_prefix=STREAMS_TARGET_PREFIX,
+        mm2_internal_replication_factor=MM2_INTERNAL_REPLICATION_FACTOR,
+        mm2_offset_storage_partitions=MM2_OFFSET_STORAGE_PARTITIONS,
+        mm2_status_storage_partitions=MM2_STATUS_STORAGE_PARTITIONS,
+        mm2_state_topic_prefix=MM2_STATE_TOPIC_PREFIX,
+        config_path=MM2_CONFIG_PATH,
+        atomic_write_text_fn=_atomic_write_text,
+        secret_file_mode=stat.S_IRUSR | stat.S_IWUSR,
+        secrets_file_uid=SECRETS_FILE_UID,
+        secrets_file_gid=SECRETS_FILE_GID,
+        escape_jaas_fn=_escape_jaas,
     )
 
 
 def _build_backup_sink_config(settings: dict, secrets: dict) -> dict:
-    backup_password = secrets.get("backup_pg_password", "")
-    if not backup_password:
-        raise ValueError("Backup-Datenbank Passwort fehlt in secrets.properties (backup_pg_password).")
-    host = settings["backup_pg_host"]
-    port = settings["backup_pg_port"]
-    database = settings["backup_pg_db"]
-    user = settings["backup_pg_user"]
-    jdbc_url = f"jdbc:postgresql://{host}:{port}/{database}"
-    return {
-        "name": BACKUP_CONNECTOR_NAME,
-        "config": {
-            "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
-            "tasks.max": "1",
-            "topics.regex": r"ts\.raw\..+",
-            "connection.url": jdbc_url,
-            "connection.user": user,
-            "connection.password": backup_password,
-            "dialect.name": "PostgreSqlDatabaseDialect",
-            "table.name.format": "buffer_events",
-            "auto.create": "false",
-            "auto.evolve": "false",
-            "insert.mode": "insert",
-            "pk.mode": "none",
-            "delete.enabled": "false",
-            "max.batch.size": "500",
-            "max.retries": "6",
-            "retry.backoff.ms": "5000",
-            "behavior.on.null.values": "ignore",
-            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-            "value.converter.schemas.enable": "false",
-            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-            "key.converter.schemas.enable": "false",
-            "transforms": "HoistPayload,AddTopic",
-            "transforms.HoistPayload.type": "org.apache.kafka.connect.transforms.HoistField$Value",
-            "transforms.HoistPayload.field": "payload",
-            "transforms.AddTopic.type": "org.apache.kafka.connect.transforms.InsertField$Value",
-            "transforms.AddTopic.topic.field": "topic",
-            "errors.tolerance": "all",
-            "errors.log.enable": "true",
-            "errors.log.include.messages": "true",
-            "errors.deadletterqueue.topic.name": "_ts_backup_dlq",
-            "errors.deadletterqueue.topic.replication.factor": "1",
-        },
-    }
+    return ops_runtime.build_backup_sink_config(
+        settings,
+        secrets,
+        backup_connector_name=BACKUP_CONNECTOR_NAME,
+    )
 
 
 async def restart_mirror_maker() -> None:
-    try:
-        result = await _restart_container("ts-mirror-maker")
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"MirrorMaker Neustart fehlgeschlagen: {exc}") from exc
-    if not result.get("found", True):
-        logger.info("MirrorMaker Container ist nicht vorhanden – kein Neustart erforderlich.")
+    await ops_runtime.restart_mirror_maker(
+        restart_container_fn=_restart_container,
+        logger=logger,
+    )
 
 
 async def update_remote_replication_state(active: bool) -> None:
-    try:
-        status = await _container_status("ts-mirror-maker")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("MirrorMaker Status konnte nicht abgefragt werden: %s", exc)
-        return
-    has_container = bool(status.get("exists"))
-    is_running = bool(status.get("running"))
-
-    if active:
-        if not has_container:
-            logger.warning("MirrorMaker Container nicht gefunden. Cloud-Replikation kann nicht aktiviert werden.")
-            return
-        if is_running:
-            return
-        try:
-            await restart_mirror_maker()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("MirrorMaker konnte nicht gestartet werden: %s", exc)
-    else:
-        if not has_container or not is_running:
-            return
-        try:
-            await _stop_container("ts-mirror-maker")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("MirrorMaker konnte nicht gestoppt werden: %s", exc)
+    await ops_runtime.update_remote_replication_state(
+        active,
+        container_status_fn=_container_status,
+        restart_mirror_maker_fn=restart_mirror_maker,
+        stop_container_fn=_stop_container,
+        logger=logger,
+    )
 
 
 def fetch_settings() -> dict:
@@ -2938,7 +2574,7 @@ def write_secrets_file(values: dict[str, str]) -> None:
     _atomic_write_text(
         SECRETS_PATH,
         payload,
-        mode=stat.S_IRUSR | stat.S_IWUSR,
+        mode=PRIVATE_SECRET_FILE_MODE,
         uid=SECRETS_FILE_UID,
         gid=SECRETS_FILE_GID,
     )
@@ -2947,6 +2583,7 @@ def write_secrets_file(values: dict[str, str]) -> None:
 def read_secrets_file() -> dict:
     if not SECRETS_PATH.exists():
         return {}
+    _ensure_private_file_permissions(SECRETS_PATH)
     data: dict[str, str] = {}
     for line in SECRETS_PATH.read_text(encoding="utf-8").splitlines():
         if "=" not in line:
@@ -3092,11 +2729,15 @@ def _rotate_backup_password(*, settings: dict, current_password: str, new_passwo
 def _ensure_backup_password(settings: dict, secrets_data: dict) -> tuple[str, dict]:
     password = (secrets_data.get("backup_pg_password") or "").strip()
     if password:
-        return password, secrets_data
+        if password == "targetshot":
+            logger.warning(
+                "Unsicheres Backup-Passwort in secrets.properties erkannt; erneute Initialisierung wird erzwungen."
+            )
+        else:
+            return password, secrets_data
     fallback_candidates = [
         (os.getenv("TS_CONNECT_BACKUP_PASSWORD") or "").strip(),
         (os.getenv("POSTGRES_PASSWORD") or "").strip(),
-        "targetshot",
     ]
     new_password = secrets.token_urlsafe(32)
     last_error: Exception | None = None
@@ -3112,18 +2753,15 @@ def _ensure_backup_password(settings: dict, secrets_data: dict) -> tuple[str, di
         write_secrets_file(secrets_data)
         return new_password, secrets_data
 
-    # Rotation fehlgeschlagen – versuche mit vorhandenem Passwort weiterzuarbeiten
-    for candidate in fallback_candidates:
-        if not candidate:
-            continue
-        secrets_data["backup_pg_password"] = candidate
-        write_secrets_file(secrets_data)
-        logger.warning(
-            "Backup-Passwort Rotation fehlgeschlagen, nutze vorhandenes Passwort weiter (keine Verbindung zur Rotation möglich)."
-        )
-        return candidate, secrets_data
-
-    raise RuntimeError("Backup-Passwort konnte nicht initialisiert werden") from last_error
+    if last_error is not None:
+        raise RuntimeError(
+            "Backup-Passwort konnte nicht initialisiert werden. Bitte aktuelles Passwort explizit über "
+            "TS_CONNECT_BACKUP_PASSWORD oder POSTGRES_PASSWORD bereitstellen."
+        ) from last_error
+    raise RuntimeError(
+        "Backup-Passwort fehlt. Bitte aktuelles Passwort explizit über "
+        "TS_CONNECT_BACKUP_PASSWORD oder POSTGRES_PASSWORD bereitstellen."
+    )
 
 
 async def ensure_offline_buffer_ready() -> None:
@@ -3167,65 +2805,20 @@ async def ensure_offline_buffer_ready() -> None:
         logger.warning("Offline-Puffer Aufbewahrungsbereinigung fehlgeschlagen: %s", exc)
 
 
-def _hash_admin_password(plain: str, salt_hex: str | None = None) -> tuple[str, str]:
-    if not plain:
-        raise ValueError("Admin-Passwort darf nicht leer sein")
-    if salt_hex is None:
-        salt_bytes = secrets.token_bytes(16)
-    else:
-        salt_bytes = bytes.fromhex(salt_hex)
-    digest = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt_bytes, 260000)
-    return salt_bytes.hex(), digest.hex()
-
-
 def set_admin_password(new_password: str) -> None:
-    salt_hex, hash_hex = _hash_admin_password(new_password)
-    _atomic_write_text(
-        ADMIN_PASSWORD_FILE,
-        f"{salt_hex}:{hash_hex}\n",
-        mode=stat.S_IRUSR | stat.S_IWUSR,
-    )
+    security_bootstrap.set_admin_password(new_password)
 
 
 def _read_admin_password_record() -> str:
-    if not ADMIN_PASSWORD_FILE.exists():
-        return ""
-    return ADMIN_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+    return security_bootstrap.read_admin_password_record()
 
 
 def ensure_admin_password_file() -> None:
-    if ADMIN_PASSWORD_FILE.exists():
-        return
-    env_password = _resolve_env_admin_password()
-    if env_password:
-        set_admin_password(env_password)
-        _clear_generated_admin_password_file()
-        logger.info("Admin-Passwort aus TS_CONNECT_UI_ADMIN_PASSWORD initialisiert.")
-        return
-    generated_password = _read_generated_admin_password()
-    if not generated_password:
-        generated_password = _generate_admin_password()
-        _remember_generated_admin_password(generated_password)
-    set_admin_password(generated_password)
-    logger.warning(
-        "Es wurde ein zufälliges Admin-Passwort erzeugt und in %s abgelegt.",
-        ADMIN_PASSWORD_GENERATED_FILE,
-    )
+    security_bootstrap.ensure_admin_password_file()
 
 
 def verify_admin_password(candidate: str) -> bool:
-    ensure_admin_password_file()
-    record = _read_admin_password_record()
-    if not record:
-        return False
-    if ":" not in record:
-        return secrets.compare_digest(record, candidate)
-    salt_hex, hash_hex = record.split(":", 1)
-    try:
-        _, candidate_hash = _hash_admin_password(candidate, salt_hex=salt_hex)
-    except ValueError:
-        return False
-    return secrets.compare_digest(hash_hex, candidate_hash)
+    return security_bootstrap.verify_admin_password(candidate)
 
 
 @app.on_event("startup")
@@ -3298,23 +2891,19 @@ async def _connect_request(
     allow_defer: bool,
     ok_statuses: tuple[int, ...] = (200, 201, 202, 204),
 ) -> httpx.Response:
-    try:
-        resp = await client.request(method, url, json=json_payload)
-    except httpx.RequestError as exc:
-        if allow_defer and _is_transient_request_error(exc):
-            await _schedule_retry(str(exc))
-            raise DeferredApplyError(_short_error_message(str(exc))) from exc
-        raise RuntimeError(f"{method} {url} fehlgeschlagen: {exc}") from exc
-
-    if resp.status_code not in ok_statuses:
-        message = _extract_error_message(resp)
-        if allow_defer and _is_transient_status(resp.status_code, message):
-            await _schedule_retry(message)
-            raise DeferredApplyError(_short_error_message(message))
-        raise RuntimeError(
-            f"{method} {url} -> {resp.status_code}: {message.strip() or 'Unbekannter Fehler'}"
-        )
-    return resp
+    return await ops_runtime.connect_request(
+        client,
+        method,
+        url,
+        allow_defer=allow_defer,
+        schedule_retry_fn=_schedule_retry,
+        short_error_message=_short_error_message,
+        extract_error_message_fn=_extract_error_message,
+        is_transient_status_fn=_is_transient_status,
+        is_transient_request_error_fn=_is_transient_request_error,
+        json_payload=json_payload,
+        ok_statuses=ok_statuses,
+    )
 
 
 async def _ensure_connector(
@@ -3324,44 +2913,13 @@ async def _ensure_connector(
     config: dict,
     allow_defer: bool,
 ) -> None:
-    url_base = f"{CONNECT_BASE_URL}/connectors/{name}"
-    resp = await _connect_request(
+    await ops_runtime.ensure_connector(
         client,
-        "GET",
-        url_base,
+        name=name,
+        config=config,
         allow_defer=allow_defer,
-        ok_statuses=(200, 404),
-    )
-    if resp.status_code == 200:
-        await _connect_request(
-            client,
-            "PUT",
-            f"{url_base}/pause",
-            allow_defer=allow_defer,
-            ok_statuses=(200, 202, 204, 409),
-        )
-        await _connect_request(
-            client,
-            "PUT",
-            f"{url_base}/config",
-            json_payload=config,
-            allow_defer=allow_defer,
-        )
-        await _connect_request(
-            client,
-            "PUT",
-            f"{url_base}/resume",
-            allow_defer=allow_defer,
-            ok_statuses=(200, 202, 204, 409),
-        )
-        return
-    await _connect_request(
-        client,
-        "POST",
-        f"{CONNECT_BASE_URL}/connectors",
-        json_payload={"name": name, "config": config},
-        allow_defer=allow_defer,
-        ok_statuses=(200, 201, 202),
+        connect_base_url=CONNECT_BASE_URL,
+        connect_request_fn=_connect_request,
     )
 
 
@@ -3371,73 +2929,34 @@ async def _delete_connector_if_exists(
     name: str,
     allow_defer: bool,
 ) -> None:
-    await _connect_request(
+    await ops_runtime.delete_connector_if_exists(
         client,
-        "DELETE",
-        f"{CONNECT_BASE_URL}/connectors/{name}",
+        name=name,
         allow_defer=allow_defer,
-        ok_statuses=(200, 202, 204, 404),
+        connect_base_url=CONNECT_BASE_URL,
+        connect_request_fn=_connect_request,
     )
 
 
 async def apply_connector_config(*, allow_defer: bool = True) -> None:
-    await ensure_offline_buffer_ready()
-    settings = fetch_settings()
-    secrets = read_secrets_file()
-    db_password, secrets = _ensure_mirror_db_secret(secrets)
-    if not db_password:
-        raise ValueError("Mirror-MariaDB-Passwort fehlt. Bitte TS_CONNECT_MIRROR_DB_PASSWORD setzen.")
-    offline_enabled = True
-
-    required = {
-        "confluent_bootstrap": "Confluent Bootstrap",
-        "confluent_sasl_username": "Confluent API Key",
-        "confluent_sasl_password": "Confluent API Secret",
-    }
-    if offline_enabled:
-        required["backup_pg_password"] = "Backup-Datenbank Passwort"
-    missing = [label for key, label in required.items() if not secrets.get(key)]
-    if missing:
-        raise ValueError("Es fehlen Werte in secrets.properties: " + ", ".join(missing))
-
-    connectors = [
-        {
-            "name": DEFAULT_CONNECTOR_NAME,
-            "config": build_connector_config(settings, offline_mode=offline_enabled),
-        }
-    ]
-    if offline_enabled:
-        connectors.append(_build_backup_sink_config(settings, secrets))
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        for connector in connectors:
-            await _ensure_connector(
-                client,
-                name=connector["name"],
-                config=connector["config"],
-                allow_defer=allow_defer,
-            )
-        if not offline_enabled:
-            await _delete_connector_if_exists(
-                client,
-                name=BACKUP_CONNECTOR_NAME,
-                allow_defer=allow_defer,
-            )
-
-    if offline_enabled:
-        try:
-            _write_mirror_maker_config(settings, secrets)
-            await restart_mirror_maker()
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"MirrorMaker-Konfiguration fehlgeschlagen: {exc}") from exc
-    else:
-        if MM2_CONFIG_PATH.exists():
-            try:
-                MM2_CONFIG_PATH.unlink()
-            except OSError:
-                pass
-
-    await _mark_apply_success()
+    await ops_runtime.apply_connector_config(
+        allow_defer=allow_defer,
+        ensure_offline_buffer_ready_fn=ensure_offline_buffer_ready,
+        fetch_settings_fn=fetch_settings,
+        read_secrets_file_fn=read_secrets_file,
+        ensure_mirror_db_secret_fn=_ensure_mirror_db_secret,
+        build_connector_config_fn=build_connector_config,
+        build_backup_sink_config_fn=_build_backup_sink_config,
+        default_connector_name=DEFAULT_CONNECTOR_NAME,
+        backup_connector_name=BACKUP_CONNECTOR_NAME,
+        connect_base_url=CONNECT_BASE_URL,
+        ensure_connector_fn=_ensure_connector,
+        delete_connector_if_exists_fn=_delete_connector_if_exists,
+        write_mirror_maker_config_fn=_write_mirror_maker_config,
+        restart_mirror_maker_fn=restart_mirror_maker,
+        mm2_config_path=MM2_CONFIG_PATH,
+        mark_apply_success_fn=_mark_apply_success,
+    )
 
 # --------- Views ----------
 @app.get("/", response_class=HTMLResponse)
@@ -3448,15 +2967,10 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", context)
 
 def require_admin(pw: str, *, raise_exc: bool = True) -> bool:
-    if verify_admin_password(pw):
-        return True
-    if raise_exc:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return False
+    return require_admin_password(verify_admin_password, pw, raise_exc=raise_exc)
 
 def require_session(request: Request):
-    if not request.session.get("authenticated"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_session_auth(request)
 
 
 def build_index_context(request: Request) -> dict:
@@ -3930,38 +3444,12 @@ async def _check_license_health() -> dict[str, str]:
 
 
 async def _check_connector_health() -> dict[str, str]:
-    async with httpx.AsyncClient(timeout=5) as client:
-        try:
-            overview = await client.get(f"{CONNECT_BASE_URL}/connectors")
-            if overview.status_code != 200:
-                if overview.status_code == 404:
-                    return {
-                        "status": "error",
-                        "message": "Kafka Connect REST (/connectors) antwortet mit 404 – läuft der Connect-Container?",
-                    }
-                return {
-                    "status": "error",
-                    "message": _extract_error_message(overview),
-                }
-            status_resp = await client.get(
-                f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/status"
-            )
-            if status_resp.status_code == 200:
-                data = status_resp.json()
-                state = (data.get("connector") or {}).get("state")
-                if state in {"RUNNING", "UP"}:
-                    return {"status": "ok", "message": "Connector läuft"}
-                if state:
-                    return {"status": "warn", "message": f"Zustand: {state}"}
-                return {"status": "warn", "message": "Status unbekannt"}
-            if status_resp.status_code == 404:
-                return {"status": "warn", "message": "Connector nicht angelegt"}
-            return {
-                "status": "error",
-                "message": _extract_error_message(status_resp),
-            }
-        except Exception as exc:  # noqa: BLE001
-            return {"status": "error", "message": _short_error_message(str(exc), 140)}
+    return await ops_runtime.check_connector_health(
+        connect_base_url=CONNECT_BASE_URL,
+        default_connector_name=DEFAULT_CONNECTOR_NAME,
+        extract_error_message_fn=_extract_error_message,
+        short_error_message=_short_error_message,
+    )
 
 
 # --------- Save & Apply ----------
@@ -4014,7 +3502,7 @@ async def save(
             request.session["error_message"] = "Das neue Admin-Passwort muss mindestens 8 Zeichen enthalten."
             return RedirectResponse("/", status_code=303)
         set_admin_password(new_admin_password)
-        _clear_generated_admin_password_file()
+        security_bootstrap.clear_generated_admin_password_file()
         request.session["flash_message"] = "Admin-Passwort aktualisiert."
         return RedirectResponse("/", status_code=303)
 
@@ -4653,8 +4141,16 @@ async def os_updates_apply(pw: str = Form(...)):
 
 
 def _ensure_host_agent_configured() -> None:
-    if not HOST_AGENT_URL:
-        raise HTTPException(status_code=503, detail="Host-Agent nicht konfiguriert.")
+    ops_runtime.ensure_host_agent_configured(host_agent_url=HOST_AGENT_URL)
+
+
+def _raise_http_for_agent_exception(exc: Exception, *, default_status: int = 500, max_len: int = 200) -> None:
+    ops_runtime.raise_http_for_agent_exception(
+        exc,
+        short_error_message=_short_error_message,
+        default_status=default_status,
+        max_len=max_len,
+    )
 
 
 @app.get("/api/host/status", dependencies=[Depends(require_session)])
@@ -4663,7 +4159,7 @@ async def host_status():
     try:
         return await _host_agent_request("GET", "/api/v1/status", timeout=10)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=_short_error_message(str(exc), 200))
+        _raise_http_for_agent_exception(exc, default_status=503)
 
 
 @app.post("/api/host/os-refresh", dependencies=[Depends(require_session)])
@@ -4672,7 +4168,7 @@ async def host_os_refresh():
     try:
         return await _host_agent_request("POST", "/api/v1/os/refresh", timeout=5)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 200))
+        _raise_http_for_agent_exception(exc, default_status=500)
 
 
 @app.post("/api/host/os-update", dependencies=[Depends(require_session)])
@@ -4682,7 +4178,7 @@ async def host_os_update(pw: str = Form(...)):
     try:
         return await _host_agent_request("POST", "/api/v1/os/update", timeout=5)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 200))
+        _raise_http_for_agent_exception(exc, default_status=500)
 
 
 @app.post("/api/host/reboot", dependencies=[Depends(require_session)])
@@ -4693,7 +4189,7 @@ async def host_reboot(pw: str = Form(...), delay: int = Form(HOST_REBOOT_DELAY_S
     try:
         return await _host_agent_request("POST", "/api/v1/reboot", json_payload=payload, timeout=5)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=_short_error_message(str(exc), 200))
+        _raise_http_for_agent_exception(exc, default_status=500)
 
 if __name__ == "__main__":
     import uvicorn

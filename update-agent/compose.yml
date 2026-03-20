@@ -18,8 +18,14 @@ services:
       TS_CONNECT_ACR_PASSWORD: ${TS_CONNECT_ACR_PASSWORD:-}
       TS_CONNECT_HOST_AGENT_URL: ${TS_CONNECT_HOST_AGENT_URL:-}
       TS_CONNECT_HOST_AGENT_TOKEN: ${TS_CONNECT_HOST_AGENT_TOKEN:-}
+      TS_CONNECT_LOG_DIR: ${TS_CONNECT_LOG_DIR:-/app/logs}
+      TS_CONNECT_LOG_MAX_BYTES: ${TS_CONNECT_LOG_MAX_BYTES:-5242880}
+      TS_CONNECT_LOG_BACKUP_COUNT: ${TS_CONNECT_LOG_BACKUP_COUNT:-5}
     volumes:
       - ../ui/data:/app/data
+      - type: bind
+        source: ${TS_CONNECT_LOGS_HOST:-../ui/logs}
+        target: ${TS_CONNECT_LOG_DIR:-/app/logs}
       - type: bind
         source: ${TS_CONNECT_WORKSPACE_HOST:-..}
         target: /workspace

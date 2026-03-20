@@ -121,7 +121,14 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Sessions are signed with `TS_CONNECT_UI_SESSION_SECRET`. If the variable is absent, a random value is written to `/app/data/session_secret`. Supplying your own secret in `.env` keeps logins valid across re-installs. The legacy alias `UI_SESSION_SECRET` is still accepted for compatibility.
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
 - Docker socket access moved into the dedicated `update-agent` service. The UI talks to it via `TS_CONNECT_UPDATE_AGENT_URL` (defaults to `http://update-agent:9000`) and authenticates with `TS_CONNECT_UPDATE_AGENT_TOKEN`. Leave the token empty to auto-generate a shared secret in `ui/data/update-agent.token`.
-- UI und Health schreiben Logs nach `/app/data/logs/` (u. a. `ui.log`, `health.log`); `ui.log` lässt sich direkt im UI-Bereich "System-Logs" anzeigen.
+- Operative Logs werden standardmäßig host-persistent nach `${TS_CONNECT_LOGS_HOST:-./ui/logs}` gemountet und liegen im Container unter `${TS_CONNECT_LOG_DIR:-/app/logs}`.
+- Wichtige Dateien dort:
+  - `ui.log`
+  - `health.log`
+  - `update-agent.log`
+  - `update-runner.log`
+- `ui.log` lässt sich weiterhin direkt im UI-Bereich "System-Logs" anzeigen.
+- Der Host-Agent schreibt standardmäßig nach `${TS_HOST_AGENT_LOG_DIR:-/var/lib/ts-connect-host-agent/logs}/host-agent.log`.
 - Gespeicherte Confluent-Zugangsdaten bleiben in `secrets.properties` erhalten; beim UI-/Container-Start wird die Connector-/MirrorMaker-Konfiguration automatisch erneut angewendet, sobald Lizenz und lokale Mirror-DB verfügbar sind.
 
 ### Secret Inventory

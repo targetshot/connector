@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import secrets
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+logger = logging.getLogger("ts-host-agent")
 APP = FastAPI(title="TargetShot Host Agent", version="0.1.0")
 
 
@@ -23,6 +26,11 @@ APP = FastAPI(title="TargetShot Host Agent", version="0.1.0")
 
 STATE_PATH = Path(os.getenv("TS_HOST_AGENT_STATE_PATH", "/var/lib/ts-connect-host-agent/state.json"))
 STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+HOST_LOG_DIR = Path(os.getenv("TS_HOST_AGENT_LOG_DIR", str(STATE_PATH.parent / "logs")))
+HOST_LOG_DIR.mkdir(parents=True, exist_ok=True)
+HOST_AGENT_LOG_FILE = HOST_LOG_DIR / "host-agent.log"
+HOST_AGENT_LOG_MAX_BYTES = max(int(os.getenv("TS_HOST_AGENT_LOG_MAX_BYTES", str(5 * 1024 * 1024))), 1024)
+HOST_AGENT_LOG_BACKUP_COUNT = max(int(os.getenv("TS_HOST_AGENT_LOG_BACKUP_COUNT", "5")), 1)
 
 TOKEN_FILE = Path(os.getenv("TS_HOST_AGENT_TOKEN_FILE", "/etc/ts-connect-host-agent/token"))
 
@@ -52,6 +60,31 @@ COMPOSE_TIMEOUT = int(os.getenv("TS_HOST_AGENT_COMPOSE_TIMEOUT", "120"))
 REBOOT_DELAY_SECONDS = int(os.getenv("TS_HOST_AGENT_REBOOT_DELAY", "60"))
 HOST_LOG_LIMIT = int(os.getenv("TS_HOST_AGENT_LOG_LIMIT", "400"))
 OS_PACKAGE_LIMIT = int(os.getenv("TS_HOST_AGENT_PACKAGE_LIMIT", "80"))
+
+
+def _configure_logging() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO)
+    target_path = str(HOST_AGENT_LOG_FILE.resolve())
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler) and getattr(handler, "baseFilename", "") == target_path:
+            logger.setLevel(logging.INFO)
+            return
+    file_handler = RotatingFileHandler(
+        HOST_AGENT_LOG_FILE,
+        maxBytes=HOST_AGENT_LOG_MAX_BYTES,
+        backupCount=HOST_AGENT_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.INFO)
+
+
+_configure_logging()
+logger.info("Host-Agent logging enabled at %s", HOST_AGENT_LOG_FILE)
 
 HOST_AGENT_TOKEN = os.getenv("TS_HOST_AGENT_TOKEN") or ""
 if not HOST_AGENT_TOKEN:
@@ -169,6 +202,7 @@ def _merge_state(section: str, updates: dict[str, Any], log_append: list[str] | 
 
 
 def _add_log(section: str, line: str) -> None:
+    logger.info("[%s] %s", section, line)
     _merge_state(section, {}, [line])
 
 

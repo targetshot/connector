@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shlex
 import subprocess
@@ -10,7 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from log_utils import configure_rotating_logger, env_int_first, resolve_log_dir
 from update_state import UpdateStateManager
+
+logger = logging.getLogger("ts-update-runner")
 
 
 class CommandError(RuntimeError):
@@ -36,7 +40,9 @@ def _registry_from_image(image: str | None) -> str | None:
 def _docker_login(registry: str, username: str, password: str, *, cwd: Path, manager: UpdateStateManager) -> None:
     if not registry or not username or not password:
         return
-    manager.merge(log_append=[f"Docker Login bei {registry}"], current_action="Docker Login")
+    message = f"Docker Login bei {registry}"
+    manager.merge(log_append=[message], current_action="Docker Login")
+    logger.info(message)
     cmd = ["docker", "login", registry, "-u", username, "--password-stdin"]
     result = subprocess.run(
         cmd,
@@ -54,7 +60,10 @@ def _docker_login(registry: str, username: str, password: str, *, cwd: Path, man
         lines.extend(line for line in result.stderr.splitlines() if line.strip())
     if lines:
         manager.merge(log_append=lines)
+        for line in lines:
+            logger.info(line)
     if result.returncode != 0:
+        logger.error("Docker-Login fehlgeschlagen bei %s", registry)
         raise CommandError("Docker-Login fehlgeschlagen")
 
 
@@ -85,7 +94,9 @@ def _command_env() -> dict[str, str]:
 
 
 def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> str:
-    manager.merge(log_append=[f"$ {_cmd_to_str(cmd)}"])
+    command_line = f"$ {_cmd_to_str(cmd)}"
+    manager.merge(log_append=[command_line])
+    logger.info(command_line)
     process = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -101,8 +112,10 @@ def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> s
         output_lines.append(line)
         if line:
             manager.merge(log_append=[line])
+            logger.info(line)
     return_code = process.wait()
     if return_code != 0:
+        logger.error("Befehl fehlgeschlagen (%s): %s", return_code, _cmd_to_str(cmd))
         raise CommandError(f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}")
     return "\n".join(output_lines)
 
@@ -163,6 +176,7 @@ def _wait_for_container_running_stable(
     *,
     timeout_seconds: int,
     stable_seconds: int,
+    require_healthy: bool = False,
     cwd: Path,
     manager: UpdateStateManager,
 ) -> None:
@@ -174,7 +188,8 @@ def _wait_for_container_running_stable(
         status, health = _inspect_container_details(name, cwd=cwd)
         last_status = status
         last_health = health
-        if status == "running" and health != "unhealthy":
+        healthy_enough = health == "healthy" if require_healthy and health is not None else health != "unhealthy"
+        if status == "running" and healthy_enough:
             if stable_since is None:
                 stable_since = time.monotonic()
             elif time.monotonic() - stable_since >= stable_seconds:
@@ -191,6 +206,84 @@ def _wait_for_container_running_stable(
         details.append(f"health={last_health}")
     suffix = ", ".join(details) if details else "nicht gefunden"
     raise CommandError(f"Container {name} wurde nach {timeout_seconds}s nicht stabil laufend ({suffix})")
+
+
+def _mirror_maker_config_active(data_dir: Path) -> bool:
+    path = data_dir / "mm2.properties"
+    if not path.exists():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("remote.bootstrap.servers"):
+            _key, _sep, value = stripped.partition("=")
+            return bool(value.strip())
+    return False
+
+
+def _tail_container_logs(name: str, *, cwd: Path, tail_lines: int = 40) -> list[str]:
+    result = subprocess.run(
+        ["docker", "logs", "--tail", str(tail_lines), name],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        env=_command_env(),
+        check=False,
+    )
+    lines: list[str] = []
+    for source in (result.stdout, result.stderr):
+        if not source:
+            continue
+        lines.extend(line.rstrip() for line in source.splitlines() if line.strip())
+    return lines[-tail_lines:]
+
+
+def _stabilize_mirror_maker_after_update(
+    compose_cmd: list[str],
+    *,
+    workspace: Path,
+    data_dir: Path,
+    manager: UpdateStateManager,
+) -> None:
+    if not _mirror_maker_config_active(data_dir):
+        manager.merge(log_append=["Überspringe MirrorMaker-Stabilisierung: keine aktive MM2-Konfiguration erkannt."])
+        return
+
+    attempts = (
+        "Starte MirrorMaker nach den Kern-Healthchecks gezielt neu.",
+        "Erster MirrorMaker-Start blieb instabil. Ein einmaliger Wiederherstellungsversuch wird ausgeführt.",
+    )
+    last_error: CommandError | None = None
+
+    for message in attempts:
+        manager.merge(log_append=[message], current_action="MirrorMaker stabilisieren")
+        _run_command(compose_cmd + ["up", "-d", "--force-recreate", "mirror-maker"], cwd=workspace, manager=manager)
+        try:
+            _wait_for_container_running_stable(
+                "ts-mirror-maker",
+                timeout_seconds=180,
+                stable_seconds=20,
+                require_healthy=True,
+                cwd=workspace,
+                manager=manager,
+            )
+            return
+        except CommandError as exc:
+            last_error = exc
+            log_lines = _tail_container_logs("ts-mirror-maker", cwd=workspace)
+            if log_lines:
+                manager.merge(
+                    log_append=["MirrorMaker Diagnose (letzte Logzeilen):", *log_lines],
+                    current_action="MirrorMaker Diagnose",
+                )
+
+    message = str(last_error) if last_error else "MirrorMaker Stabilisierung nach Update fehlgeschlagen"
+    raise CommandError(f"MirrorMaker Stabilisierung nach Update fehlgeschlagen: {message}")
 
 
 def _ensure_workspace(workspace: Path) -> None:
@@ -296,6 +389,24 @@ def run_update() -> int:
     args = _parse_args()
     workspace = Path(args.workspace).resolve()
     data_dir = Path(args.data_dir).resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = resolve_log_dir(data_dir=data_dir)
+    update_runner_log_file = log_dir / "update-runner.log"
+    log_max_bytes = max(
+        env_int_first(("TS_CONNECT_LOG_MAX_BYTES", "TS_CONNECT_UI_LOG_MAX_BYTES"), 5 * 1024 * 1024),
+        1024,
+    )
+    log_backup_count = max(
+        env_int_first(("TS_CONNECT_LOG_BACKUP_COUNT", "TS_CONNECT_UI_LOG_BACKUP_COUNT"), 5),
+        1,
+    )
+    configure_rotating_logger(
+        logger,
+        update_runner_log_file,
+        max_bytes=log_max_bytes,
+        backup_count=log_backup_count,
+        level=logging.INFO,
+    )
     compose_env = None
     candidates: list[str] = []
     if args.compose_env:
@@ -312,6 +423,7 @@ def run_update() -> int:
     manager = UpdateStateManager(data_dir / "update_state.json")
     manager.ensure()
     start_ts = _now_iso()
+    logger.info("Update-Runner gestartet um %s", start_ts)
     manager.merge(
         status="running",
         update_in_progress=True,
@@ -400,15 +512,15 @@ def run_update() -> int:
             cwd=workspace,
             manager=manager,
         )
-        _wait_for_container_running_stable(
-            "ts-mirror-maker",
-            timeout_seconds=150,
-            stable_seconds=12,
-            cwd=workspace,
+        _stabilize_mirror_maker_after_update(
+            compose_cmd,
+            workspace=workspace,
+            data_dir=data_dir,
             manager=manager,
         )
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
+        logger.exception("Update-Runner fehlgeschlagen: %s", message)
         manager.merge(
             status="error",
             update_in_progress=False,
@@ -418,6 +530,7 @@ def run_update() -> int:
         )
         return 1
     success_ts = _now_iso()
+    logger.info("Update-Runner erfolgreich abgeschlossen um %s", success_ts)
     manager.merge(
         status="idle",
         update_in_progress=False,

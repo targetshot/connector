@@ -644,7 +644,7 @@
               <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 class="brand-sub text-xl font-semibold text-zinc-800 dark:text-zinc-100">System-Logs</h2>
-                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zeigt die letzten Zeilen aus <code>/app/data/logs/ui.log</code>.</p>
+                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">Zeigt die letzten Zeilen aus <code>/app/logs/ui.log</code>.</p>
                 </div>
                 <div class="flex items-center gap-3">
                   <button type="button" id="btnRefreshUiLog" class="btn-secondary">Log aktualisieren</button>
@@ -1436,16 +1436,23 @@
       }
     }
 
-    function setUpdateBadge(state, currentAction, lastError) {
+    function setUpdateBadge(state, currentAction, lastError, agentStatus) {
       if (!updateStatusBadge) return;
       let cls = 'badge ';
       let label = 'Status';
-      if (state === 'running') {
+      const agentUnavailable = agentStatus && agentStatus.available === false;
+      if (agentUnavailable) {
+        cls += 'warn';
+        label = 'Offline';
+      } else if (state === 'running') {
         cls += 'warn';
         label = 'Aktiv';
       } else if (state === 'error') {
         cls += 'warn';
         label = 'Fehler';
+      } else if (state === 'degraded') {
+        cls += 'warn';
+        label = 'Degradiert';
       } else if (state === 'idle') {
         cls += 'ok';
         label = 'Bereit';
@@ -1458,10 +1465,14 @@
       if (updateStatusText) {
         let message = currentAction;
         if (!message) {
-          if (state === 'error') {
+          if (agentUnavailable) {
+            message = agentStatus.error || 'Update-Agent nicht erreichbar';
+          } else if (state === 'error') {
             message = lastError || 'Update fehlgeschlagen';
           } else if (state === 'running') {
             message = 'Update läuft…';
+          } else if (state === 'degraded') {
+            message = lastError || 'Update-Funktionen sind derzeit nur teilweise verfügbar';
           } else if (state === 'idle') {
             message = 'Bereit';
           } else {
@@ -1481,8 +1492,9 @@
       }
       const missing = [];
       if (!prereq.git) missing.push('git');
-      if (!prereq.update_agent) missing.push('Update-Agent');
+      if (!prereq.update_agent) missing.push(`Update-Agent${prereq.update_agent_error ? ` (${prereq.update_agent_error})` : ''}`);
       if (!prereq.workspace) missing.push('Workspace-Mount');
+      if (prereq.host_agent === false) missing.push(`Host-Agent${prereq.host_agent_error ? ` (${prereq.host_agent_error})` : ''}`);
       updatePrereqHint.className = 'text-xs text-amber-600 dark:text-amber-300';
       updatePrereqHint.textContent = 'Voraussetzungen fehlen: ' + missing.join(', ');
     }
@@ -1624,7 +1636,7 @@
         const lines = Array.isArray(data.lines) ? data.lines : [];
         const updatedAt = data.updated_at ? formatIso(data.updated_at) : '–';
         if (uiLogMeta) {
-          const path = data.path || '/app/data/logs/ui.log';
+          const path = data.path || '/app/logs/ui.log';
           uiLogMeta.textContent = `${path} · Letzte Aktualisierung: ${updatedAt}`;
         }
         uiLogContent.textContent = lines.length ? lines.join('\n') : 'Noch keine Logeinträge.';
@@ -1901,7 +1913,7 @@
           const detail = data.detail || response.statusText || response.status;
           throw new Error(String(detail));
         }
-        setUpdateBadge(data.status, data.current_action, data.last_error);
+        setUpdateBadge(data.status, data.current_action, data.last_error, data.update_agent);
         if (btnCheckUpdate) {
           btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
         }
