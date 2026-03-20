@@ -385,6 +385,46 @@ def _compose_base(compose_env: str | None) -> list[str]:
     return base
 
 
+def _parse_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return values
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _require_host_workspace_path(*, workspace: Path, compose_env: str | None) -> Path | None:
+    if workspace != Path("/workspace"):
+        return None
+    if not compose_env:
+        raise RuntimeError(
+            "TS_CONNECT_WORKSPACE_HOST fehlt. Setze in .env einen absoluten Host-Pfad wie /opt/ts-connect, "
+            "damit In-App-Updates Docker-Bind-Mounts korrekt auflösen."
+        )
+    env_path = workspace / compose_env
+    env_values = _parse_env_file(env_path)
+    raw_value = env_values.get("TS_CONNECT_WORKSPACE_HOST", "").strip()
+    if not raw_value:
+        raise RuntimeError(
+            "TS_CONNECT_WORKSPACE_HOST fehlt in .env. Setze einen absoluten Host-Pfad wie /opt/ts-connect, "
+            "damit In-App-Updates Docker-Bind-Mounts korrekt auflösen."
+        )
+    host_path = Path(raw_value)
+    if not host_path.is_absolute():
+        raise RuntimeError(
+            f"TS_CONNECT_WORKSPACE_HOST muss absolut sein (aktueller Wert: {raw_value}). "
+            "Beispiel: /opt/ts-connect"
+        )
+    return host_path
+
+
 def run_update() -> int:
     args = _parse_args()
     workspace = Path(args.workspace).resolve()
@@ -470,6 +510,7 @@ def run_update() -> int:
         else:
             manager.merge(log_append=["Lade Container-Images"], current_action="docker compose pull")
         compose_cmd = _compose_base(compose_env)
+        _require_host_workspace_path(workspace=workspace, compose_env=compose_env)
         if not prefer_local_build:
             registry = os.getenv("TS_CONNECT_ACR_REGISTRY") or _registry_from_image(os.getenv("TS_CONNECT_UI_IMAGE"))
             username = os.getenv("TS_CONNECT_ACR_USERNAME", "").strip()

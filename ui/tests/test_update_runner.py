@@ -29,6 +29,18 @@ class _DummyManager:
 
 
 class UpdateRunnerHelpersTest(unittest.TestCase):
+    def test_require_host_workspace_path_requires_absolute_host_override_for_container_runner(self):
+        namespace = {"Path": pathlib.Path}
+        _load_functions(["_parse_env_file", "_require_host_workspace_path"], namespace)
+
+        namespace["_parse_env_file"] = lambda path: {}
+        with self.assertRaisesRegex(RuntimeError, "TS_CONNECT_WORKSPACE_HOST fehlt"):
+            namespace["_require_host_workspace_path"](workspace=pathlib.Path("/workspace"), compose_env=".env")
+
+        namespace["_parse_env_file"] = lambda path: {"TS_CONNECT_WORKSPACE_HOST": "relative/path"}
+        with self.assertRaisesRegex(RuntimeError, "muss absolut sein"):
+            namespace["_require_host_workspace_path"](workspace=pathlib.Path("/workspace"), compose_env=".env")
+
     def test_mirror_maker_config_active_requires_remote_bootstrap_servers(self):
         namespace = {"Path": pathlib.Path}
         _load_functions(["_mirror_maker_config_active"], namespace)

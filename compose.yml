@@ -15,7 +15,7 @@ services:
       - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
     restart: unless-stopped
     volumes:
-      - ./ui/data/redpanda:/var/lib/redpanda/data
+      - ${TS_CONNECT_WORKSPACE_HOST:-.}/ui/data/redpanda:/var/lib/redpanda/data
     ports:
       - "9092:9092"  # optional für Debug von außen
 
@@ -70,8 +70,8 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     volumes:
-      - ./ui/data/mariadb:/var/lib/mysql
-      - ./mariadb/init:/docker-entrypoint-initdb.d:ro
+      - ${TS_CONNECT_WORKSPACE_HOST:-.}/ui/data/mariadb:/var/lib/mysql
+      - ${TS_CONNECT_WORKSPACE_HOST:-.}/mariadb/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "${TS_CONNECT_MIRROR_PORT:-3307}:3306"
     healthcheck:
@@ -121,7 +121,7 @@ services:
       CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
       CONNECT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
     volumes:
-      - ./ui/data:/app/data   # Connect liest hier die secrets.properties
+      - ${TS_CONNECT_WORKSPACE_HOST:-.}/ui/data:/app/data   # Connect liest hier die secrets.properties
     depends_on:
       redpanda:
         condition: service_started
@@ -167,7 +167,7 @@ services:
           sleep 10
         done
     volumes:
-      - ./ui/data:/app/data
+      - ${TS_CONNECT_WORKSPACE_HOST:-.}/ui/data:/app/data
     depends_on:
       - redpanda
     healthcheck:
@@ -205,7 +205,7 @@ services:
       POSTGRES_USER: ${TS_CONNECT_BACKUP_USER:-targetshot}
       POSTGRES_PASSWORD: ${TS_CONNECT_BACKUP_PASSWORD:-targetshot}
     volumes:
-      - ./ui/data/backup-db:/var/lib/postgresql/data
+      - ${TS_CONNECT_WORKSPACE_HOST:-.}/ui/data/backup-db:/var/lib/postgresql/data
     ports:
       - "${TS_CONNECT_BACKUP_PORT:-5432}:5432"
 
@@ -259,9 +259,9 @@ services:
     depends_on:
       - kafka-connect
     volumes:
-      - ./ui/data:/app/data
+      - ${TS_CONNECT_WORKSPACE_HOST:-.}/ui/data:/app/data
       - type: bind
-        source: ${TS_CONNECT_LOGS_HOST:-./ui/logs}
+        source: ${TS_CONNECT_WORKSPACE_HOST:-.}/ui/logs
         target: ${TS_CONNECT_LOG_DIR:-/app/logs}
       - type: bind
         source: ${TS_CONNECT_WORKSPACE_HOST:-.}
