@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import os
 import shlex
@@ -94,6 +95,40 @@ def _command_env() -> dict[str, str]:
     return env
 
 
+def _origin_remote_url(workspace: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=str(workspace),
+        text=True,
+        capture_output=True,
+        env=_command_env(),
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _github_auth_git_prefix(workspace: Path) -> list[str]:
+    token = (os.getenv("TS_CONNECT_GITHUB_TOKEN") or "").strip()
+    if not token:
+        return ["git"]
+    remote = _origin_remote_url(workspace)
+    slug = _parse_repo_slug(remote or "")
+    if not slug:
+        return ["git"]
+    remote_lc = (remote or "").lower()
+    if "github.com" not in remote_lc:
+        return ["git"]
+    basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    return [
+        "git",
+        "-c",
+        f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}",
+    ]
+
+
 def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> str:
     command_line = f"$ {_cmd_to_str(cmd)}"
     manager.merge(log_append=[command_line])
@@ -116,12 +151,20 @@ def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> s
             logger.info(format_operation_message(line, operation_id=UPDATE_OPERATION_ID))
     return_code = process.wait()
     if return_code != 0:
+        detail = ""
+        for line in reversed(output_lines):
+            stripped = line.strip()
+            if stripped:
+                detail = stripped
+                break
         logger.error(
             format_operation_message(
                 f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}",
                 operation_id=UPDATE_OPERATION_ID,
             )
         )
+        if detail:
+            raise CommandError(f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)} | {detail}")
         raise CommandError(f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}")
     return "\n".join(output_lines)
 
@@ -493,7 +536,8 @@ def run_update() -> int:
         _ensure_clean_repo(workspace, manager)
         _ensure_https_remote(workspace, manager)
         manager.merge(log_append=["Hole Git-Updates"], current_action="Git fetch")
-        _run_command(["git", "fetch", "--all", "--tags", "--prune"], cwd=workspace, manager=manager)
+        git_cmd = _github_auth_git_prefix(workspace)
+        _run_command(git_cmd + ["fetch", "--all", "--tags", "--prune"], cwd=workspace, manager=manager)
         target_ref = args.ref
         if target_ref:
             manager.merge(log_append=[f"Wechsle auf {target_ref}"], current_action=f"Checkout {target_ref}")
@@ -506,7 +550,7 @@ def run_update() -> int:
             branch = _detect_branch(workspace) or "main"
             manager.merge(log_append=[f"Aktualisiere Branch {branch}"], current_action=f"Pull {branch}", update_target=branch)
             _run_command(["git", "checkout", branch], cwd=workspace, manager=manager)
-            _run_command(["git", "pull", "--ff-only", "origin", branch], cwd=workspace, manager=manager)
+            _run_command(git_cmd + ["pull", "--ff-only", "origin", branch], cwd=workspace, manager=manager)
         commit = _current_commit(workspace)
         if commit:
             manager.merge(log_append=[f"Neuer Commit: {commit}"])

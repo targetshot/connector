@@ -65,10 +65,7 @@ from licenses import (
     DEFAULT_RETENTION_DAYS,
     LICENSE_RETENTION_DAYS,
     normalize_license_tier,
-    plan_allows_shooter_count,
     plan_display_name,
-    plan_limit_label,
-    required_plan_for_shooter_count,
     retention_for_license,
 )
 from host_agent_utils import get_host_agent_token
@@ -558,19 +555,33 @@ def _keygen_license_entitled(validation: dict[str, Any]) -> bool:
     return _normalize_provider_status(validation.get("status")) in KEYGEN_ACTIVATABLE_STATUSES
 
 
+def _build_keygen_machine_headers(license_key: str, *, include_content_type: bool = False) -> dict[str, str]:
+    headers = {"Accept": "application/vnd.api+json"}
+    if include_content_type:
+        headers["Content-Type"] = "application/vnd.api+json"
+    token = (KEYGEN_LICENSE_TOKEN or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        return headers
+    key = (license_key or "").strip()
+    if not key:
+        raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
+    headers["Authorization"] = f"License {key}"
+    return headers
+
+
 async def _find_keygen_machine(
     license_key: str,
     fingerprints: list[str],
 ) -> dict[str, Any] | None:
     if not KEYGEN_BASE_URL:
         return None
-    headers = {
-        "Accept": "application/vnd.api+json",
-        "Authorization": f"License {license_key}",
-    }
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(f"{KEYGEN_BASE_URL}/machines?page[size]=100", headers=headers)
+            response = await client.get(
+                f"{KEYGEN_BASE_URL}/machines?page[size]=100",
+                headers=_build_keygen_machine_headers(license_key),
+            )
     except httpx.RequestError:
         return None
     if response.status_code >= 400:
@@ -1416,54 +1427,7 @@ def _build_keygen_validate_meta(license_key: str, *, include_machine_scope: bool
     return meta
 
 
-def _build_keygen_license_headers(license_key: str) -> dict[str, str]:
-    key = (license_key or "").strip()
-    if not key:
-        raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
-    return {
-        "Accept": "application/vnd.api+json",
-        "Authorization": f"License {key}",
-    }
-
-
-async def _lookup_keygen_license_by_key(license_key: str) -> dict[str, Any] | None:
-    key = (license_key or "").strip()
-    if not key:
-        raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
-    if not KEYGEN_BASE_URL:
-        raise RuntimeError("Keygen ist nicht konfiguriert.")
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(
-                f"{KEYGEN_BASE_URL}/licenses/me",
-                headers=_build_keygen_license_headers(key),
-            )
-    except httpx.RequestError as exc:  # noqa: BLE001
-        raise RuntimeError(f"Lizenzserver nicht erreichbar: {exc}") from exc
-    if response.status_code in {404, 405}:
-        return None
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Lizenzprüfung fehlgeschlagen ({response.status_code}): {_extract_error_message(response)}"
-        )
-    try:
-        data = response.json()
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Lizenzserver lieferte eine ungültige Antwort.") from exc
-    parsed = _parse_keygen_license_validation_payload(data if isinstance(data, dict) else {})
-    if not parsed.get("message") and isinstance(data, dict):
-        parsed["message"] = _extract_keygen_message(data, data.get("meta") if isinstance(data.get("meta"), dict) else {})
-    if parsed.get("message"):
-        parsed["error"] = parsed["message"]
-    return parsed
-
-
 async def validate_license_key_remote(license_key: str, *, include_machine_scope: bool = True) -> dict[str, Any]:
-    key = (license_key or "").strip()
-    if not include_machine_scope:
-        direct_lookup = await _lookup_keygen_license_by_key(key)
-        if direct_lookup is not None:
-            return direct_lookup
     meta = _build_keygen_validate_meta(license_key, include_machine_scope=include_machine_scope)
     fingerprints = _resolve_machine_fingerprint_scope() if include_machine_scope else []
     try:
@@ -1530,11 +1494,7 @@ async def activate_license_key_remote(
     fingerprint = _resolve_machine_fingerprint()
     fingerprints = _resolve_machine_fingerprint_scope()
     machine_name = _resolve_machine_name(fallback=instance_name or instance_id)
-    headers = {
-        "Accept": "application/vnd.api+json",
-        "Content-Type": "application/vnd.api+json",
-        "Authorization": f"License {key}",
-    }
+    headers = _build_keygen_machine_headers(key, include_content_type=True)
     payload = {
         "data": {
             "type": "machines",
@@ -1567,6 +1527,11 @@ async def activate_license_key_remote(
         raise RuntimeError(f"Lizenzaktivierung fehlgeschlagen: {exc}") from exc
     if response.status_code >= 400:
         detail = _extract_error_message(response)
+        if "License key authentication is not allowed by policy" in detail and not KEYGEN_LICENSE_TOKEN:
+            detail = (
+                f"{detail} | Hinterlege TS_CONNECT_KEYGEN_LICENSE_TOKEN oder "
+                "erlaube Lizenzschlüssel-Authentifizierung in der Keygen-Policy."
+            )
         machine = await _find_keygen_machine(key, fingerprints)
         if not machine:
             raise RuntimeError(
@@ -3707,20 +3672,6 @@ def build_index_context(request: Request) -> dict:
     verein_identifier = str(data.get("topic_prefix") or data.get("server_id") or "").strip()
     data["verein_id"] = verein_identifier
 
-    shooter_stats = _collect_shooter_stats_sync(data, secrets_data)
-    shooter_count = shooter_stats.get("count")
-    required_plan = required_plan_for_shooter_count(shooter_count)
-    plan_ok = plan_allows_shooter_count(license_info["plan"], shooter_count)
-    license_info.update(
-        {
-            "shooter_stats": shooter_stats,
-            "shooter_plan_ok": plan_ok,
-            "shooter_required_plan": required_plan,
-            "shooter_required_plan_label": plan_display_name(required_plan) if required_plan else None,
-            "shooter_limit_label": plan_limit_label(license_info["plan"]),
-        }
-    )
-
     return {
         "request": request,
         "data": data,
@@ -4248,24 +4199,6 @@ async def save(
         if license_key_value != current_license:
             new_activation_id = ""
             new_activation_at = None
-
-        shooter_stats = await asyncio.to_thread(_collect_shooter_stats_sync, settings, secrets_data)
-        shooter_error = shooter_stats.get("error")
-        shooter_count = shooter_stats.get("count")
-        if shooter_error and shooter_count is None:
-            _set_license_form_key(request, license_key_value)
-            request.session["error_message"] = f"Schützenprüfung fehlgeschlagen: {shooter_error}"
-            return RedirectResponse("/", status_code=303)
-        if shooter_count is not None and not plan_allows_shooter_count(plan, shooter_count):
-            required_plan = required_plan_for_shooter_count(shooter_count)
-            required_label = plan_display_name(required_plan)
-            limit_label = plan_limit_label(plan)
-            _set_license_form_key(request, license_key_value)
-            request.session["error_message"] = (
-                f"Plan {plan.capitalize()} reicht nicht aus (Limit: {limit_label}). "
-                f"Für {shooter_count} Schützen wird mindestens der Plan {required_label} benötigt."
-            )
-            return RedirectResponse("/", status_code=303)
 
         activation_feedback: dict[str, Any] | None = None
         activation_error: str | None = None

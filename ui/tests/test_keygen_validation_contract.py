@@ -4,6 +4,7 @@ import unittest
 
 
 APP_SOURCE = pathlib.Path(__file__).resolve().parents[1] / "app.py"
+APP_TEXT = APP_SOURCE.read_text(encoding="utf-8")
 
 
 def _load_items(names: list[str], namespace: dict) -> None:
@@ -32,6 +33,18 @@ class KeygenValidationContractTest(unittest.TestCase):
 
         self.assertEqual(meta["key"], "KEY-123")
         self.assertEqual(meta["scope"], {"policy": "policy-123"})
+
+    def test_validate_license_key_remote_does_not_use_license_auth_lookup_for_web_save(self):
+        module = ast.parse(APP_TEXT)
+        validate_node = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "validate_license_key_remote"
+        )
+        validate_source = ast.get_source_segment(APP_TEXT, validate_node) or ""
+
+        self.assertNotIn("_lookup_keygen_license_by_key", validate_source)
+        self.assertNotIn("licenses/me", validate_source)
 
     def test_parse_keygen_payload_keeps_club_plus_for_unactivated_machine_state(self):
         namespace = {

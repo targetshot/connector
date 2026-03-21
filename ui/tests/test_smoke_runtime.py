@@ -18,6 +18,7 @@ from ui.security_bootstrap import UiSecurityBootstrap
 
 APP_SOURCE = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 OPS_SOURCE = pathlib.Path(__file__).resolve().parents[1] / "operations_runtime.py"
+TEMPLATE_SOURCE = pathlib.Path(__file__).resolve().parents[1] / "templates" / "index.html"
 
 
 def _load_items(names: list[str], namespace: dict) -> None:
@@ -47,6 +48,35 @@ def _load_ops_items(names: list[str], namespace: dict) -> None:
 
 
 class TsConnectRuntimeSmokeTest(unittest.TestCase):
+    def test_license_template_no_longer_shows_shooter_or_plan_coverage_blocks(self):
+        template = TEMPLATE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertNotIn("Vereins-Schützen", template)
+        self.assertNotIn("Planabdeckung", template)
+        self.assertNotIn("Planlimit", template)
+
+    def test_build_keygen_machine_headers_prefers_bearer_token_when_present(self):
+        namespace = {
+            "KEYGEN_LICENSE_TOKEN": "token-123",
+        }
+        _load_items(["_build_keygen_machine_headers"], namespace)
+
+        headers = namespace["_build_keygen_machine_headers"]("LIC-123", include_content_type=True)
+
+        self.assertEqual(headers["Authorization"], "Bearer token-123")
+        self.assertEqual(headers["Content-Type"], "application/vnd.api+json")
+
+    def test_build_keygen_machine_headers_falls_back_to_license_auth(self):
+        namespace = {
+            "KEYGEN_LICENSE_TOKEN": "",
+        }
+        _load_items(["_build_keygen_machine_headers"], namespace)
+
+        headers = namespace["_build_keygen_machine_headers"]("LIC-123")
+
+        self.assertEqual(headers["Authorization"], "License LIC-123")
+        self.assertNotIn("Content-Type", headers)
+
     def test_parse_trusted_networks_skips_invalid_and_keeps_loopback(self):
         namespace = {"ipaddress": __import__("ipaddress")}
         _load_items(["_parse_trusted_networks"], namespace)

@@ -212,7 +212,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
   - `TS_CONNECT_KEYGEN_API_URL`: optionaler Override für die Keygen-API-URL.
   - `TS_CONNECT_KEYGEN_POLICY_ID`: Policy-ID der Club-Plus-Lizenz.
   - `TS_CONNECT_KEYGEN_POLICY_NAME`: Anzeigename der Policy (optional, Standard: `Club Plus`).
-  - `TS_CONNECT_KEYGEN_LICENSE_TOKEN`: optionaler Keygen-Token. Für die Aktivierung reicht in der Regel die Lizenzschlüssel-Authentifizierung.
+  - `TS_CONNECT_KEYGEN_LICENSE_TOKEN`: optionaler Keygen-Token. Wenn die Keygen-Policy Lizenzschlüssel-Authentifizierung für Maschinenzugriffe verbietet, nutzt `ts-connect` diesen Token für Aktivierung und Maschinenabgleich.
   - `TS_CONNECT_KEYGEN_MACHINE_NAME`: optionaler Anzeigename der Maschine.
   - `TS_CONNECT_KEYGEN_MACHINE_FINGERPRINT`: optionaler fester Fingerprint. Ohne Override wird ein stabiler Fingerprint lokal erzeugt und unter `/app/data/machine_fingerprint` gespeichert.
   - `TS_CONNECT_KEYGEN_AUTO_ACTIVATE`: aktiviert die Maschine nach erfolgreicher Prüfung (Standard: `true`).

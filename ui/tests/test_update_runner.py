@@ -1,5 +1,7 @@
 import ast
+import base64
 import pathlib
+import subprocess
 import tempfile
 import types
 import unittest
@@ -29,6 +31,76 @@ class _DummyManager:
 
 
 class UpdateRunnerHelpersTest(unittest.TestCase):
+    def test_github_auth_git_prefix_uses_token_for_github_origin(self):
+        namespace = {
+            "os": types.SimpleNamespace(getenv=lambda name: "ghp_test_token" if name == "TS_CONNECT_GITHUB_TOKEN" else None),
+            "base64": base64,
+            "Path": pathlib.Path,
+            "subprocess": subprocess,
+        }
+        _load_functions(["_command_env", "_parse_repo_slug", "_origin_remote_url", "_github_auth_git_prefix"], namespace)
+
+        namespace["_origin_remote_url"] = lambda workspace: "https://github.com/targetshot/connector.git"
+
+        prefix = namespace["_github_auth_git_prefix"](pathlib.Path("/workspace"))
+
+        self.assertEqual(prefix[0], "git")
+        self.assertEqual(prefix[1:3], ["-c", prefix[2]])
+        self.assertIn("http.https://github.com/.extraheader=AUTHORIZATION: basic ", prefix[2])
+
+    def test_github_auth_git_prefix_skips_non_github_or_missing_token(self):
+        namespace = {
+            "os": types.SimpleNamespace(getenv=lambda name: ""),
+            "base64": base64,
+            "Path": pathlib.Path,
+            "subprocess": subprocess,
+        }
+        _load_functions(["_command_env", "_parse_repo_slug", "_origin_remote_url", "_github_auth_git_prefix"], namespace)
+
+        namespace["_origin_remote_url"] = lambda workspace: "https://gitlab.example.com/targetshot/connector.git"
+
+        prefix = namespace["_github_auth_git_prefix"](pathlib.Path("/workspace"))
+
+        self.assertEqual(prefix, ["git"])
+
+    def test_run_command_includes_last_output_line_in_error(self):
+        class FakeStdout:
+            def __init__(self, lines: list[str]) -> None:
+                self._lines = iter(lines)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._lines)
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdout = FakeStdout(["fatal: Authentication failed\n"])
+
+            def wait(self):
+                return 1
+
+        class CommandError(RuntimeError):
+            pass
+
+        namespace = {
+            "os": __import__("os"),
+            "shlex": __import__("shlex"),
+            "subprocess": mock.Mock(Popen=lambda *args, **kwargs: FakeProcess()),
+            "Path": pathlib.Path,
+            "UpdateStateManager": object,
+            "CommandError": CommandError,
+            "format_operation_message": lambda message, operation_id=None: message,
+            "logger": mock.Mock(),
+            "UPDATE_OPERATION_ID": None,
+            "_cmd_to_str": lambda cmd: " ".join(cmd),
+        }
+        _load_functions(["_command_env", "_run_command"], namespace)
+
+        with self.assertRaisesRegex(CommandError, "Authentication failed"):
+            namespace["_run_command"](["git", "fetch"], cwd=pathlib.Path("/workspace"), manager=_DummyManager())
+
     def test_require_host_workspace_path_requires_absolute_host_override_for_container_runner(self):
         namespace = {"Path": pathlib.Path}
         _load_functions(["_parse_env_file", "_require_host_workspace_path"], namespace)
