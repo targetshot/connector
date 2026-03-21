@@ -144,12 +144,15 @@ async def read_update_agent_status(
     try:
         result = await update_agent_request_fn("GET", "/api/v1/status", timeout=timeout)
     except AgentRequestError as exc:
+        status_code = agent_error_status(exc)
+        auth_error = status_code in {401, 403}
         return {
-            "available": False,
+            "available": not exc.unavailable,
             "running": False,
             "job_id": None,
             "error": short_error_message(str(exc), 180),
-            "status_code": agent_error_status(exc),
+            "status_code": status_code,
+            "auth_error": auth_error,
         }
     except Exception as exc:  # noqa: BLE001
         return {
@@ -158,6 +161,7 @@ async def read_update_agent_status(
             "job_id": None,
             "error": short_error_message(str(exc), 180),
             "status_code": 503,
+            "auth_error": False,
         }
     payload = result if isinstance(result, dict) else {}
     return {
@@ -166,6 +170,7 @@ async def read_update_agent_status(
         "job_id": payload.get("job_id"),
         "error": None,
         "status_code": 200,
+        "auth_error": False,
     }
 
 

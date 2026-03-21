@@ -763,12 +763,21 @@ def _classify_recovery_issue(
     text = str(message or "").strip()
     lower = text.lower()
     agent_unavailable = bool(update_agent and update_agent.get("available") is False)
-    if not text and not agent_unavailable:
+    agent_auth_error = bool(update_agent and update_agent.get("auth_error"))
+    if not text and not agent_unavailable and not agent_auth_error:
         return {
             "category": None,
             "label": None,
             "hint": None,
             "next_step": None,
+            "operation_id": operation_id,
+        }
+    if agent_auth_error or ("update-agent" in lower and ("401" in lower or "403" in lower or "unauthorized" in lower)):
+        return {
+            "category": "update-agent-auth",
+            "label": "Update-Agent Auth-Fehler",
+            "hint": "Update-Agent-Token zwischen UI und Update-Agent abgleichen.",
+            "next_step": "TS_CONNECT_UPDATE_AGENT_TOKEN prüfen oder die gemeinsame Token-Datei neu synchronisieren und danach den Update-Status neu laden.",
             "operation_id": operation_id,
         }
     if agent_unavailable or ("update-agent" in lower and "nicht erreichbar" in lower):
@@ -1073,8 +1082,15 @@ def _mirror_dump_candidates() -> list[tuple[str, str]]:
     return candidates
 
 
-def _build_mirror_dump_command(dump_user: str, dump_password: str) -> list[str]:
-    return [
+def _build_mirror_dump_command(
+    dump_user: str,
+    dump_password: str,
+    *,
+    include_routines: bool = True,
+    include_events: bool = True,
+    include_triggers: bool = True,
+) -> list[str]:
+    command = [
         "docker",
         "exec",
         "-e",
@@ -1085,18 +1101,71 @@ def _build_mirror_dump_command(dump_user: str, dump_password: str) -> list[str]:
         f"-u{dump_user}",
         "--single-transaction",
         "--quick",
-        "--routines",
-        "--events",
-        "--triggers",
         "--hex-blob",
         "--default-character-set=utf8mb4",
         "--databases",
         DEFAULT_MIRROR_DB_NAME,
     ]
+    if include_routines:
+        command.insert(-4, "--routines")
+    if include_events:
+        command.insert(-4, "--events")
+    if include_triggers:
+        command.insert(-4, "--triggers")
+    return command
 
 
-def _write_mirror_dump_temp_sync(temp_path: Path, *, dump_user: str, dump_password: str) -> int:
-    command = _build_mirror_dump_command(dump_user, dump_password)
+def _mirror_dump_variants(dump_user: str) -> list[dict[str, Any]]:
+    variants = [
+        {
+            "label": "full",
+            "include_routines": True,
+            "include_events": True,
+            "include_triggers": True,
+        }
+    ]
+    if dump_user != "root":
+        variants.extend(
+            [
+                {
+                    "label": "without-events",
+                    "include_routines": True,
+                    "include_events": False,
+                    "include_triggers": True,
+                },
+                {
+                    "label": "without-events-routines",
+                    "include_routines": False,
+                    "include_events": False,
+                    "include_triggers": True,
+                },
+                {
+                    "label": "tables-only",
+                    "include_routines": False,
+                    "include_events": False,
+                    "include_triggers": False,
+                },
+            ]
+        )
+    return variants
+
+
+def _write_mirror_dump_temp_sync(
+    temp_path: Path,
+    *,
+    dump_user: str,
+    dump_password: str,
+    include_routines: bool = True,
+    include_events: bool = True,
+    include_triggers: bool = True,
+) -> int:
+    command = _build_mirror_dump_command(
+        dump_user,
+        dump_password,
+        include_routines=include_routines,
+        include_events=include_events,
+        include_triggers=include_triggers,
+    )
     stderr_output = ""
     try:
         with temp_path.open("wb") as raw_handle:
@@ -1147,19 +1216,34 @@ def _create_mirror_backup_sync(target_path: Path) -> int:
     temp_path = _tmp_path_for(target_path)
     errors: list[str] = []
     for dump_user, dump_password in _mirror_dump_candidates():
-        try:
-            file_size = _write_mirror_dump_temp_sync(
-                temp_path,
-                dump_user=dump_user,
-                dump_password=dump_password,
-            )
-            temp_path.replace(target_path)
-            _fsync_directory(target_path.parent)
-            return file_size
-        except Exception as exc:  # noqa: BLE001
-            detail = str(exc).strip() or "Mirror-DB-Dump fehlgeschlagen"
-            logger.warning("Mirror-DB-Dump mit Nutzer %s fehlgeschlagen: %s", dump_user, detail)
-            errors.append(f"{dump_user}: {detail}")
+        for variant in _mirror_dump_variants(dump_user):
+            try:
+                file_size = _write_mirror_dump_temp_sync(
+                    temp_path,
+                    dump_user=dump_user,
+                    dump_password=dump_password,
+                    include_routines=variant["include_routines"],
+                    include_events=variant["include_events"],
+                    include_triggers=variant["include_triggers"],
+                )
+                if variant["label"] != "full":
+                    logger.warning(
+                        "Mirror-DB-Dump mit reduziertem Umfang (%s) erfolgreich, weil Nutzer %s keine Vollrechte hat.",
+                        variant["label"],
+                        dump_user,
+                    )
+                temp_path.replace(target_path)
+                _fsync_directory(target_path.parent)
+                return file_size
+            except Exception as exc:  # noqa: BLE001
+                detail = str(exc).strip() or "Mirror-DB-Dump fehlgeschlagen"
+                logger.warning(
+                    "Mirror-DB-Dump mit Nutzer %s (%s) fehlgeschlagen: %s",
+                    dump_user,
+                    variant["label"],
+                    detail,
+                )
+                errors.append(f"{dump_user}/{variant['label']}: {detail}")
     raise RuntimeError(errors[-1] if errors else "Mirror-DB-Dump fehlgeschlagen.")
 
 
@@ -1856,13 +1940,11 @@ async def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any
 
     git_available = _binary_found("git", ("/usr/bin/git", "/usr/local/bin/git"))
     workspace_ready = bool(workspace_info.get("exists") and workspace_info.get("git"))
-    update_agent_ok = await _ping_update_agent()
+    update_agent_status = await _read_update_agent_status(timeout=3.0)
+    update_agent_ok = bool(update_agent_status and update_agent_status.get("available") and not update_agent_status.get("auth_error"))
     update_agent_error: str | None = None
-    if not update_agent_ok:
-        try:
-            await _update_agent_request("GET", "/api/v1/health", timeout=3.0)
-        except Exception as exc:  # noqa: BLE001
-            update_agent_error = _short_error_message(str(exc), 160)
+    if update_agent_status and update_agent_status.get("error"):
+        update_agent_error = _short_error_message(str(update_agent_status.get("error")), 160)
     host_agent_required = bool(HOST_AGENT_URL)
     host_agent_ok = True
     host_agent_error: str | None = None
@@ -2382,6 +2464,26 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         default_update_image=DEFAULT_UPDATE_IMAGE,
         force=force,
     )
+    should_clear_stale_error = (
+        force
+        and not status.get("update_available")
+        and not status.get("last_check_error")
+        and status.get("status") != "running"
+        and not status.get("current_action")
+        and bool(status.get("last_error"))
+        and not (status.get("update_agent") or {}).get("available") is False
+    )
+    if should_clear_stale_error:
+        await merge_update_state_async(
+            status="idle",
+            current_action=None,
+            last_error=None,
+            operation_id=None,
+        )
+        status["status"] = "idle"
+        status["current_action"] = None
+        status["last_error"] = None
+        status["operation_id"] = None
     status["recovery"] = _classify_recovery_issue(
         status.get("last_error"),
         operation_id=status.get("operation_id"),

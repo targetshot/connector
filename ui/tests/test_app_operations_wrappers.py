@@ -1,6 +1,7 @@
 import ast
 import pathlib
 import unittest
+from typing import Any
 from unittest import mock
 
 
@@ -18,6 +19,99 @@ def _load_items(names: list[str], namespace: dict) -> None:
 
 
 class AppOperationsWrapperTest(unittest.IsolatedAsyncioTestCase):
+    async def test_build_update_status_clears_stale_error_after_successful_forced_check_without_update(self):
+        operations_runtime = mock.Mock()
+        operations_runtime.build_update_status = mock.AsyncMock(
+            return_value={
+                "status": "error",
+                "current_action": None,
+                "last_error": "Befehl fehlgeschlagen (1): git fetch --all --tags --prune",
+                "last_check_error": None,
+                "update_available": False,
+                "update_agent": {"available": True},
+                "operation_id": "upd-old",
+            }
+        )
+        merge_update_state_async = mock.AsyncMock()
+        classify_recovery_issue = mock.Mock(return_value=None)
+        namespace = {
+            "Any": Any,
+            "ops_runtime": operations_runtime,
+            "_reconcile_stale_update_state": mock.AsyncMock(),
+            "_read_update_agent_status": mock.AsyncMock(),
+            "_ensure_latest_release": mock.AsyncMock(),
+            "_collect_workspace_info": mock.AsyncMock(),
+            "_read_local_ui_image_details": mock.AsyncMock(),
+            "_load_version_defaults": mock.Mock(),
+            "_detect_prerequisites": mock.AsyncMock(),
+            "_determine_repo_slug": mock.AsyncMock(),
+            "_detect_env_file_name": mock.Mock(),
+            "_sanitize_hour": mock.Mock(),
+            "_parse_iso8601": mock.Mock(),
+            "_format_local_timestamp": mock.Mock(),
+            "_calculate_next_auto_run": mock.Mock(),
+            "DEFAULT_UPDATE_IMAGE": "targetshot.azurecr.io/ts-connect:stable",
+            "merge_update_state_async": merge_update_state_async,
+            "_classify_recovery_issue": classify_recovery_issue,
+        }
+        _load_items(["_build_update_status"], namespace)
+
+        result = await namespace["_build_update_status"](force=True)
+
+        merge_update_state_async.assert_awaited_once_with(
+            status="idle",
+            current_action=None,
+            last_error=None,
+            operation_id=None,
+        )
+        self.assertEqual(result["status"], "idle")
+        self.assertIsNone(result["last_error"])
+        self.assertIsNone(result["operation_id"])
+        classify_recovery_issue.assert_called_once_with(None, operation_id=None, update_agent={"available": True})
+
+    async def test_build_update_status_keeps_error_when_manual_check_still_has_issue(self):
+        operations_runtime = mock.Mock()
+        operations_runtime.build_update_status = mock.AsyncMock(
+            return_value={
+                "status": "error",
+                "current_action": None,
+                "last_error": "git fetch failed",
+                "last_check_error": "Registry nicht erreichbar",
+                "update_available": False,
+                "update_agent": {"available": True},
+                "operation_id": "upd-old",
+            }
+        )
+        merge_update_state_async = mock.AsyncMock()
+        classify_recovery_issue = mock.Mock(return_value={"category": "unknown"})
+        namespace = {
+            "Any": Any,
+            "ops_runtime": operations_runtime,
+            "_reconcile_stale_update_state": mock.AsyncMock(),
+            "_read_update_agent_status": mock.AsyncMock(),
+            "_ensure_latest_release": mock.AsyncMock(),
+            "_collect_workspace_info": mock.AsyncMock(),
+            "_read_local_ui_image_details": mock.AsyncMock(),
+            "_load_version_defaults": mock.Mock(),
+            "_detect_prerequisites": mock.AsyncMock(),
+            "_determine_repo_slug": mock.AsyncMock(),
+            "_detect_env_file_name": mock.Mock(),
+            "_sanitize_hour": mock.Mock(),
+            "_parse_iso8601": mock.Mock(),
+            "_format_local_timestamp": mock.Mock(),
+            "_calculate_next_auto_run": mock.Mock(),
+            "DEFAULT_UPDATE_IMAGE": "targetshot.azurecr.io/ts-connect:stable",
+            "merge_update_state_async": merge_update_state_async,
+            "_classify_recovery_issue": classify_recovery_issue,
+        }
+        _load_items(["_build_update_status"], namespace)
+
+        result = await namespace["_build_update_status"](force=True)
+
+        merge_update_state_async.assert_not_awaited()
+        self.assertEqual(result["last_error"], "git fetch failed")
+        self.assertEqual(result["operation_id"], "upd-old")
+
     async def test_start_update_runner_delegates_to_operations_runtime(self):
         operations_runtime = mock.Mock()
         operations_runtime.start_update_runner = mock.AsyncMock(return_value="job-123")

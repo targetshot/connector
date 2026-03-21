@@ -131,6 +131,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
 
     def test_create_mirror_backup_sync_uses_mysql_pwd_and_root_password(self):
         namespace = {
+            "Any": Any,
             "Path": pathlib.Path,
             "gzip": gzip,
             "os": os,
@@ -142,7 +143,10 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "_fsync_directory": lambda path: None,
             "logger": mock.Mock(),
         }
-        _load_items(["_build_mirror_dump_command", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"], namespace)
+        _load_items(
+            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"],
+            namespace,
+        )
 
         commands: list[list[str]] = []
 
@@ -174,6 +178,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
 
     def test_create_mirror_backup_sync_retries_with_next_credentials(self):
         namespace = {
+            "Any": Any,
             "Path": pathlib.Path,
             "gzip": gzip,
             "os": os,
@@ -185,7 +190,10 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "_fsync_directory": lambda path: None,
             "logger": mock.Mock(),
         }
-        _load_items(["_build_mirror_dump_command", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"], namespace)
+        _load_items(
+            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"],
+            namespace,
+        )
 
         commands: list[list[str]] = []
 
@@ -218,6 +226,56 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertIn("MYSQL_PWD=wrong-root", commands[0])
         self.assertIn("MYSQL_PWD=db-password", commands[1])
 
+    def test_create_mirror_backup_sync_retries_reduced_non_root_dump_when_events_are_forbidden(self):
+        namespace = {
+            "Any": Any,
+            "Path": pathlib.Path,
+            "gzip": gzip,
+            "os": os,
+            "subprocess": subprocess,
+            "DEFAULT_MIRROR_DB_NAME": "SSMDB2",
+            "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+            "_mirror_dump_candidates": lambda: [("debezium_sync", "db-password")],
+            "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
+            "_fsync_directory": lambda path: None,
+            "logger": mock.Mock(),
+        }
+        _load_items(
+            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"],
+            namespace,
+        )
+
+        commands: list[list[str]] = []
+
+        class FakeProcess:
+            def __init__(self, return_code: int, stdout: bytes, stderr: bytes) -> None:
+                self.stdout = io.BytesIO(stdout)
+                self.stderr = io.BytesIO(stderr)
+                self._return_code = return_code
+
+            def wait(self, timeout=None):
+                return self._return_code
+
+            def kill(self):
+                return None
+
+        def fake_popen(cmd, stdout=None, stderr=None):
+            commands.append(list(cmd))
+            if "--events" in cmd:
+                return FakeProcess(1, b"", b"Access denied for user 'debezium_sync' to database 'SSMDB2'")
+            return FakeProcess(0, b"-- dump --", b"")
+
+        namespace["subprocess"] = mock.Mock(Popen=fake_popen, PIPE=subprocess.PIPE)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = pathlib.Path(tmp_dir) / "mirror-db-backup.sql.gz"
+            file_size = namespace["_create_mirror_backup_sync"](target)
+
+        self.assertGreater(file_size, 0)
+        self.assertGreaterEqual(len(commands), 2)
+        self.assertIn("--events", commands[0])
+        self.assertNotIn("--events", commands[1])
+
     def test_classify_recovery_issue_detects_kafka_connect_outage(self):
         namespace = {"Any": Any}
         _load_items(["_classify_recovery_issue"], namespace)
@@ -246,6 +304,21 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertEqual(result["operation_id"], "upd-1234")
         self.assertIn("Update-Agent", result["hint"])
         self.assertIn("Update-Agent neu starten", result["next_step"])
+
+    def test_classify_recovery_issue_detects_update_agent_auth_error(self):
+        namespace = {"Any": Any}
+        _load_items(["_classify_recovery_issue"], namespace)
+
+        result = namespace["_classify_recovery_issue"](
+            "",
+            operation_id="upd-401",
+            update_agent={"available": True, "auth_error": True, "status_code": 401, "error": "Update-Agent 401: Unauthorized"},
+        )
+
+        self.assertEqual(result["category"], "update-agent-auth")
+        self.assertEqual(result["operation_id"], "upd-401")
+        self.assertIn("Token", result["hint"])
+        self.assertIn("TS_CONNECT_UPDATE_AGENT_TOKEN", result["next_step"])
 
     def test_classify_recovery_issue_detects_keygen_validation_failure(self):
         namespace = {"Any": Any}

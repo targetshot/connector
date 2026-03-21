@@ -31,7 +31,7 @@ if [ -n "$MIRROR_USER" ] && [ -n "$MIRROR_PASSWORD" ]; then
   pass_esc="$(sql_escape "$MIRROR_PASSWORD")"
   mariadb --protocol=socket -uroot "-p${ROOT_PASSWORD}" <<SQL
 CREATE USER IF NOT EXISTS '${user_esc}'@'%' IDENTIFIED BY '${pass_esc}';
-GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT, LOCK TABLES ON *.* TO '${user_esc}'@'%';
+GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER ON *.* TO '${user_esc}'@'%';
 FLUSH PRIVILEGES;
 SQL
   log "Debezium-Benutzer '${MIRROR_USER}' ist bereit."

@@ -48,7 +48,30 @@ class AgentFailureHandlingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["available"])
         self.assertFalse(result["running"])
         self.assertEqual(result["status_code"], 503)
+        self.assertFalse(result["auth_error"])
         self.assertIn("Update-Agent nicht erreichbar", result["error"])
+
+    async def test_read_update_agent_status_marks_auth_error_without_offline_state(self):
+        namespace = {"Any": Any, "Awaitable": Awaitable, "Callable": Callable}
+        _load_items(["AgentRequestError", "agent_error_status", "read_update_agent_status"], namespace)
+
+        async def failing_request(*args, **kwargs):
+            raise namespace["AgentRequestError"](
+                "update-agent",
+                "Update-Agent 401: Unauthorized",
+                status_code=401,
+                unavailable=False,
+            )
+
+        result = await namespace["read_update_agent_status"](
+            update_agent_request_fn=failing_request,
+            short_error_message=lambda text, max_len=180: text[:max_len],
+        )
+
+        self.assertTrue(result["available"])
+        self.assertFalse(result["running"])
+        self.assertEqual(result["status_code"], 401)
+        self.assertTrue(result["auth_error"])
 
     async def test_reconcile_stale_update_state_marks_error_when_job_missing(self):
         namespace = {"Any": Any, "Awaitable": Awaitable, "Callable": Callable}
