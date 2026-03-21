@@ -155,7 +155,25 @@ LOG_BACKUP_COUNT = max(
 ADMIN_PASSWORD_FILE = security_bootstrap.admin_password_file
 ADMIN_PASSWORD_GENERATED_FILE = security_bootstrap.admin_password_generated_file
 SESSION_SECRET_FILE = security_bootstrap.session_secret_file
-UPDATE_AGENT_URL = os.getenv("TS_CONNECT_UPDATE_AGENT_URL", "http://update-agent:9000").rstrip("/")
+
+
+def _build_update_agent_urls() -> list[str]:
+    raw_value = (os.getenv("TS_CONNECT_UPDATE_AGENT_URL") or "").strip()
+    candidates = [
+        raw_value,
+        "http://ts-connect-update-agent:9000",
+        "http://update-agent:9000",
+    ]
+    urls: list[str] = []
+    for candidate in candidates:
+        value = candidate.rstrip("/")
+        if value and value not in urls:
+            urls.append(value)
+    return urls
+
+
+UPDATE_AGENT_URLS = _build_update_agent_urls()
+UPDATE_AGENT_URL = UPDATE_AGENT_URLS[0]
 UPDATE_AGENT_TOKEN = get_update_agent_token(DATA_DIR)
 HOST_AGENT_URL = os.getenv("TS_CONNECT_HOST_AGENT_URL", "").strip()
 if HOST_AGENT_URL:
@@ -222,15 +240,26 @@ async def _update_agent_request(
     json_payload: dict | None = None,
     timeout: float = 15.0,
 ) -> dict[str, Any]:
-    return await ops_runtime.update_agent_request(
-        method,
-        path,
-        update_agent_url=UPDATE_AGENT_URL,
-        update_agent_token=UPDATE_AGENT_TOKEN,
-        short_error_message=_short_error_message,
-        json_payload=json_payload,
-        timeout=timeout,
-    )
+    last_unavailable_error: Exception | None = None
+    for index, candidate_url in enumerate(UPDATE_AGENT_URLS):
+        try:
+            return await ops_runtime.update_agent_request(
+                method,
+                path,
+                update_agent_url=candidate_url,
+                update_agent_token=UPDATE_AGENT_TOKEN,
+                short_error_message=_short_error_message,
+                json_payload=json_payload,
+                timeout=timeout,
+            )
+        except ops_runtime.AgentRequestError as exc:
+            if exc.unavailable and index + 1 < len(UPDATE_AGENT_URLS):
+                last_unavailable_error = exc
+                continue
+            raise
+    if last_unavailable_error is not None:
+        raise last_unavailable_error
+    raise RuntimeError("Update-Agent konnte nicht kontaktiert werden.")
 
 
 async def _ping_update_agent(timeout: float = 3.0) -> bool:
@@ -1089,64 +1118,69 @@ def _build_mirror_dump_command(
     include_routines: bool = True,
     include_events: bool = True,
     include_triggers: bool = True,
+    auth_mode: str = "explicit",
 ) -> list[str]:
-    command = [
-        "docker",
-        "exec",
-        "-e",
-        f"MYSQL_PWD={dump_password}",
-        MIRROR_DB_CONTAINER_NAME,
-        "mariadb-dump",
-        "-h127.0.0.1",
-        f"-u{dump_user}",
-        "--single-transaction",
-        "--quick",
-        "--hex-blob",
-        "--default-character-set=utf8mb4",
-        "--databases",
-        DEFAULT_MIRROR_DB_NAME,
-    ]
+    command = ["docker", "exec"]
+    if auth_mode == "explicit":
+        command.extend(["-e", f"MYSQL_PWD={dump_password}", MIRROR_DB_CONTAINER_NAME, "mariadb-dump", "-h127.0.0.1", f"-u{dump_user}"])
+    elif auth_mode != "container-root":
+        raise RuntimeError(f"Unbekannter Mirror-Dump-Auth-Modus: {auth_mode}")
+    else:
+        command.extend([MIRROR_DB_CONTAINER_NAME, "mariadb-dump"])
+    command.extend(
+        [
+            "--single-transaction",
+            "--quick",
+            "--hex-blob",
+            "--default-character-set=utf8mb4",
+            "--databases",
+            DEFAULT_MIRROR_DB_NAME,
+        ]
+    )
     if include_routines:
-        command.insert(-4, "--routines")
+        command.insert(-2, "--routines")
     if include_events:
-        command.insert(-4, "--events")
+        command.insert(-2, "--events")
     if include_triggers:
-        command.insert(-4, "--triggers")
+        command.insert(-2, "--triggers")
     return command
 
 
-def _mirror_dump_variants(dump_user: str) -> list[dict[str, Any]]:
+def _mirror_dump_variants(dump_user: str, *, auth_mode: str = "explicit") -> list[dict[str, Any]]:
     variants = [
         {
             "label": "full",
             "include_routines": True,
             "include_events": True,
             "include_triggers": True,
+            "auth_mode": auth_mode,
         }
     ]
-    if dump_user != "root":
-        variants.extend(
-            [
-                {
-                    "label": "without-events",
-                    "include_routines": True,
-                    "include_events": False,
-                    "include_triggers": True,
-                },
-                {
-                    "label": "without-events-routines",
-                    "include_routines": False,
-                    "include_events": False,
-                    "include_triggers": True,
-                },
-                {
-                    "label": "tables-only",
-                    "include_routines": False,
-                    "include_events": False,
-                    "include_triggers": False,
-                },
-            ]
-        )
+    variants.extend(
+        [
+            {
+                "label": "without-events",
+                "include_routines": True,
+                "include_events": False,
+                "include_triggers": True,
+                "auth_mode": auth_mode,
+            },
+            {
+                "label": "without-events-routines",
+                "include_routines": False,
+                "include_events": False,
+                "include_triggers": True,
+                "auth_mode": auth_mode,
+            },
+            {
+                "label": "tables-only",
+                "include_routines": False,
+                "include_events": False,
+                "include_triggers": False,
+                "auth_mode": auth_mode,
+            },
+        ]
+    )
     return variants
 
 
@@ -1158,6 +1192,7 @@ def _write_mirror_dump_temp_sync(
     include_routines: bool = True,
     include_events: bool = True,
     include_triggers: bool = True,
+    auth_mode: str = "explicit",
 ) -> int:
     command = _build_mirror_dump_command(
         dump_user,
@@ -1165,6 +1200,7 @@ def _write_mirror_dump_temp_sync(
         include_routines=include_routines,
         include_events=include_events,
         include_triggers=include_triggers,
+        auth_mode=auth_mode,
     )
     stderr_output = ""
     try:
@@ -1211,12 +1247,33 @@ def _resolve_mirror_dump_credentials() -> tuple[str, str]:
     return _mirror_dump_candidates()[0]
 
 
+def _is_mirror_dump_auth_error(detail: str) -> bool:
+    lowered = (detail or "").strip().lower()
+    if not lowered:
+        return False
+    if "access denied" in lowered and "to database" not in lowered and "show full tables" not in lowered:
+        return True
+    markers = (
+        "using password",
+        "authentication failed",
+        "password incorrect",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def _create_mirror_backup_sync(target_path: Path) -> int:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _tmp_path_for(target_path)
     errors: list[str] = []
-    for dump_user, dump_password in _mirror_dump_candidates():
-        for variant in _mirror_dump_variants(dump_user):
+    attempts: list[tuple[str, str, str]] = [(dump_user, dump_password, "explicit") for dump_user, dump_password in _mirror_dump_candidates()]
+    attempts.append(("root", "", "container-root"))
+    seen_attempts: set[tuple[str, str, str]] = set()
+    for dump_user, dump_password, auth_mode in attempts:
+        attempt_key = (dump_user, dump_password, auth_mode)
+        if attempt_key in seen_attempts:
+            continue
+        seen_attempts.add(attempt_key)
+        for variant in _mirror_dump_variants(dump_user, auth_mode=auth_mode):
             try:
                 file_size = _write_mirror_dump_temp_sync(
                     temp_path,
@@ -1225,6 +1282,7 @@ def _create_mirror_backup_sync(target_path: Path) -> int:
                     include_routines=variant["include_routines"],
                     include_events=variant["include_events"],
                     include_triggers=variant["include_triggers"],
+                    auth_mode=variant["auth_mode"],
                 )
                 if variant["label"] != "full":
                     logger.warning(
@@ -1238,12 +1296,15 @@ def _create_mirror_backup_sync(target_path: Path) -> int:
             except Exception as exc:  # noqa: BLE001
                 detail = str(exc).strip() or "Mirror-DB-Dump fehlgeschlagen"
                 logger.warning(
-                    "Mirror-DB-Dump mit Nutzer %s (%s) fehlgeschlagen: %s",
+                    "Mirror-DB-Dump mit Nutzer %s (%s/%s) fehlgeschlagen: %s",
                     dump_user,
+                    auth_mode,
                     variant["label"],
                     detail,
                 )
-                errors.append(f"{dump_user}/{variant['label']}: {detail}")
+                errors.append(f"{dump_user}/{auth_mode}/{variant['label']}: {detail}")
+                if _is_mirror_dump_auth_error(detail):
+                    break
     raise RuntimeError(errors[-1] if errors else "Mirror-DB-Dump fehlgeschlagen.")
 
 

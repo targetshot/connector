@@ -48,6 +48,17 @@ def _load_ops_items(names: list[str], namespace: dict) -> None:
 
 
 class TsConnectRuntimeSmokeTest(unittest.TestCase):
+    def test_build_update_agent_urls_prefers_current_container_name_and_keeps_legacy_alias(self):
+        namespace = {
+            "os": types.SimpleNamespace(getenv=lambda name: None),
+        }
+        _load_items(["_build_update_agent_urls"], namespace)
+
+        urls = namespace["_build_update_agent_urls"]()
+
+        self.assertEqual(urls[0], "http://ts-connect-update-agent:9000")
+        self.assertIn("http://update-agent:9000", urls)
+
     def test_license_template_no_longer_shows_shooter_or_plan_coverage_blocks(self):
         template = TEMPLATE_SOURCE.read_text(encoding="utf-8")
 
@@ -144,7 +155,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "logger": mock.Mock(),
         }
         _load_items(
-            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"],
+            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_is_mirror_dump_auth_error", "_create_mirror_backup_sync"],
             namespace,
         )
 
@@ -176,6 +187,24 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertIn("mariadb-dump", commands[0])
         self.assertIn("-uroot", commands[0])
 
+    def test_build_mirror_dump_command_container_root_omits_tcp_password_flags(self):
+        namespace = {
+            "DEFAULT_MIRROR_DB_NAME": "SMDB",
+            "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+        }
+        _load_items(["_build_mirror_dump_command"], namespace)
+
+        command = namespace["_build_mirror_dump_command"](
+            "root",
+            "",
+            auth_mode="container-root",
+        )
+
+        self.assertEqual(command[:4], ["docker", "exec", "ts-mariadb-mirror", "mariadb-dump"])
+        self.assertNotIn("MYSQL_PWD=", " ".join(command))
+        self.assertNotIn("-h127.0.0.1", command)
+        self.assertNotIn("-uroot", command)
+
     def test_create_mirror_backup_sync_retries_with_next_credentials(self):
         namespace = {
             "Any": Any,
@@ -191,7 +220,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "logger": mock.Mock(),
         }
         _load_items(
-            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"],
+            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_is_mirror_dump_auth_error", "_create_mirror_backup_sync"],
             namespace,
         )
 
@@ -241,7 +270,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "logger": mock.Mock(),
         }
         _load_items(
-            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"],
+            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_is_mirror_dump_auth_error", "_create_mirror_backup_sync"],
             namespace,
         )
 
@@ -275,6 +304,56 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertGreaterEqual(len(commands), 2)
         self.assertIn("--events", commands[0])
         self.assertNotIn("--events", commands[1])
+
+    def test_create_mirror_backup_sync_tries_container_root_after_explicit_credentials(self):
+        namespace = {
+            "Any": Any,
+            "Path": pathlib.Path,
+            "gzip": gzip,
+            "os": os,
+            "subprocess": subprocess,
+            "DEFAULT_MIRROR_DB_NAME": "SSMDB2",
+            "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+            "_mirror_dump_candidates": lambda: [("root", "wrong-root")],
+            "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
+            "_fsync_directory": lambda path: None,
+            "logger": mock.Mock(),
+        }
+        _load_items(
+            ["_build_mirror_dump_command", "_mirror_dump_variants", "_write_mirror_dump_temp_sync", "_is_mirror_dump_auth_error", "_create_mirror_backup_sync"],
+            namespace,
+        )
+
+        commands: list[list[str]] = []
+
+        class FakeProcess:
+            def __init__(self, return_code: int, stdout: bytes, stderr: bytes) -> None:
+                self.stdout = io.BytesIO(stdout)
+                self.stderr = io.BytesIO(stderr)
+                self._return_code = return_code
+
+            def wait(self, timeout=None):
+                return self._return_code
+
+            def kill(self):
+                return None
+
+        def fake_popen(cmd, stdout=None, stderr=None):
+            commands.append(list(cmd))
+            if "MYSQL_PWD=wrong-root" in cmd:
+                return FakeProcess(1, b"", b"Access denied")
+            return FakeProcess(0, b"-- dump --", b"")
+
+        namespace["subprocess"] = mock.Mock(Popen=fake_popen, PIPE=subprocess.PIPE)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = pathlib.Path(tmp_dir) / "mirror-db-backup.sql.gz"
+            file_size = namespace["_create_mirror_backup_sync"](target)
+
+        self.assertGreater(file_size, 0)
+        self.assertEqual(len(commands), 2)
+        self.assertIn("MYSQL_PWD=wrong-root", commands[0])
+        self.assertEqual(commands[1][:4], ["docker", "exec", "ts-mariadb-mirror", "mariadb-dump"])
 
     def test_classify_recovery_issue_detects_kafka_connect_outage(self):
         namespace = {"Any": Any}
