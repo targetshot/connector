@@ -1123,6 +1123,8 @@ def _build_mirror_dump_command(
     command = ["docker", "exec"]
     if auth_mode == "explicit":
         command.extend(["-e", f"MYSQL_PWD={dump_password}", MIRROR_DB_CONTAINER_NAME, "mariadb-dump", "-h127.0.0.1", f"-u{dump_user}"])
+    elif auth_mode == "socket-password":
+        command.extend(["-e", f"MYSQL_PWD={dump_password}", MIRROR_DB_CONTAINER_NAME, "mariadb-dump", f"-u{dump_user}"])
     elif auth_mode != "container-root":
         raise RuntimeError(f"Unbekannter Mirror-Dump-Auth-Modus: {auth_mode}")
     else:
@@ -1265,7 +1267,11 @@ def _create_mirror_backup_sync(target_path: Path) -> int:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _tmp_path_for(target_path)
     errors: list[str] = []
-    attempts: list[tuple[str, str, str]] = [(dump_user, dump_password, "explicit") for dump_user, dump_password in _mirror_dump_candidates()]
+    attempts: list[tuple[str, str, str]] = []
+    for dump_user, dump_password in _mirror_dump_candidates():
+        attempts.append((dump_user, dump_password, "explicit"))
+        if dump_user == "root":
+            attempts.append((dump_user, dump_password, "socket-password"))
     attempts.append(("root", "", "container-root"))
     seen_attempts: set[tuple[str, str, str]] = set()
     for dump_user, dump_password, auth_mode in attempts:

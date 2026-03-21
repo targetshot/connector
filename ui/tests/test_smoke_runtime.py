@@ -205,6 +205,23 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertNotIn("-h127.0.0.1", command)
         self.assertNotIn("-uroot", command)
 
+    def test_build_mirror_dump_command_socket_password_uses_local_root_socket(self):
+        namespace = {
+            "DEFAULT_MIRROR_DB_NAME": "SMDB",
+            "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+        }
+        _load_items(["_build_mirror_dump_command"], namespace)
+
+        command = namespace["_build_mirror_dump_command"](
+            "root",
+            "root-secret",
+            auth_mode="socket-password",
+        )
+
+        self.assertEqual(command[:6], ["docker", "exec", "-e", "MYSQL_PWD=root-secret", "ts-mariadb-mirror", "mariadb-dump"])
+        self.assertIn("-uroot", command)
+        self.assertNotIn("-h127.0.0.1", command)
+
     def test_create_mirror_backup_sync_retries_with_next_credentials(self):
         namespace = {
             "Any": Any,
@@ -251,9 +268,10 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             file_size = namespace["_create_mirror_backup_sync"](target)
 
         self.assertGreater(file_size, 0)
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 3)
         self.assertIn("MYSQL_PWD=wrong-root", commands[0])
-        self.assertIn("MYSQL_PWD=db-password", commands[1])
+        self.assertIn("MYSQL_PWD=wrong-root", commands[1])
+        self.assertIn("MYSQL_PWD=db-password", commands[2])
 
     def test_create_mirror_backup_sync_retries_reduced_non_root_dump_when_events_are_forbidden(self):
         namespace = {
@@ -341,7 +359,9 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         def fake_popen(cmd, stdout=None, stderr=None):
             commands.append(list(cmd))
             if "MYSQL_PWD=wrong-root" in cmd:
-                return FakeProcess(1, b"", b"Access denied")
+                if "-h127.0.0.1" in cmd:
+                    return FakeProcess(1, b"", b"Access denied")
+                return FakeProcess(0, b"-- dump --", b"")
             return FakeProcess(0, b"-- dump --", b"")
 
         namespace["subprocess"] = mock.Mock(Popen=fake_popen, PIPE=subprocess.PIPE)
@@ -353,7 +373,8 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertGreater(file_size, 0)
         self.assertEqual(len(commands), 2)
         self.assertIn("MYSQL_PWD=wrong-root", commands[0])
-        self.assertEqual(commands[1][:4], ["docker", "exec", "ts-mariadb-mirror", "mariadb-dump"])
+        self.assertIn("MYSQL_PWD=wrong-root", commands[1])
+        self.assertNotIn("-h127.0.0.1", commands[1])
 
     def test_classify_recovery_issue_detects_kafka_connect_outage(self):
         namespace = {"Any": Any}
