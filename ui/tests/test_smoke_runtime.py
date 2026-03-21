@@ -92,7 +92,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertIn("::1/128", rendered)
         self.assertEqual(invalid, ["broken-cidr"])
 
-    def test_resolve_mirror_dump_credentials_prefers_container_root_password(self):
+    def test_mirror_dump_candidates_prefer_container_root_password_first(self):
         namespace = {
             "DEFAULT_MIRROR_DB_USER": "debezium_sync",
             "MIRROR_DB_PASSWORD": "db-password",
@@ -102,14 +102,14 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "logger": mock.Mock(),
             "os": types.SimpleNamespace(getenv=lambda name: None),
         }
-        _load_items(["_usable_secret", "_resolve_mirror_dump_credentials"], namespace)
+        _load_items(["_usable_secret", "_mirror_dump_candidates"], namespace)
 
-        user, password = namespace["_resolve_mirror_dump_credentials"]()
+        candidates = namespace["_mirror_dump_candidates"]()
 
-        self.assertEqual(user, "root")
-        self.assertEqual(password, "root-from-container")
+        self.assertEqual(candidates[0], ("root", "root-from-container"))
+        self.assertIn(("debezium_sync", "db-password"), candidates)
 
-    def test_resolve_mirror_dump_credentials_ignores_placeholder_root_secret(self):
+    def test_mirror_dump_candidates_ignore_placeholder_root_secret(self):
         env_values = {
             "TS_CONNECT_MIRROR_ROOT_PASSWORD": "change-me-root",
             "TS_CONNECT_MIRROR_DB_PASSWORD": "db-from-workspace",
@@ -123,12 +123,11 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "logger": mock.Mock(),
             "os": types.SimpleNamespace(getenv=lambda name: None),
         }
-        _load_items(["_usable_secret", "_resolve_mirror_dump_credentials"], namespace)
+        _load_items(["_usable_secret", "_mirror_dump_candidates"], namespace)
 
-        user, password = namespace["_resolve_mirror_dump_credentials"]()
+        candidates = namespace["_mirror_dump_candidates"]()
 
-        self.assertEqual(user, "debezium_sync")
-        self.assertEqual(password, "db-from-workspace")
+        self.assertEqual(candidates, [("debezium_sync", "db-from-workspace")])
 
     def test_create_mirror_backup_sync_uses_mysql_pwd_and_root_password(self):
         namespace = {
@@ -138,11 +137,12 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "subprocess": subprocess,
             "DEFAULT_MIRROR_DB_NAME": "SMDB",
             "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
-            "_resolve_mirror_dump_credentials": lambda: ("root", "root-from-workspace"),
+            "_mirror_dump_candidates": lambda: [("root", "root-from-workspace")],
             "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
             "_fsync_directory": lambda path: None,
+            "logger": mock.Mock(),
         }
-        _load_items(["_create_mirror_backup_sync"], namespace)
+        _load_items(["_build_mirror_dump_command", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"], namespace)
 
         commands: list[list[str]] = []
 
@@ -171,6 +171,52 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertEqual(commands[0][0:4], ["docker", "exec", "-e", "MYSQL_PWD=root-from-workspace"])
         self.assertIn("mariadb-dump", commands[0])
         self.assertIn("-uroot", commands[0])
+
+    def test_create_mirror_backup_sync_retries_with_next_credentials(self):
+        namespace = {
+            "Path": pathlib.Path,
+            "gzip": gzip,
+            "os": os,
+            "subprocess": subprocess,
+            "DEFAULT_MIRROR_DB_NAME": "SMDB",
+            "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+            "_mirror_dump_candidates": lambda: [("root", "wrong-root"), ("debezium_sync", "db-password")],
+            "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
+            "_fsync_directory": lambda path: None,
+            "logger": mock.Mock(),
+        }
+        _load_items(["_build_mirror_dump_command", "_write_mirror_dump_temp_sync", "_create_mirror_backup_sync"], namespace)
+
+        commands: list[list[str]] = []
+
+        class FakeProcess:
+            def __init__(self, return_code: int, stdout: bytes, stderr: bytes) -> None:
+                self.stdout = io.BytesIO(stdout)
+                self.stderr = io.BytesIO(stderr)
+                self._return_code = return_code
+
+            def wait(self, timeout=None):
+                return self._return_code
+
+            def kill(self):
+                return None
+
+        def fake_popen(cmd, stdout=None, stderr=None):
+            commands.append(list(cmd))
+            if "MYSQL_PWD=wrong-root" in cmd:
+                return FakeProcess(1, b"", b"Access denied")
+            return FakeProcess(0, b"-- dump --", b"")
+
+        namespace["subprocess"] = mock.Mock(Popen=fake_popen, PIPE=subprocess.PIPE)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = pathlib.Path(tmp_dir) / "mirror-db-backup.sql.gz"
+            file_size = namespace["_create_mirror_backup_sync"](target)
+
+        self.assertGreater(file_size, 0)
+        self.assertEqual(len(commands), 2)
+        self.assertIn("MYSQL_PWD=wrong-root", commands[0])
+        self.assertIn("MYSQL_PWD=db-password", commands[1])
 
     def test_classify_recovery_issue_detects_kafka_connect_outage(self):
         namespace = {"Any": Any}

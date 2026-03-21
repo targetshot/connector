@@ -1027,37 +1027,54 @@ def _inspect_container_env_sync(container_name: str) -> dict[str, str]:
     return env_map
 
 
-def _resolve_mirror_dump_credentials() -> tuple[str, str]:
+def _mirror_dump_candidates() -> list[tuple[str, str]]:
     workspace_env = _workspace_env_values()
-    root_password = _usable_secret(os.getenv("TS_CONNECT_MIRROR_ROOT_PASSWORD"))
-    if not root_password:
-        try:
-            env_map = _inspect_container_env_sync(MIRROR_DB_CONTAINER_NAME)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Konnte Mirror-Container-Env nicht lesen: %s", exc)
-            env_map = {}
-        root_password = _usable_secret(env_map.get("MARIADB_ROOT_PASSWORD"))
-    if not root_password:
-        root_password = _usable_secret(workspace_env.get("TS_CONNECT_MIRROR_ROOT_PASSWORD"))
-    if root_password:
-        return "root", root_password
+    try:
+        env_map = _inspect_container_env_sync(MIRROR_DB_CONTAINER_NAME)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Konnte Mirror-Container-Env nicht lesen: %s", exc)
+        env_map = {}
 
-    dump_user = DEFAULT_MIRROR_DB_USER
-    dump_password = _usable_secret(os.getenv("TS_CONNECT_MIRROR_DB_PASSWORD"))
-    if not dump_password:
-        dump_password = _usable_secret(MIRROR_DB_PASSWORD)
-    if not dump_password:
-        dump_password = _usable_secret(workspace_env.get("TS_CONNECT_MIRROR_DB_PASSWORD"))
-    if dump_password:
-        return dump_user, dump_password
-    raise RuntimeError("Kein Mirror-DB-Passwort für den Vollbackup-Dump verfügbar.")
+    db_user_candidates = [
+        (os.getenv("TS_CONNECT_MIRROR_DB_USER") or "").strip(),
+        (env_map.get("TS_CONNECT_MIRROR_DB_USER") or "").strip(),
+        (env_map.get("MARIADB_USER") or "").strip(),
+        (workspace_env.get("TS_CONNECT_MIRROR_DB_USER") or "").strip(),
+        (DEFAULT_MIRROR_DB_USER or "").strip(),
+    ]
+    db_password_candidates = [
+        _usable_secret(os.getenv("TS_CONNECT_MIRROR_DB_PASSWORD")),
+        _usable_secret(env_map.get("TS_CONNECT_MIRROR_DB_PASSWORD")),
+        _usable_secret(env_map.get("MARIADB_PASSWORD")),
+        _usable_secret(MIRROR_DB_PASSWORD),
+        _usable_secret(workspace_env.get("TS_CONNECT_MIRROR_DB_PASSWORD")),
+    ]
+    candidates: list[tuple[str, str]] = []
+
+    def add_candidate(user: str, password: str) -> None:
+        username = (user or "").strip()
+        secret = _usable_secret(password)
+        if not username or not secret:
+            return
+        pair = (username, secret)
+        if pair not in candidates:
+            candidates.append(pair)
+
+    add_candidate("root", os.getenv("TS_CONNECT_MIRROR_ROOT_PASSWORD") or "")
+    add_candidate("root", env_map.get("MARIADB_ROOT_PASSWORD") or "")
+    add_candidate("root", workspace_env.get("TS_CONNECT_MIRROR_ROOT_PASSWORD") or "")
+
+    for username in db_user_candidates:
+        for password in db_password_candidates:
+            add_candidate(username, password)
+
+    if not candidates:
+        raise RuntimeError("Kein Mirror-DB-Passwort für den Vollbackup-Dump verfügbar.")
+    return candidates
 
 
-def _create_mirror_backup_sync(target_path: Path) -> int:
-    dump_user, dump_password = _resolve_mirror_dump_credentials()
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = _tmp_path_for(target_path)
-    command = [
+def _build_mirror_dump_command(dump_user: str, dump_password: str) -> list[str]:
+    return [
         "docker",
         "exec",
         "-e",
@@ -1076,11 +1093,15 @@ def _create_mirror_backup_sync(target_path: Path) -> int:
         "--databases",
         DEFAULT_MIRROR_DB_NAME,
     ]
+
+
+def _write_mirror_dump_temp_sync(temp_path: Path, *, dump_user: str, dump_password: str) -> int:
+    command = _build_mirror_dump_command(dump_user, dump_password)
     stderr_output = ""
     try:
         with temp_path.open("wb") as raw_handle:
             with gzip.GzipFile(
-                filename=target_path.with_suffix("").name,
+                filename=temp_path.with_suffix("").name,
                 mode="wb",
                 fileobj=raw_handle,
                 compresslevel=6,
@@ -1111,12 +1132,35 @@ def _create_mirror_backup_sync(target_path: Path) -> int:
             raise RuntimeError(detail)
         if temp_path.stat().st_size <= 0:
             raise RuntimeError("Der Mirror-DB-Dump ist leer.")
-        temp_path.replace(target_path)
-        _fsync_directory(target_path.parent)
-        return target_path.stat().st_size
+        return temp_path.stat().st_size
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
+
+
+def _resolve_mirror_dump_credentials() -> tuple[str, str]:
+    return _mirror_dump_candidates()[0]
+
+
+def _create_mirror_backup_sync(target_path: Path) -> int:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _tmp_path_for(target_path)
+    errors: list[str] = []
+    for dump_user, dump_password in _mirror_dump_candidates():
+        try:
+            file_size = _write_mirror_dump_temp_sync(
+                temp_path,
+                dump_user=dump_user,
+                dump_password=dump_password,
+            )
+            temp_path.replace(target_path)
+            _fsync_directory(target_path.parent)
+            return file_size
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc).strip() or "Mirror-DB-Dump fehlgeschlagen"
+            logger.warning("Mirror-DB-Dump mit Nutzer %s fehlgeschlagen: %s", dump_user, detail)
+            errors.append(f"{dump_user}: {detail}")
+    raise RuntimeError(errors[-1] if errors else "Mirror-DB-Dump fehlgeschlagen.")
 
 
 async def _run_mirror_backup(*, trigger: str, slot_id: str | None = None) -> dict[str, Any]:
