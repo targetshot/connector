@@ -28,13 +28,14 @@ class AppOperationsWrapperTest(unittest.IsolatedAsyncioTestCase):
         }
         _load_items(["_start_update_runner"], namespace)
 
-        result = await namespace["_start_update_runner"]("v0.4.99", "maxhany/targetshot", ".env")
+        result = await namespace["_start_update_runner"]("v0.4.99", "maxhany/targetshot", ".env", "op-123")
 
         self.assertEqual(result, "job-123")
         operations_runtime.start_update_runner.assert_awaited_once_with(
             "v0.4.99",
             "maxhany/targetshot",
             ".env",
+            operation_id="op-123",
             project_name="ts-connect",
             update_agent_request_fn=namespace["_update_agent_request"],
         )
@@ -77,6 +78,10 @@ class AppOperationsWrapperTest(unittest.IsolatedAsyncioTestCase):
             "restart_mirror_maker": mock.AsyncMock(),
             "MM2_CONFIG_PATH": pathlib.Path("/tmp/mm2.properties"),
             "_mark_apply_success": mock.AsyncMock(),
+            "merge_apply_state": mock.AsyncMock(),
+            "make_operation_id": mock.Mock(),
+            "format_operation_message": mock.Mock(),
+            "logger": mock.Mock(),
         }
         _load_items(["apply_connector_config"], namespace)
 
@@ -84,6 +89,8 @@ class AppOperationsWrapperTest(unittest.IsolatedAsyncioTestCase):
 
         operations_runtime.apply_connector_config.assert_awaited_once_with(
             allow_defer=False,
+            operation_id=None,
+            trigger="manual",
             ensure_offline_buffer_ready_fn=namespace["ensure_offline_buffer_ready"],
             fetch_settings_fn=namespace["fetch_settings"],
             read_secrets_file_fn=namespace["read_secrets_file"],
@@ -99,6 +106,10 @@ class AppOperationsWrapperTest(unittest.IsolatedAsyncioTestCase):
             restart_mirror_maker_fn=namespace["restart_mirror_maker"],
             mm2_config_path=namespace["MM2_CONFIG_PATH"],
             mark_apply_success_fn=namespace["_mark_apply_success"],
+            merge_apply_state_fn=namespace["merge_apply_state"],
+            make_operation_id_fn=namespace["make_operation_id"],
+            format_operation_message_fn=namespace["format_operation_message"],
+            logger=namespace["logger"],
         )
 
     async def test_check_connector_health_delegates_to_operations_runtime(self):

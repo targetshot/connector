@@ -209,6 +209,7 @@ async def start_update_runner(
     repo_slug: str | None,
     env_file: str | None,
     *,
+    operation_id: str | None,
     project_name: str,
     update_agent_request_fn: Callable[..., Awaitable[dict[str, Any]]],
 ) -> str:
@@ -218,6 +219,7 @@ async def start_update_runner(
         "env_file": env_file,
         "compose_env": bool(env_file),
         "project_name": project_name,
+        "operation_id": operation_id,
     }
     result = await update_agent_request_fn("POST", "/api/v1/run", json_payload=payload, timeout=10)
     return result.get("job_id") or "update-agent"
@@ -237,9 +239,11 @@ async def launch_update_job(
     determine_repo_slug_fn: Callable[..., Awaitable[str | None]],
     detect_env_file_name_fn: Callable[[], str | None],
     now_utc_iso_fn: Callable[[], str],
+    make_operation_id_fn: Callable[[str], str],
+    format_operation_message_fn: Callable[[str], str],
     append_update_log_fn: Callable[..., Awaitable[dict[str, Any]]],
     merge_update_state_async_fn: Callable[..., Awaitable[dict[str, Any]]],
-    start_update_runner_fn: Callable[[str | None, str | None, str | None], Awaitable[str]],
+    start_update_runner_fn: Callable[[str | None, str | None, str | None, str | None], Awaitable[str]],
     short_error_message: Callable[[str, int], str],
 ) -> dict[str, Any]:
     label = "Automatisches" if initiated_by == "auto" else "Manuelles"
@@ -258,12 +262,17 @@ async def launch_update_job(
         env_file_name = detect_env_file_name_fn()
         selected_target = target_ref or (release.get("tag_name") if isinstance(release, dict) else None)
         job_started = now_utc_iso_fn()
-        log_lines = [f"{label} Update ausgelöst um {job_started}", f"Initiator: {initiated_by}"]
+        operation_id = make_operation_id_fn("upd")
+        log_lines = [
+            format_operation_message_fn(f"{label} Update ausgelöst um {job_started}", operation_id=operation_id),
+            format_operation_message_fn(f"Initiator: {initiated_by}", operation_id=operation_id),
+        ]
         await append_update_log_fn(log_lines, reset=reset_log)
         updates: dict[str, Any] = {
             "status": "running",
             "update_in_progress": True,
             "current_action": "Starte Update Runner",
+            "operation_id": operation_id,
             "last_error": None,
             "job_started": job_started,
             "update_target": selected_target,
@@ -272,15 +281,16 @@ async def launch_update_job(
             updates["auto_update_last_run"] = job_started
         await merge_update_state_async_fn(**updates)
         try:
-            job_identifier = await start_update_runner_fn(selected_target, repo_slug, env_file_name)
+            job_identifier = await start_update_runner_fn(selected_target, repo_slug, env_file_name, operation_id)
         except AgentRequestError as exc:
             message = short_error_message(str(exc), 200)
             result_updates: dict[str, Any] = {
                 "status": "error",
                 "update_in_progress": False,
                 "current_action": None,
+                "operation_id": operation_id,
                 "last_error": message,
-                "log_append": [f"FEHLER: {message}"],
+                "log_append": [format_operation_message_fn(f"FEHLER: {message}", operation_id=operation_id)],
             }
             if initiated_by == "auto":
                 result_updates.setdefault("auto_update_last_run", job_started)
@@ -292,8 +302,9 @@ async def launch_update_job(
                 "status": "error",
                 "update_in_progress": False,
                 "current_action": None,
+                "operation_id": operation_id,
                 "last_error": message,
-                "log_append": [f"FEHLER: {message}"],
+                "log_append": [format_operation_message_fn(f"FEHLER: {message}", operation_id=operation_id)],
             }
             if initiated_by == "auto":
                 result_updates.setdefault("auto_update_last_run", job_started)
@@ -301,7 +312,8 @@ async def launch_update_job(
             return {"ok": False, "error": message, "code": 500}
         await merge_update_state_async_fn(
             current_action="Update-Agent gestartet",
-            log_append=[f"Update-Agent Job: {job_identifier}"],
+            operation_id=operation_id,
+            log_append=[format_operation_message_fn(f"Update-Agent Job: {job_identifier}", operation_id=operation_id)],
         )
         return {"ok": True, "container": job_identifier, "target": selected_target}
 
@@ -599,7 +611,9 @@ def raise_http_for_agent_exception(
 async def schedule_retry(
     err_msg: str,
     *,
+    operation_id: str | None,
     format_apply_error_fn: Callable[[str], str],
+    format_operation_message_fn: Callable[[str], str],
     merge_apply_state_fn: Callable[..., Awaitable[dict[str, Any]]],
     next_retry_iso_fn: Callable[[], str | None],
     now_utc_iso_fn: Callable[[], str],
@@ -608,26 +622,36 @@ async def schedule_retry(
     message = format_apply_error_fn(err_msg)
     await merge_apply_state_fn(
         pending=True,
+        operation_id=operation_id,
+        current_action="Wartet auf Wiederholung",
         last_error=message,
         last_attempt=now_utc_iso_fn(),
         next_retry=next_retry_iso_fn(),
     )
-    logger.warning("Connector apply deferred: %s", message)
+    logger.warning(format_operation_message_fn("Connector apply deferred: " + message, operation_id=operation_id))
 
 
 async def mark_apply_success(
     *,
+    operation_id: str | None,
+    trigger: str | None,
     merge_apply_state_fn: Callable[..., Awaitable[dict[str, Any]]],
     now_utc_iso_fn: Callable[[], str],
+    format_operation_message_fn: Callable[[str], str],
+    logger: Any,
 ) -> None:
     timestamp = now_utc_iso_fn()
     await merge_apply_state_fn(
         pending=False,
+        operation_id=operation_id,
+        trigger=trigger,
+        current_action=None,
         last_error=None,
         last_attempt=timestamp,
         last_success=timestamp,
         next_retry=None,
     )
+    logger.info(format_operation_message_fn("Connector apply completed successfully", operation_id=operation_id))
 
 
 async def connector_retry_worker(
@@ -639,6 +663,8 @@ async def connector_retry_worker(
     format_apply_error_fn: Callable[[str], str],
     now_utc_iso_fn: Callable[[], str],
     next_retry_iso_fn: Callable[[], str | None],
+    make_operation_id_fn: Callable[[str], str],
+    format_operation_message_fn: Callable[[str], str],
     logger: Any,
 ) -> None:
     if apply_retry_seconds <= 0:
@@ -648,18 +674,22 @@ async def connector_retry_worker(
     while True:
         state = await get_apply_state_fn()
         if state.get("pending"):
+            operation_id = state.get("operation_id") or make_operation_id_fn("cfg")
             try:
-                await apply_connector_config_fn(allow_defer=False)
+                logger.info(format_operation_message_fn("Retrying deferred connector apply", operation_id=operation_id))
+                await apply_connector_config_fn(allow_defer=False, operation_id=operation_id, trigger="retry")
             except Exception as exc:  # noqa: BLE001
                 await merge_apply_state_fn(
                     pending=True,
+                    operation_id=operation_id,
+                    current_action="Wartet auf Wiederholung",
                     last_error=format_apply_error_fn(str(exc)),
                     last_attempt=now_utc_iso_fn(),
                     next_retry=next_retry_iso_fn(),
                 )
-                logger.warning("Retrying connector apply failed: %s", exc)
+                logger.warning(format_operation_message_fn(f"Retrying connector apply failed: {exc}", operation_id=operation_id))
             else:
-                logger.info("Deferred connector apply succeeded on retry")
+                logger.info(format_operation_message_fn("Deferred connector apply succeeded on retry", operation_id=operation_id))
         await asyncio.sleep(apply_retry_seconds)
 
 
@@ -699,6 +729,7 @@ async def connect_request(
     url: str,
     *,
     allow_defer: bool,
+    operation_id: str | None,
     schedule_retry_fn: Callable[[str], Awaitable[None]],
     short_error_message: Callable[[str, int], str],
     extract_error_message_fn: Callable[[Any], str],
@@ -711,14 +742,14 @@ async def connect_request(
         resp = await client.request(method, url, json=json_payload)
     except httpx.RequestError as exc:
         if allow_defer and is_transient_request_error_fn(exc):
-            await schedule_retry_fn(str(exc))
+            await schedule_retry_fn(str(exc), operation_id=operation_id)
             raise DeferredApplyError(short_error_message(str(exc), 180)) from exc
         raise RuntimeError(f"{method} {url} fehlgeschlagen: {exc}") from exc
 
     if resp.status_code not in ok_statuses:
         message = extract_error_message_fn(resp)
         if allow_defer and is_transient_status_fn(resp.status_code, message):
-            await schedule_retry_fn(message)
+            await schedule_retry_fn(message, operation_id=operation_id)
             raise DeferredApplyError(short_error_message(message, 180))
         raise RuntimeError(
             f"{method} {url} -> {resp.status_code}: {message.strip() or 'Unbekannter Fehler'}"
@@ -732,6 +763,7 @@ async def ensure_connector(
     name: str,
     config: dict[str, Any],
     allow_defer: bool,
+    operation_id: str | None,
     connect_base_url: str,
     connect_request_fn: Callable[..., Awaitable[Any]],
 ) -> None:
@@ -741,6 +773,7 @@ async def ensure_connector(
         "GET",
         url_base,
         allow_defer=allow_defer,
+        operation_id=operation_id,
         ok_statuses=(200, 404),
     )
     if resp.status_code == 200:
@@ -749,6 +782,7 @@ async def ensure_connector(
             "PUT",
             f"{url_base}/pause",
             allow_defer=allow_defer,
+            operation_id=operation_id,
             ok_statuses=(200, 202, 204, 409),
         )
         await connect_request_fn(
@@ -757,12 +791,14 @@ async def ensure_connector(
             f"{url_base}/config",
             json_payload=config,
             allow_defer=allow_defer,
+            operation_id=operation_id,
         )
         await connect_request_fn(
             client,
             "PUT",
             f"{url_base}/resume",
             allow_defer=allow_defer,
+            operation_id=operation_id,
             ok_statuses=(200, 202, 204, 409),
         )
         return
@@ -772,6 +808,7 @@ async def ensure_connector(
         f"{connect_base_url}/connectors",
         json_payload={"name": name, "config": config},
         allow_defer=allow_defer,
+        operation_id=operation_id,
         ok_statuses=(200, 201, 202),
     )
 
@@ -781,6 +818,7 @@ async def delete_connector_if_exists(
     *,
     name: str,
     allow_defer: bool,
+    operation_id: str | None,
     connect_base_url: str,
     connect_request_fn: Callable[..., Awaitable[Any]],
 ) -> None:
@@ -789,6 +827,7 @@ async def delete_connector_if_exists(
         "DELETE",
         f"{connect_base_url}/connectors/{name}",
         allow_defer=allow_defer,
+        operation_id=operation_id,
         ok_statuses=(200, 202, 204, 404),
     )
 
@@ -858,9 +897,11 @@ def write_mirror_maker_config(
         f"local->remote.topics = {stream_target_prefix}.*",
         "emit.heartbeats.enabled = false",
         "emit.checkpoints.enabled = false",
+        "emit.offset-syncs.enabled = false",
         "sync.group.offsets.enabled = false",
         "refresh.groups.enabled = false",
         "emit.heartbeats.interval.seconds = -1",
+        "heartbeats.replication.enabled = false",
         "local->remote.emit.heartbeats.enabled = false",
         "local->remote.emit.checkpoints.enabled = false",
         "local->remote.sync.group.offsets.enabled = false",
@@ -1002,6 +1043,8 @@ async def update_remote_replication_state(
 async def apply_connector_config(
     *,
     allow_defer: bool,
+    operation_id: str | None,
+    trigger: str,
     ensure_offline_buffer_ready_fn: Callable[[], Awaitable[None]],
     fetch_settings_fn: Callable[[], dict[str, Any]],
     read_secrets_file_fn: Callable[[], dict[str, Any]],
@@ -1016,65 +1059,121 @@ async def apply_connector_config(
     write_mirror_maker_config_fn: Callable[[dict[str, Any], dict[str, Any]], None],
     restart_mirror_maker_fn: Callable[[], Awaitable[None]],
     mm2_config_path: Path,
-    mark_apply_success_fn: Callable[[], Awaitable[None]],
+    mark_apply_success_fn: Callable[..., Awaitable[None]],
+    merge_apply_state_fn: Callable[..., Awaitable[dict[str, Any]]],
+    make_operation_id_fn: Callable[[str], str],
+    format_operation_message_fn: Callable[[str], str],
+    logger: Any,
 ) -> None:
-    await ensure_offline_buffer_ready_fn()
-    settings = fetch_settings_fn()
-    secrets = read_secrets_file_fn()
-    db_password, secrets = ensure_mirror_db_secret_fn(secrets)
-    if not db_password:
-        raise ValueError("Mirror-MariaDB-Passwort fehlt. Bitte TS_CONNECT_MIRROR_DB_PASSWORD setzen.")
-    offline_enabled = True
+    resolved_operation_id = operation_id or make_operation_id_fn("cfg")
+    await merge_apply_state_fn(
+        pending=False,
+        operation_id=resolved_operation_id,
+        trigger=trigger,
+        current_action="Konfiguration wird angewendet",
+    )
+    logger.info(format_operation_message_fn("Starting connector apply", operation_id=resolved_operation_id))
+    try:
+        await ensure_offline_buffer_ready_fn()
+        settings = fetch_settings_fn()
+        secrets = read_secrets_file_fn()
+        db_password, secrets = ensure_mirror_db_secret_fn(secrets)
+        if not db_password:
+            raise ValueError("Mirror-MariaDB-Passwort fehlt. Bitte TS_CONNECT_MIRROR_DB_PASSWORD setzen.")
+        offline_enabled = True
 
-    required = {
-        "confluent_bootstrap": "Confluent Bootstrap",
-        "confluent_sasl_username": "Confluent API Key",
-        "confluent_sasl_password": "Confluent API Secret",
-    }
-    if offline_enabled:
-        required["backup_pg_password"] = "Backup-Datenbank Passwort"
-    missing = [label for key, label in required.items() if not secrets.get(key)]
-    if missing:
-        raise ValueError("Es fehlen Werte in secrets.properties: " + ", ".join(missing))
-
-    connectors = [
-        {
-            "name": default_connector_name,
-            "config": build_connector_config_fn(settings, offline_mode=offline_enabled),
+        required = {
+            "confluent_bootstrap": "Confluent Bootstrap",
+            "confluent_sasl_username": "Confluent API Key",
+            "confluent_sasl_password": "Confluent API Secret",
         }
-    ]
-    if offline_enabled:
-        connectors.append(build_backup_sink_config_fn(settings, secrets))
+        if offline_enabled:
+            required["backup_pg_password"] = "Backup-Datenbank Passwort"
+        missing = [label for key, label in required.items() if not secrets.get(key)]
+        if missing:
+            raise ValueError("Es fehlen Werte in secrets.properties: " + ", ".join(missing))
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        for connector in connectors:
-            await ensure_connector_fn(
-                client,
-                name=connector["name"],
-                config=connector["config"],
-                allow_defer=allow_defer,
-            )
-        if not offline_enabled:
-            await delete_connector_if_exists_fn(
-                client,
-                name=backup_connector_name,
-                allow_defer=allow_defer,
-            )
+        connectors = [
+            {
+                "name": default_connector_name,
+                "config": build_connector_config_fn(settings, offline_mode=offline_enabled),
+            }
+        ]
+        if offline_enabled:
+            connectors.append(build_backup_sink_config_fn(settings, secrets))
 
-    if offline_enabled:
-        try:
-            write_mirror_maker_config_fn(settings, secrets)
-            await restart_mirror_maker_fn()
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"MirrorMaker-Konfiguration fehlgeschlagen: {exc}") from exc
-    else:
-        if mm2_config_path.exists():
+        async with httpx.AsyncClient(timeout=10) as client:
+            for connector in connectors:
+                logger.info(
+                    format_operation_message_fn(
+                        f"Applying connector {connector['name']}",
+                        operation_id=resolved_operation_id,
+                    )
+                )
+                await ensure_connector_fn(
+                    client,
+                    name=connector["name"],
+                    config=connector["config"],
+                    allow_defer=allow_defer,
+                    operation_id=resolved_operation_id,
+                )
+            if not offline_enabled:
+                await delete_connector_if_exists_fn(
+                    client,
+                    name=backup_connector_name,
+                    allow_defer=allow_defer,
+                    operation_id=resolved_operation_id,
+                )
+
+        if offline_enabled:
             try:
-                mm2_config_path.unlink()
-            except OSError:
-                pass
+                await merge_apply_state_fn(
+                    operation_id=resolved_operation_id,
+                    trigger=trigger,
+                    current_action="MirrorMaker-Konfiguration wird aktualisiert",
+                )
+                write_mirror_maker_config_fn(settings, secrets)
+                await restart_mirror_maker_fn()
+            except Exception as exc:  # noqa: BLE001
+                await merge_apply_state_fn(
+                    pending=False,
+                    operation_id=resolved_operation_id,
+                    trigger=trigger,
+                    current_action=None,
+                    last_error=f"MirrorMaker-Konfiguration fehlgeschlagen: {exc}",
+                )
+                logger.error(
+                    format_operation_message_fn(
+                        f"MirrorMaker configuration failed: {exc}",
+                        operation_id=resolved_operation_id,
+                    )
+                )
+                raise RuntimeError(f"MirrorMaker-Konfiguration fehlgeschlagen: {exc}") from exc
+        else:
+            if mm2_config_path.exists():
+                try:
+                    mm2_config_path.unlink()
+                except OSError:
+                    pass
 
-    await mark_apply_success_fn()
+        await mark_apply_success_fn(operation_id=resolved_operation_id, trigger=trigger)
+    except DeferredApplyError:
+        raise
+    except Exception as exc:
+        await merge_apply_state_fn(
+            pending=False,
+            operation_id=resolved_operation_id,
+            trigger=trigger,
+            current_action=None,
+            last_error=str(exc),
+        )
+        logger.warning(
+            format_operation_message_fn(
+                f"Connector apply failed: {exc}",
+                operation_id=resolved_operation_id,
+            )
+        )
+        raise
 
 
 async def check_connector_health(

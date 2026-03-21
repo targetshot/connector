@@ -122,12 +122,17 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Cross-container secrets (e.g. `secrets.properties`) are automatically written with UID/GID `1000`. Override this via `TS_CONNECT_SECRETS_UID`/`TS_CONNECT_SECRETS_GID` if your Kafka Connect container runs with another user.
 - Docker socket access moved into the dedicated `update-agent` service. The UI talks to it via `TS_CONNECT_UPDATE_AGENT_URL` (defaults to `http://update-agent:9000`) and authenticates with `TS_CONNECT_UPDATE_AGENT_TOKEN`. Leave the token empty to auto-generate a shared secret in `ui/data/update-agent.token`.
 - Operative Logs werden standardmäßig host-persistent aus `${TS_CONNECT_WORKSPACE_HOST:-.}/ui/logs` gemountet und liegen im Container unter `${TS_CONNECT_LOG_DIR:-/app/logs}`.
+- Vollständige Mirror-DB-Backups werden standardmäßig täglich als `sql.gz` nach `${TS_CONNECT_MIRROR_BACKUP_DIR:-/workspace/ui/backups/mirror-db}` geschrieben; auf dem Host entspricht das `${TS_CONNECT_MIRROR_BACKUP_HOST_DIR:-${TS_CONNECT_WORKSPACE_HOST}/ui/backups/mirror-db}`.
+- Die Rotation entfernt Mirror-DB-Backups automatisch nach `${TS_CONNECT_MIRROR_BACKUP_RETENTION_DAYS:-30}` Tagen. Der Zeitplan wird über `TS_CONNECT_MIRROR_BACKUP_HOUR` und `TS_CONNECT_MIRROR_BACKUP_MINUTE` gesteuert.
 - Für In-App-Updates aus dem laufenden Container heraus muss `TS_CONNECT_WORKSPACE_HOST` in `.env` auf den absoluten Host-Pfad des Connector-Workspaces gesetzt sein, z.B. `/opt/ts-connect`. Sonst werden Docker-Bind-Mounts aus `/workspace/...` aufgelöst und `docker compose up -d` schlägt fehl.
 - Wichtige Dateien dort:
   - `ui.log`
   - `health.log`
   - `update-agent.log`
   - `update-runner.log`
+- Die UI trennt jetzt zwei Export-Arten:
+  - `Offline-Puffer exportieren`: `buffer_events` als `.ndjson`
+  - `Mirror-DB sichern`: vollständiger Dump der lokalen `ts-mariadb-mirror` als serverseitig abgelegtes `sql.gz`
 - `ui.log` lässt sich weiterhin direkt im UI-Bereich "System-Logs" anzeigen.
 - Der Host-Agent schreibt standardmäßig nach `${TS_HOST_AGENT_LOG_DIR:-/var/lib/ts-connect-host-agent/logs}/host-agent.log`.
 - Gespeicherte Confluent-Zugangsdaten bleiben in `secrets.properties` erhalten; beim UI-/Container-Start wird die Connector-/MirrorMaker-Konfiguration automatisch erneut angewendet, sobald Lizenz und lokale Mirror-DB verfügbar sind.
@@ -166,6 +171,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 - Standardmäßig verbindet sich die Anwendung mit `redpanda:9092`; per `TS_STREAMS_TARGET_PREFIX` lässt sich das Zielpräfix anpassen.
 - Die erzeugten Ziele werden zusätzlich über MirrorMaker 2 in die Confluent Cloud repliziert (`ts.sds-test.*`).
 - Feintuning (Application ID, Pattern, Threads, Commit-Intervalle) erfolgt über die optionalen `TS_STREAMS_*` Variablen in `.env`.
+- Der Topic-Vertrag ist bewusst zweigeteilt: `ts.sds-test.*` bleibt das Produktpräfix, während MM2/Kafka-Connect-Internthemen separat geführt werden. Details und Cleanup-Hinweise stehen in [docs/topic-contract.md](docs/topic-contract.md).
 
 ### Mirror-MariaDB Replikation
 - Die Debezium-Connector-Zugangsdaten für die lokale Mirror-DB werden nicht über die UI geändert, sondern über `.env` gesetzt.
@@ -197,7 +203,9 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 
 ### Lizenzprüfung (Keygen)
 - Hinterlege den vereinsgebundenen Club-Plus-Lizenzschlüssel im Abschnitt *Lizenzverwaltung*. Die UI prüft den Schlüssel gegen Keygen und kann die aktuelle Installation als Maschine aktivieren.
+- Die Club-Lizenz wird cloudseitig in `beta.targetshot.app` (`Club Billing`) verwaltet. Der Connector zieht den Schlüssel derzeit nicht automatisch aus der Cloud, sondern erwartet weiterhin, dass der Operator den zugewiesenen Key lokal einfügt.
 - Eine aktive Club-Plus-Lizenz steuert die Aufbewahrungsdauer des Offline-Puffers. Ohne aktive Lizenz bleibt TargetShot Connect im lokalen Pufferbetrieb.
+- Der Save-Pfad prüft zunächst die Club-Lizenz selbst. Die lokale Maschinenbindung erfolgt erst über *Installation aktivieren*.
 - Umgebungskonfiguration:
   - `TS_CONNECT_KEYGEN_ACCOUNT`: Keygen Account-ID oder Slug.
   - `TS_CONNECT_KEYGEN_API_URL`: optionaler Override für die Keygen-API-URL.
@@ -208,6 +216,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
   - `TS_CONNECT_KEYGEN_MACHINE_FINGERPRINT`: optionaler fester Fingerprint. Ohne Override wird ein stabiler Fingerprint lokal erzeugt und unter `/app/data/machine_fingerprint` gespeichert.
   - `TS_CONNECT_KEYGEN_AUTO_ACTIVATE`: aktiviert die Maschine nach erfolgreicher Prüfung (Standard: `true`).
 - Die Cloud-Replikation (MirrorMaker) startet erst, wenn die Lizenz aktiviert wurde; bis dahin verbleiben alle Events ausschließlich im lokalen Puffer.
+- Ausführlicher Operator-Ablauf für Erstaktivierung, Schlüsseltausch, Maschinenwechsel und Recovery: [docs/keygen-activation-runbook.md](./docs/keygen-activation-runbook.md)
 
 ## Folder Structure
 ```
@@ -217,6 +226,7 @@ Dockerfile (under connect/ and ui/)
 ui/
 connect/
 README.md
+docs/
 ```
 
 Ausführliche Dokumentation: <https://docs.targetshot.app/install/docker-compose/>

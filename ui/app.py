@@ -15,6 +15,7 @@ import sqlite3
 import ssl
 import stat
 import string
+import subprocess
 from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Any
 from urllib.parse import quote
 import psycopg2
 from psycopg2 import sql
+from dotenv import dotenv_values
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from starlette.background import BackgroundTask
@@ -30,11 +32,27 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 import httpx
 import operations_runtime as ops_runtime
+from backup_runtime import (
+    build_backup_filename,
+    list_backup_files,
+    next_daily_run,
+    prune_backup_files,
+    resolve_backup_dir,
+    resolve_host_display_dir,
+    scheduled_run_due,
+)
 from connector_config import CONNECT_SECRETS_PATH, build_connector_config
 from file_utils import atomic_write_text as _atomic_write_text
 from file_utils import fsync_directory as _fsync_directory
 from file_utils import tmp_path_for as _tmp_path_for
-from log_utils import append_rotating_json_line, configure_rotating_logger, env_int_first, resolve_log_dir
+from log_utils import (
+    append_rotating_json_line,
+    configure_rotating_logger,
+    env_int_first,
+    format_operation_message,
+    make_operation_id,
+    resolve_log_dir,
+)
 from security_bootstrap import (
     PASSWORD_PLACEHOLDER,
     PRIVATE_SECRET_FILE_MODE,
@@ -81,6 +99,31 @@ def _env_first(*names: str) -> str | None:
             return value
     return None
 
+
+_workspace_env_cache: dict[str, str] | None = None
+
+
+def _workspace_env_values() -> dict[str, str]:
+    global _workspace_env_cache
+    if _workspace_env_cache is not None:
+        return _workspace_env_cache
+    env_path = WORKSPACE_PATH / ".env"
+    if not env_path.exists():
+        _workspace_env_cache = {}
+        return _workspace_env_cache
+    try:
+        values = dotenv_values(env_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Konnte Workspace-.env nicht lesen: %s", exc)
+        values = {}
+    normalized: dict[str, str] = {}
+    for key, value in values.items():
+        if not key or value is None:
+            continue
+        normalized[str(key)] = str(value)
+    _workspace_env_cache = normalized
+    return _workspace_env_cache
+
 APP_PORT = int(os.getenv("PORT", "8080"))
 CONNECT_BASE_URL = os.getenv("CONNECT_BASE_URL", "http://kafka-connect:8083")
 DEFAULT_CONNECTOR_NAME = os.getenv("DEFAULT_CONNECTOR_NAME", "targetshot-debezium")
@@ -90,6 +133,7 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
 WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
+WORKSPACE_HOST_PATH = (os.getenv("TS_CONNECT_WORKSPACE_HOST") or "").strip()
 LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
 DATA_DIR = Path(os.getenv("TS_CONNECT_DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -221,6 +265,24 @@ if DEFAULT_MIRROR_DB_PORT <= 0:
     logger.warning("Ungültiger TS_CONNECT_DEFAULT_DB_PORT=%s, nutze 3306", DEFAULT_MIRROR_DB_PORT)
     DEFAULT_MIRROR_DB_PORT = 3306
 DEFAULT_MIRROR_DB_USER = (os.getenv("TS_CONNECT_DEFAULT_DB_USER", "debezium_sync") or "debezium_sync").strip() or "debezium_sync"
+DEFAULT_MIRROR_DB_NAME = (os.getenv("TS_CONNECT_MIRROR_DB_NAME", "SMDB") or "SMDB").strip() or "SMDB"
+MIRROR_DB_PASSWORD = (os.getenv("TS_CONNECT_MIRROR_DB_PASSWORD") or os.getenv("MARIADB_PASSWORD") or "").strip()
+MIRROR_DB_CONTAINER_NAME = (os.getenv("TS_CONNECT_MIRROR_DB_CONTAINER_NAME", "ts-mariadb-mirror") or "ts-mariadb-mirror").strip() or "ts-mariadb-mirror"
+MIRROR_BACKUP_ENABLED = (os.getenv("TS_CONNECT_MIRROR_BACKUP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"})
+MIRROR_BACKUP_DIR = resolve_backup_dir(
+    os.getenv("TS_CONNECT_MIRROR_BACKUP_DIR"),
+    workspace_path=WORKSPACE_PATH,
+    default_subdir="ui/backups/mirror-db",
+)
+MIRROR_BACKUP_HOST_DIR = resolve_host_display_dir(
+    os.getenv("TS_CONNECT_MIRROR_BACKUP_HOST_DIR"),
+    workspace_host=WORKSPACE_HOST_PATH,
+    default_subdir="ui/backups/mirror-db",
+)
+MIRROR_BACKUP_RETENTION_DAYS = max(_env_int("TS_CONNECT_MIRROR_BACKUP_RETENTION_DAYS", 30) or 30, 1)
+MIRROR_BACKUP_HOUR = min(max(_env_int("TS_CONNECT_MIRROR_BACKUP_HOUR", 2) or 2, 0), 23)
+MIRROR_BACKUP_MINUTE = min(max(_env_int("TS_CONNECT_MIRROR_BACKUP_MINUTE", 15) or 15, 0), 59)
+MIRROR_BACKUP_POLL_SECONDS = max(_env_int("TS_CONNECT_MIRROR_BACKUP_POLL_SECONDS", 60) or 60, 15)
 DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mariadb-mirror")
 DEFAULT_SOURCE_DB_HOST = os.getenv("TS_CONNECT_SOURCE_DB_HOST", "").strip()
 DEFAULT_SOURCE_DB_PORT = int(os.getenv("TS_CONNECT_SOURCE_DB_PORT", "3306"))
@@ -465,6 +527,12 @@ def _keygen_can_activate(validation: dict[str, Any]) -> bool:
     return _normalize_provider_status(validation.get("status")) in KEYGEN_ACTIVATABLE_STATUSES
 
 
+def _keygen_license_entitled(validation: dict[str, Any]) -> bool:
+    if bool(validation.get("valid")):
+        return True
+    return _normalize_provider_status(validation.get("status")) in KEYGEN_ACTIVATABLE_STATUSES
+
+
 async def _find_keygen_machine(
     license_key: str,
     fingerprints: list[str],
@@ -574,6 +642,7 @@ OS_UPDATE_STATE_PATH = DATA_DIR / "os_update_state.json"
 OS_UPDATE_MAX_AGE_SECONDS = int(os.getenv("TS_CONNECT_OS_UPDATE_MAX_AGE", "21600"))
 OS_UPDATE_LOG_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_LOG_LIMIT", "400"))
 OS_UPDATE_PACKAGE_LIMIT = int(os.getenv("TS_CONNECT_OS_UPDATE_PACKAGE_LIMIT", "80"))
+MIRROR_BACKUP_STATE_PATH = DATA_DIR / "mirror_backup_state.json"
 DEFAULT_UPDATE_IMAGE = "targetshot.azurecr.io/ts-connect:stable"
 
 update_state_manager = UpdateStateManager(UPDATE_STATE_PATH)
@@ -587,11 +656,15 @@ _update_agent_sync_lock = asyncio.Lock()
 _os_update_state_lock = asyncio.Lock()
 _os_update_refresh_lock = asyncio.Lock()
 _os_update_task: asyncio.Task | None = None
+_mirror_backup_state_lock = asyncio.Lock()
+_mirror_backup_run_lock = asyncio.Lock()
+_mirror_backup_task: asyncio.Task | None = None
 _git_safe_configured = False
 
 _apply_state_lock = asyncio.Lock()
 _registry_login_lock = asyncio.Lock()
 _logged_in_registries: set[str] = set()
+LICENSE_FORM_KEY_SESSION = "license_form_key"
 
 
 DeferredApplyError = ops_runtime.DeferredApplyError
@@ -604,6 +677,9 @@ def _now_utc_iso() -> str:
 def _default_apply_state() -> dict:
     return {
         "pending": False,
+        "operation_id": None,
+        "trigger": None,
+        "current_action": None,
         "last_error": None,
         "last_attempt": None,
         "last_success": None,
@@ -705,6 +781,276 @@ async def merge_os_update_state(
             state[key] = value
         _atomic_write_text(OS_UPDATE_STATE_PATH, json.dumps(state, ensure_ascii=False) + "\n")
         return state
+
+
+def _next_mirror_backup_run_iso(*, now: datetime | None = None) -> str | None:
+    if not MIRROR_BACKUP_ENABLED:
+        return None
+    reference = now or datetime.now(timezone.utc)
+    return next_daily_run(
+        now=reference,
+        hour=MIRROR_BACKUP_HOUR,
+        minute=MIRROR_BACKUP_MINUTE,
+        tz=LOCAL_TIMEZONE,
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _default_mirror_backup_state() -> dict[str, Any]:
+    return {
+        "enabled": MIRROR_BACKUP_ENABLED,
+        "in_progress": False,
+        "last_started": None,
+        "last_success": None,
+        "last_error": None,
+        "last_file": None,
+        "last_file_size": None,
+        "last_run_slot": None,
+        "next_run": _next_mirror_backup_run_iso(),
+    }
+
+
+def _read_mirror_backup_state_unlocked() -> dict[str, Any]:
+    if MIRROR_BACKUP_STATE_PATH.exists():
+        try:
+            data = json.loads(MIRROR_BACKUP_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            data = {}
+    else:
+        data = {}
+    state = _default_mirror_backup_state()
+    if isinstance(data, dict):
+        state.update({key: data.get(key) for key in state.keys() if key in data})
+    state["enabled"] = MIRROR_BACKUP_ENABLED
+    if not state.get("next_run"):
+        state["next_run"] = _next_mirror_backup_run_iso()
+    return state
+
+
+async def get_mirror_backup_state() -> dict[str, Any]:
+    async with _mirror_backup_state_lock:
+        return _read_mirror_backup_state_unlocked()
+
+
+async def merge_mirror_backup_state(**updates: Any) -> dict[str, Any]:
+    async with _mirror_backup_state_lock:
+        state = _read_mirror_backup_state_unlocked()
+        for key, value in updates.items():
+            state[key] = value
+        if "enabled" not in updates:
+            state["enabled"] = MIRROR_BACKUP_ENABLED
+        if "next_run" not in updates:
+            state["next_run"] = _next_mirror_backup_run_iso()
+        _atomic_write_text(MIRROR_BACKUP_STATE_PATH, json.dumps(state, ensure_ascii=False) + "\n")
+        return state
+
+
+def _format_size(size_bytes: int | None) -> str:
+    if not size_bytes or size_bytes <= 0:
+        return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size_bytes)
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+    if index == 0:
+        return f"{int(value)} {units[index]}"
+    return f"{value:.1f} {units[index]}"
+
+
+def _mirror_backup_entries(limit: int = 8) -> list[dict[str, object]]:
+    entries = list_backup_files(MIRROR_BACKUP_DIR, limit=limit)
+    for entry in entries:
+        entry["size_label"] = _format_size(int(entry.get("size_bytes") or 0))
+        entry["download_url"] = f"/api/backup/mirror-db/download?name={quote(str(entry['name']))}"
+    return entries
+
+
+def _validate_backup_filename(name: str) -> str:
+    candidate = (name or "").strip()
+    if not candidate or Path(candidate).name != candidate or "/" in candidate or "\\" in candidate:
+        raise HTTPException(status_code=400, detail="Ungültiger Backup-Dateiname.")
+    if not candidate.startswith("mirror-db-backup-") or not candidate.endswith(".sql.gz"):
+        raise HTTPException(status_code=400, detail="Ungültiger Backup-Dateiname.")
+    return candidate
+
+
+def _prune_mirror_backups_now() -> list[Path]:
+    return prune_backup_files(
+        MIRROR_BACKUP_DIR,
+        retention_days=MIRROR_BACKUP_RETENTION_DAYS,
+        now=datetime.now(timezone.utc),
+    )
+
+
+def _create_mirror_backup_sync(target_path: Path) -> int:
+    workspace_env = _workspace_env_values()
+    dump_user = "root"
+    dump_password = (workspace_env.get("TS_CONNECT_MIRROR_ROOT_PASSWORD") or "").strip()
+    if not dump_password:
+        dump_user = DEFAULT_MIRROR_DB_USER
+        dump_password = MIRROR_DB_PASSWORD
+    if not dump_password:
+        raise RuntimeError("Kein Mirror-DB-Passwort für den Vollbackup-Dump verfügbar.")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _tmp_path_for(target_path)
+    command = [
+        "docker",
+        "exec",
+        "-e",
+        f"MARIADB_PWD={dump_password}",
+        MIRROR_DB_CONTAINER_NAME,
+        "mariadb-dump",
+        "-h127.0.0.1",
+        f"-u{dump_user}",
+        "--single-transaction",
+        "--quick",
+        "--routines",
+        "--events",
+        "--triggers",
+        "--hex-blob",
+        "--default-character-set=utf8mb4",
+        "--databases",
+        DEFAULT_MIRROR_DB_NAME,
+    ]
+    stderr_output = ""
+    try:
+        with temp_path.open("wb") as raw_handle:
+            with gzip.GzipFile(
+                filename=target_path.with_suffix("").name,
+                mode="wb",
+                fileobj=raw_handle,
+                compresslevel=6,
+                mtime=0,
+            ) as gzip_handle:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                assert process.stdout is not None
+                assert process.stderr is not None
+                try:
+                    while True:
+                        chunk = process.stdout.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        gzip_handle.write(chunk)
+                    stderr_output = process.stderr.read().decode("utf-8", errors="replace").strip()
+                    return_code = process.wait(timeout=60)
+                except Exception:  # noqa: BLE001
+                    process.kill()
+                    raise
+            raw_handle.flush()
+            os.fsync(raw_handle.fileno())
+        if return_code != 0:
+            detail = stderr_output or f"mariadb-dump exited with {return_code}"
+            raise RuntimeError(detail)
+        if temp_path.stat().st_size <= 0:
+            raise RuntimeError("Der Mirror-DB-Dump ist leer.")
+        temp_path.replace(target_path)
+        _fsync_directory(target_path.parent)
+        return target_path.stat().st_size
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+async def _run_mirror_backup(*, trigger: str, slot_id: str | None = None) -> dict[str, Any]:
+    async with _mirror_backup_run_lock:
+        if not MIRROR_BACKUP_ENABLED:
+            raise RuntimeError("Mirror-DB-Backups sind deaktiviert.")
+        started_at = _now_utc_iso()
+        await merge_mirror_backup_state(
+            in_progress=True,
+            last_started=started_at,
+            last_error=None,
+        )
+        logger.info("Starte Mirror-DB-Backup (%s) nach %s", trigger, MIRROR_BACKUP_DIR)
+        try:
+            removed_before = await asyncio.to_thread(_prune_mirror_backups_now)
+            if removed_before:
+                logger.info("Mirror-DB-Backup-Rotation entfernte %s alte Datei(en)", len(removed_before))
+            filename = build_backup_filename("mirror-db-backup", datetime.now(timezone.utc), ".sql.gz")
+            target_path = MIRROR_BACKUP_DIR / filename
+            file_size = await asyncio.to_thread(_create_mirror_backup_sync, target_path)
+            removed_after = await asyncio.to_thread(_prune_mirror_backups_now)
+            if removed_after:
+                logger.info("Mirror-DB-Backup-Rotation entfernte %s Datei(en) nach Backup", len(removed_after))
+            next_run = _next_mirror_backup_run_iso()
+            state = await merge_mirror_backup_state(
+                in_progress=False,
+                last_success=_now_utc_iso(),
+                last_error=None,
+                last_file=filename,
+                last_file_size=file_size,
+                last_run_slot=slot_id,
+                next_run=next_run,
+            )
+            logger.info("Mirror-DB-Backup erfolgreich erstellt: %s (%s)", target_path, _format_size(file_size))
+            return state
+        except Exception as exc:  # noqa: BLE001
+            detail = _short_error_message(str(exc), 240)
+            next_run = _next_mirror_backup_run_iso()
+            await merge_mirror_backup_state(
+                in_progress=False,
+                last_error=detail,
+                last_run_slot=slot_id,
+                next_run=next_run,
+            )
+            logger.warning("Mirror-DB-Backup fehlgeschlagen: %s", detail)
+            raise
+
+
+async def _refresh_mirror_backup_state() -> dict[str, Any]:
+    if MIRROR_BACKUP_ENABLED:
+        await asyncio.to_thread(_prune_mirror_backups_now)
+    state = await merge_mirror_backup_state(enabled=MIRROR_BACKUP_ENABLED)
+    state["last_file_size_bytes"] = state.get("last_file_size")
+    state["last_file_size"] = _format_size(int(state.get("last_file_size") or 0)) if state.get("last_file_size") else None
+    state["backups"] = _mirror_backup_entries()
+    state["retention_days"] = MIRROR_BACKUP_RETENTION_DAYS
+    state["directory"] = str(MIRROR_BACKUP_DIR)
+    state["server_directory"] = MIRROR_BACKUP_HOST_DIR or str(MIRROR_BACKUP_DIR)
+    state["schedule"] = {
+        "hour": MIRROR_BACKUP_HOUR,
+        "minute": MIRROR_BACKUP_MINUTE,
+        "timezone": str(LOCAL_TIMEZONE),
+    }
+    return state
+
+
+async def _maybe_run_scheduled_mirror_backup() -> None:
+    if not MIRROR_BACKUP_ENABLED:
+        return
+    state = await get_mirror_backup_state()
+    due, slot_id, next_run_dt = scheduled_run_due(
+        now=datetime.now(timezone.utc),
+        last_slot_id=state.get("last_run_slot"),
+        hour=MIRROR_BACKUP_HOUR,
+        minute=MIRROR_BACKUP_MINUTE,
+        tz=LOCAL_TIMEZONE,
+    )
+    next_run = next_run_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    if state.get("next_run") != next_run:
+        await merge_mirror_backup_state(next_run=next_run)
+    if not due or state.get("in_progress"):
+        return
+    try:
+        await _run_mirror_backup(trigger="auto", slot_id=slot_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Automatisches Mirror-DB-Backup fehlgeschlagen", exc_info=True)
+
+
+async def _mirror_backup_worker() -> None:
+    while True:
+        try:
+            await _maybe_run_scheduled_mirror_backup()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mirror-DB-Backup-Worker fehlgeschlagen: %s", exc)
+        await asyncio.sleep(MIRROR_BACKUP_POLL_SECONDS)
 
 
 def _should_refresh_os_updates(state: dict) -> bool:
@@ -898,20 +1244,76 @@ def _parse_license_validation_payload(payload: dict[str, Any]) -> dict[str, Any]
     return _parse_keygen_license_validation_payload(payload)
 
 
-async def validate_license_key_remote(license_key: str) -> dict[str, Any]:
+def _build_keygen_validate_meta(license_key: str, *, include_machine_scope: bool = True) -> dict[str, Any]:
     key = (license_key or "").strip()
     if not key:
         raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
     meta: dict[str, Any] = {"key": key}
-    fingerprints = _resolve_machine_fingerprint_scope()
     scope: dict[str, Any] = {}
     if KEYGEN_POLICY_ID:
         scope["policy"] = KEYGEN_POLICY_ID
+    if include_machine_scope:
+        fingerprints = _resolve_machine_fingerprint_scope()
+    else:
+        fingerprints = []
     if fingerprints:
         scope["fingerprint"] = fingerprints[0]
         scope["fingerprints"] = fingerprints
     if scope:
         meta["scope"] = scope
+    return meta
+
+
+def _build_keygen_license_headers(license_key: str) -> dict[str, str]:
+    key = (license_key or "").strip()
+    if not key:
+        raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
+    return {
+        "Accept": "application/vnd.api+json",
+        "Authorization": f"License {key}",
+    }
+
+
+async def _lookup_keygen_license_by_key(license_key: str) -> dict[str, Any] | None:
+    key = (license_key or "").strip()
+    if not key:
+        raise ValueError("Bitte einen Lizenzschlüssel eingeben.")
+    if not KEYGEN_BASE_URL:
+        raise RuntimeError("Keygen ist nicht konfiguriert.")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                f"{KEYGEN_BASE_URL}/licenses/me",
+                headers=_build_keygen_license_headers(key),
+            )
+    except httpx.RequestError as exc:  # noqa: BLE001
+        raise RuntimeError(f"Lizenzserver nicht erreichbar: {exc}") from exc
+    if response.status_code in {404, 405}:
+        return None
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Lizenzprüfung fehlgeschlagen ({response.status_code}): {_extract_error_message(response)}"
+        )
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Lizenzserver lieferte eine ungültige Antwort.") from exc
+    parsed = _parse_keygen_license_validation_payload(data if isinstance(data, dict) else {})
+    if not parsed.get("message") and isinstance(data, dict):
+        parsed["message"] = _extract_keygen_message(data, data.get("meta") if isinstance(data.get("meta"), dict) else {})
+    if parsed.get("message"):
+        parsed["error"] = parsed["message"]
+    return parsed
+
+
+async def validate_license_key_remote(license_key: str, *, include_machine_scope: bool = True) -> dict[str, Any]:
+    key = (license_key or "").strip()
+    if not include_machine_scope:
+        direct_lookup = await _lookup_keygen_license_by_key(key)
+        if direct_lookup is not None:
+            return direct_lookup
+    meta = _build_keygen_validate_meta(license_key, include_machine_scope=include_machine_scope)
+    fingerprints = _resolve_machine_fingerprint_scope() if include_machine_scope else []
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(
@@ -1951,11 +2353,17 @@ def _update_agent_sync_task_done(task: asyncio.Task) -> None:
         logger.warning("Automatischer Update-Agent Sync fehlgeschlagen: %s", exc)
 
 
-async def _start_update_runner(target_ref: str | None, repo_slug: str | None, env_file: str | None) -> str:
+async def _start_update_runner(
+    target_ref: str | None,
+    repo_slug: str | None,
+    env_file: str | None,
+    operation_id: str | None,
+) -> str:
     return await ops_runtime.start_update_runner(
         target_ref,
         repo_slug,
         env_file,
+        operation_id=operation_id,
         project_name=PROJECT_NAME,
         update_agent_request_fn=_update_agent_request,
     )
@@ -1981,6 +2389,8 @@ async def _launch_update_job(
         determine_repo_slug_fn=_determine_repo_slug,
         detect_env_file_name_fn=_detect_env_file_name,
         now_utc_iso_fn=_now_utc_iso,
+        make_operation_id_fn=make_operation_id,
+        format_operation_message_fn=format_operation_message,
         append_update_log_fn=append_update_log,
         merge_update_state_async_fn=merge_update_state_async,
         start_update_runner_fn=_start_update_runner,
@@ -2037,10 +2447,12 @@ def _is_transient_request_error(exc: httpx.RequestError) -> bool:
     )
 
 
-async def _schedule_retry(err_msg: str) -> None:
+async def _schedule_retry(err_msg: str, *, operation_id: str | None = None) -> None:
     await ops_runtime.schedule_retry(
         err_msg,
+        operation_id=operation_id,
         format_apply_error_fn=_format_apply_error,
+        format_operation_message_fn=format_operation_message,
         merge_apply_state_fn=merge_apply_state,
         next_retry_iso_fn=_next_retry_iso,
         now_utc_iso_fn=_now_utc_iso,
@@ -2048,10 +2460,14 @@ async def _schedule_retry(err_msg: str) -> None:
     )
 
 
-async def _mark_apply_success() -> None:
+async def _mark_apply_success(*, operation_id: str | None = None, trigger: str | None = None) -> None:
     await ops_runtime.mark_apply_success(
+        operation_id=operation_id,
+        trigger=trigger,
         merge_apply_state_fn=merge_apply_state,
         now_utc_iso_fn=_now_utc_iso,
+        format_operation_message_fn=format_operation_message,
+        logger=logger,
     )
 
 
@@ -2064,6 +2480,8 @@ async def _connector_retry_worker() -> None:
         format_apply_error_fn=_format_apply_error,
         now_utc_iso_fn=_now_utc_iso,
         next_retry_iso_fn=_next_retry_iso,
+        make_operation_id_fn=make_operation_id,
+        format_operation_message_fn=format_operation_message,
         logger=logger,
     )
 
@@ -2687,6 +3105,26 @@ def write_license_meta(data: dict[str, Any]) -> None:
     )
 
 
+def _set_license_form_key(request: Request, value: str | None) -> None:
+    key = (value or "").strip()
+    if key:
+        request.session[LICENSE_FORM_KEY_SESSION] = key
+    else:
+        request.session.pop(LICENSE_FORM_KEY_SESSION, None)
+
+
+def _get_license_form_key(request: Request) -> str:
+    return str(request.session.get(LICENSE_FORM_KEY_SESSION) or "").strip()
+
+
+def _resolve_license_form_state(stored_key: str, draft_key: str) -> tuple[str, str, bool]:
+    stored = (stored_key or "").strip()
+    draft = (draft_key or "").strip()
+    if draft and draft == stored:
+        draft = ""
+    return (draft or stored), draft, bool(draft and draft != stored)
+
+
 def _license_is_active(settings: dict) -> bool:
     key = (settings.get("license_key") or "").strip()
     if not key:
@@ -2702,6 +3140,16 @@ def _license_is_active(settings: dict) -> bool:
     if expires_dt and expires_dt < datetime.now(timezone.utc):
         return False
     return True
+
+
+def _license_validation_state(validation: dict[str, Any]) -> tuple[str, int, str, str | None, str]:
+    entitled = _keygen_license_entitled(validation)
+    plan = normalize_license_tier(validation.get("plan") if entitled else DEFAULT_LICENSE_TIER)
+    retention_days = LICENSE_RETENTION_DAYS.get(plan, DEFAULT_RETENTION_DAYS)
+    status = validation.get("status") or ("valid" if validation.get("valid") else "unbekannt")
+    expires_at_norm = _normalize_iso8601(validation.get("expires_at") or validation.get("raw_expires_at"))
+    last_checked = _now_utc_iso()
+    return plan, retention_days, status, expires_at_norm, last_checked
 
 
 def _rotate_backup_password(*, settings: dict, current_password: str, new_password: str) -> None:
@@ -2834,7 +3282,7 @@ async def init_admin_password() -> None:
     cloud_replication_active = _license_is_active(current_settings)
     if cloud_replication_active:
         try:
-            await apply_connector_config()
+            await apply_connector_config(trigger="startup")
         except DeferredApplyError as exc:
             logger.warning("Automatic connector apply deferred on startup: %s", exc)
         except ValueError as exc:
@@ -2858,6 +3306,10 @@ async def init_admin_password() -> None:
     if _update_agent_sync_task is None:
         _update_agent_sync_task = asyncio.create_task(_delayed_update_agent_sync())
         _update_agent_sync_task.add_done_callback(_update_agent_sync_task_done)
+    global _mirror_backup_task
+    await _refresh_mirror_backup_state()
+    if MIRROR_BACKUP_ENABLED and _mirror_backup_task is None:
+        _mirror_backup_task = asyncio.create_task(_mirror_backup_worker())
 
 
 def _extract_error_message(resp: httpx.Response) -> str:
@@ -2889,6 +3341,7 @@ async def _connect_request(
     *,
     json_payload: dict | None = None,
     allow_defer: bool,
+    operation_id: str | None = None,
     ok_statuses: tuple[int, ...] = (200, 201, 202, 204),
 ) -> httpx.Response:
     return await ops_runtime.connect_request(
@@ -2896,6 +3349,7 @@ async def _connect_request(
         method,
         url,
         allow_defer=allow_defer,
+        operation_id=operation_id,
         schedule_retry_fn=_schedule_retry,
         short_error_message=_short_error_message,
         extract_error_message_fn=_extract_error_message,
@@ -2912,12 +3366,14 @@ async def _ensure_connector(
     name: str,
     config: dict,
     allow_defer: bool,
+    operation_id: str | None = None,
 ) -> None:
     await ops_runtime.ensure_connector(
         client,
         name=name,
         config=config,
         allow_defer=allow_defer,
+        operation_id=operation_id,
         connect_base_url=CONNECT_BASE_URL,
         connect_request_fn=_connect_request,
     )
@@ -2928,19 +3384,28 @@ async def _delete_connector_if_exists(
     *,
     name: str,
     allow_defer: bool,
+    operation_id: str | None = None,
 ) -> None:
     await ops_runtime.delete_connector_if_exists(
         client,
         name=name,
         allow_defer=allow_defer,
+        operation_id=operation_id,
         connect_base_url=CONNECT_BASE_URL,
         connect_request_fn=_connect_request,
     )
 
 
-async def apply_connector_config(*, allow_defer: bool = True) -> None:
+async def apply_connector_config(
+    *,
+    allow_defer: bool = True,
+    operation_id: str | None = None,
+    trigger: str = "manual",
+) -> None:
     await ops_runtime.apply_connector_config(
         allow_defer=allow_defer,
+        operation_id=operation_id,
+        trigger=trigger,
         ensure_offline_buffer_ready_fn=ensure_offline_buffer_ready,
         fetch_settings_fn=fetch_settings,
         read_secrets_file_fn=read_secrets_file,
@@ -2956,6 +3421,10 @@ async def apply_connector_config(*, allow_defer: bool = True) -> None:
         restart_mirror_maker_fn=restart_mirror_maker,
         mm2_config_path=MM2_CONFIG_PATH,
         mark_apply_success_fn=_mark_apply_success,
+        merge_apply_state_fn=merge_apply_state,
+        make_operation_id_fn=make_operation_id,
+        format_operation_message_fn=format_operation_message,
+        logger=logger,
     )
 
 # --------- Views ----------
@@ -2976,6 +3445,14 @@ def require_session(request: Request):
 def build_index_context(request: Request) -> dict:
     data = fetch_settings().copy()
     secrets_data = read_secrets_file()
+    stored_license_key = str(data.get("license_key") or "").strip()
+    draft_license_key = _get_license_form_key(request)
+    input_license_key, resolved_draft_key, has_pending_license_key = _resolve_license_form_state(
+        stored_license_key,
+        draft_license_key,
+    )
+    if draft_license_key and not resolved_draft_key:
+        _set_license_form_key(request, "")
     data["retention_days"] = LICENSE_RETENTION_DAYS.get(
         data["license_tier"],
         LICENSE_RETENTION_DAYS[DEFAULT_LICENSE_TIER],
@@ -3040,7 +3517,10 @@ def build_index_context(request: Request) -> dict:
         activation_display = activation_dt.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     license_meta = read_license_meta()
     license_info = {
-        "key": data.get("license_key", ""),
+        "key": input_license_key,
+        "stored_key": stored_license_key,
+        "draft_key": resolved_draft_key,
+        "has_pending_key": has_pending_license_key,
         "status": data.get("license_status", "unknown"),
         "status_label": license_status_label,
         "plan": data.get("license_tier", DEFAULT_LICENSE_TIER),
@@ -3235,8 +3715,9 @@ async def test_backup_db():
         return {"ok": False, "msg": str(exc)}
 
 
+@app.get("/api/offline-buffer/export", dependencies=[Depends(require_session)])
 @app.get("/api/backup/export", dependencies=[Depends(require_session)])
-async def export_backup():
+async def export_offline_buffer():
     await ensure_offline_buffer_ready()
     settings = fetch_settings()
     secrets_data = read_secrets_file()
@@ -3314,7 +3795,7 @@ async def export_backup():
                                 + "\n"
                             )
             except psycopg2.Error as exc:  # noqa: BLE001
-                raise HTTPException(status_code=503, detail=f"Backup-Export fehlgeschlagen: {exc}") from exc
+                raise HTTPException(status_code=503, detail=f"Offline-Puffer-Export fehlgeschlagen: {exc}") from exc
     except Exception:
         if export_path.exists():
             export_path.unlink(missing_ok=True)
@@ -3325,6 +3806,36 @@ async def export_backup():
         media_type="application/x-ndjson",
         filename=export_path.name,
         background=BackgroundTask(export_path.unlink),
+    )
+
+
+@app.get("/api/backup/mirror-db", dependencies=[Depends(require_session)])
+async def mirror_backup_status():
+    return await _refresh_mirror_backup_state()
+
+
+@app.post("/api/backup/mirror-db/run", dependencies=[Depends(require_session)])
+async def run_mirror_backup():
+    try:
+        await _run_mirror_backup(trigger="manual")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_short_error_message(str(exc), 240))
+    return await _refresh_mirror_backup_state()
+
+
+@app.get("/api/backup/mirror-db/download", dependencies=[Depends(require_session)])
+async def download_mirror_backup(name: str):
+    candidate = _validate_backup_filename(name)
+    backup_path = (MIRROR_BACKUP_DIR / candidate).resolve()
+    allowed_root = MIRROR_BACKUP_DIR.resolve()
+    if backup_path.parent != allowed_root:
+        raise HTTPException(status_code=400, detail="Ungültiger Backup-Dateiname.")
+    if not backup_path.exists() or not backup_path.is_file():
+        raise HTTPException(status_code=404, detail="Mirror-DB-Backup nicht gefunden.")
+    return FileResponse(
+        backup_path,
+        media_type="application/gzip",
+        filename=backup_path.name,
     )
 
 
@@ -3516,6 +4027,7 @@ async def save(
         verein_identifier = str(settings.get("topic_prefix") or settings.get("server_id") or "").strip()
 
         if not license_key_value:
+            _set_license_form_key(request, "")
             plan = DEFAULT_LICENSE_TIER
             retention_days = LICENSE_RETENTION_DAYS[plan]
             now_iso = _now_utc_iso()
@@ -3559,20 +4071,15 @@ async def save(
             return RedirectResponse("/", status_code=303)
 
         try:
-            validation = await validate_license_key_remote(license_key_value)
+            validation = await validate_license_key_remote(license_key_value, include_machine_scope=False)
         except Exception as exc:  # noqa: BLE001
+            _set_license_form_key(request, license_key_value)
             request.session["error_message"] = f"Lizenzprüfung fehlgeschlagen: {exc}"
             return RedirectResponse("/", status_code=303)
         write_license_meta(validation)
 
-        plan = validation.get("plan") or DEFAULT_LICENSE_TIER
-        if not validation.get("valid"):
-            plan = DEFAULT_LICENSE_TIER
-        plan = normalize_license_tier(plan)
-        retention_days = LICENSE_RETENTION_DAYS.get(plan, DEFAULT_RETENTION_DAYS)
-        status = validation.get("status") or ("valid" if validation.get("valid") else "unbekannt")
-        expires_at_norm = _normalize_iso8601(validation.get("expires_at") or validation.get("raw_expires_at"))
-        last_checked = _now_utc_iso()
+        entitled = _keygen_license_entitled(validation)
+        plan, retention_days, status, expires_at_norm, last_checked = _license_validation_state(validation)
 
         new_activation_id = current_activation_id
         new_activation_at = current_activation_at
@@ -3584,12 +4091,14 @@ async def save(
         shooter_error = shooter_stats.get("error")
         shooter_count = shooter_stats.get("count")
         if shooter_error and shooter_count is None:
+            _set_license_form_key(request, license_key_value)
             request.session["error_message"] = f"Schützenprüfung fehlgeschlagen: {shooter_error}"
             return RedirectResponse("/", status_code=303)
         if shooter_count is not None and not plan_allows_shooter_count(plan, shooter_count):
             required_plan = required_plan_for_shooter_count(shooter_count)
             required_label = plan_display_name(required_plan)
             limit_label = plan_limit_label(plan)
+            _set_license_form_key(request, license_key_value)
             request.session["error_message"] = (
                 f"Plan {plan.capitalize()} reicht nicht aus (Limit: {limit_label}). "
                 f"Für {shooter_count} Schützen wird mindestens der Plan {required_label} benötigt."
@@ -3624,6 +4133,8 @@ async def save(
                     try:
                         validation = await validate_license_key_remote(license_key_value)
                         write_license_meta(validation)
+                        entitled = _keygen_license_entitled(validation)
+                        plan, retention_days, status, expires_at_norm, last_checked = _license_validation_state(validation)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("Keygen validation after activation failed: %s", exc)
                 elif activation_feedback and activation_feedback.get("message") and not activation_error:
@@ -3654,6 +4165,7 @@ async def save(
 
         store_license_key(license_key_value)
         write_license_meta(validation)
+        _set_license_form_key(request, "")
 
         if settings.get("offline_buffer_enabled") and secrets_data.get("backup_pg_password"):
             try:
@@ -3679,7 +4191,7 @@ async def save(
             message_parts.append("Lizenz aktiviert")
         message = " | ".join(message_parts)
 
-        if validation.get("valid"):
+        if entitled:
             request.session["flash_message"] = f"Lizenz erfolgreich geprüft. {message}"
             if prune_error:
                 request.session["error_message"] = prune_error
@@ -3690,6 +4202,10 @@ async def save(
             elif activation_requested and new_activation_id:
                 extra = request.session.get("flash_message")
                 activation_msg = "Lizenz erfolgreich aktiviert."
+                request.session["flash_message"] = f"{extra} {activation_msg}" if extra else activation_msg
+            elif LICENSE_MACHINE_ACTIVATION_ENABLED and not new_activation_id:
+                extra = request.session.get("flash_message")
+                activation_msg = "Lizenz gespeichert. Diese Installation muss noch mit Keygen aktiviert werden."
                 request.session["flash_message"] = f"{extra} {activation_msg}" if extra else activation_msg
         else:
             reason = validation.get("message") or validation.get("error") or "Lizenz ungültig."
@@ -3791,7 +4307,7 @@ async def save(
     if section_key == "offline":
         await ensure_offline_buffer_ready()
         try:
-            await apply_connector_config()
+            await apply_connector_config(trigger="offline")
         except DeferredApplyError as exc:
             request.session["flash_message"] = (
                 "Offline-Puffer wird erneut angewendet, sobald die lokale Mirror-MariaDB erreichbar ist. "
@@ -3870,7 +4386,7 @@ async def save(
         write_secrets_file(secrets_data)
 
         try:
-            await apply_connector_config()
+            await apply_connector_config(trigger="confluent")
         except DeferredApplyError as exc:
             request.session["flash_message"] = (
                 "Confluent-Einstellungen gespeichert. Connector-Update wird automatisch erneut versucht, "
@@ -3940,7 +4456,7 @@ async def connector_resnapshot(pw: str = Form(...)):
         if resp.status_code not in (200, 202, 204, 404):
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
     try:
-        await apply_connector_config()
+        await apply_connector_config(trigger="resnapshot")
     except DeferredApplyError as exc:
         return {
             "ok": True,

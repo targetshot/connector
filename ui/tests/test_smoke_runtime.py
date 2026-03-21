@@ -154,6 +154,12 @@ class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
         def now_utc_iso():
             return "2026-03-20T12:00:00+00:00"
 
+        def make_operation_id(prefix):
+            return f"{prefix}-abcd1234"
+
+        def format_operation_message(message, *, operation_id=None):
+            return f"[op={operation_id}] {message}" if operation_id else message
+
         async def append_update_log(lines, *, reset=False):
             log_calls.append({"lines": list(lines), "reset": reset})
             return {}
@@ -162,12 +168,13 @@ class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
             merge_calls.append(dict(updates))
             return updates
 
-        async def start_update_runner(target_ref, repo_slug, env_file):
+        async def start_update_runner(target_ref, repo_slug, env_file, operation_id):
             runner_calls.append(
                 {
                     "target_ref": target_ref,
                     "repo_slug": repo_slug,
                     "env_file": env_file,
+                    "operation_id": operation_id,
                 }
             )
             return "job-123"
@@ -195,6 +202,8 @@ class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
             determine_repo_slug_fn=determine_repo_slug,
             detect_env_file_name_fn=detect_env_file_name,
             now_utc_iso_fn=now_utc_iso,
+            make_operation_id_fn=make_operation_id,
+            format_operation_message_fn=format_operation_message,
             append_update_log_fn=append_update_log,
             merge_update_state_async_fn=merge_update_state_async,
             start_update_runner_fn=start_update_runner,
@@ -211,12 +220,15 @@ class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
                     "target_ref": "v0.4.99",
                     "repo_slug": "maxhany/targetshot",
                     "env_file": ".env",
+                    "operation_id": "upd-abcd1234",
                 }
             ],
         )
         self.assertEqual(len(log_calls), 1)
         self.assertTrue(log_calls[0]["reset"])
+        self.assertTrue(log_calls[0]["lines"][0].startswith("[op=upd-abcd1234]"))
         self.assertEqual(merge_calls[0]["status"], "running")
+        self.assertEqual(merge_calls[0]["operation_id"], "upd-abcd1234")
         self.assertEqual(merge_calls[-1]["current_action"], "Update-Agent gestartet")
 
 

@@ -12,6 +12,7 @@ def _default_state() -> dict[str, Any]:
     return {
         "status": "idle",
         "update_in_progress": False,
+        "operation_id": None,
         "current_action": None,
         "last_error": None,
         "last_success": None,

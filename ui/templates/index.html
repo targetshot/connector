@@ -445,12 +445,25 @@
                 <p class="text-sm text-zinc-600 dark:text-zinc-300">
                   Prüfe die vereinsgebundene Club-Plus-Lizenz und aktiviere diese Installation über {{ license.provider_label }}. Die Lizenz steuert die Aufbewahrungszeit des Offline-Puffers.
                 </p>
+                <div class="rounded-2xl border border-sky-200/70 bg-sky-50/80 p-4 text-xs text-sky-900 shadow-inner dark:border-sky-300/20 dark:bg-sky-500/10 dark:text-sky-100">
+                  <p class="font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-200">Club-Plus Ablauf</p>
+                  <ol class="mt-2 space-y-1 list-decimal pl-4">
+                    <li>Club Plus wird in <span class="font-semibold">beta.targetshot.app</span> im Bereich <span class="font-semibold">Club Billing</span> zugewiesen und in Keygen bereitgestellt.</li>
+                    <li>Den zugewiesenen Lizenzschlüssel kopierst du anschließend manuell in diese Oberfläche.</li>
+                    <li>Erst nach <span class="font-semibold">Lizenz prüfen</span> und <span class="font-semibold">Installation aktivieren</span> ist dieser Connector lokal vollständig freigeschaltet.</li>
+                  </ol>
+                </div>
               </div>
               <div class="grid gap-6 md:grid-cols-2">
                 <div>
                   <label class="input-label" for="license_key">Lizenzschlüssel</label>
                   <input id="license_key" name="license_key" class="ts-input" value="{{ license.key }}" placeholder="XXXX-XXXX-XXXX" />
-                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Leer lassen, um die Lizenz zu entfernen und auf den unlizenzierten Zustand zurückzufallen.</p>
+                  <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Der Schlüssel kommt aktuell aus <code>beta.targetshot.app</code> und wird hier lokal eingefügt. Leer lassen, um die Lizenz zu entfernen und auf den unlizenzierten Zustand zurückzufallen.</p>
+                  {% if license.has_pending_key %}
+                  <p class="mt-2 text-xs text-amber-600 dark:text-amber-300">
+                    Neuer Schlüssel ist noch nicht übernommen. Der aktuell gespeicherte Schlüssel bleibt aktiv, bis die Prüfung erfolgreich ist.
+                  </p>
+                  {% endif %}
                 </div>
                 <div class="rounded-2xl border border-indigo-200/70 bg-indigo-50/80 p-4 text-sm shadow-inner dark:border-indigo-300/20 dark:bg-indigo-500/10 dark:text-indigo-100">
                   <p class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-200">Aktive Lizenz</p>
@@ -557,7 +570,7 @@
               {% if license.activation_id %}
               <p class="text-xs text-emerald-600 dark:text-emerald-300">Installation aktiviert am {{ license.activation_at_display or 'unbekannt' }} (Maschine: {{ license.activation_id }}).</p>
               {% elif license_activation_enabled %}
-              <p class="text-xs text-zinc-500 dark:text-zinc-400">Hinweis: Der Aktivieren-Button registriert diese Installation als Maschine bei {{ license.provider_label }} und bindet sie an die aktuelle Umgebung.</p>
+              <p class="text-xs text-zinc-500 dark:text-zinc-400">Hinweis: Der Aktivieren-Button registriert diese Installation als Maschine bei {{ license.provider_label }}. Die Vereinslizenz aus der Beta ist damit noch nicht automatisch auf dem Connector aktiv, sondern wird erst lokal an diese Umgebung gebunden.</p>
               {% else %}
               <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
                 Hinweis: Nur eine gültige Club-Plus-Lizenz schaltet die Cloud-Replikation frei. Ohne aktive Lizenz bleibt der Connector lokal gepuffert.
@@ -565,9 +578,9 @@
               {% endif %}
               {% if license.key %}
               <div class="flex flex-wrap items-center gap-3 pt-3">
-                <button type="button" id="btnSyncLicense" class="btn-secondary">Lizenzdatei aktualisieren</button>
+                <button type="button" id="btnSyncLicense" class="btn-secondary">Lokale Lizenzdatei aktualisieren</button>
                 <span id="licenseFileBadge" class="badge">…</span>
-                <p class="text-xs text-zinc-500 dark:text-zinc-400">Pfad: /app/data/license.key</p>
+                <p class="text-xs text-zinc-500 dark:text-zinc-400">Schreibt den aktuell lokal gespeicherten Schlüssel nach <code>/app/data/license.key</code>.</p>
               </div>
               {% else %}
               <p class="text-xs text-zinc-500 dark:text-zinc-400">Lizenzdatei wird entfernt, solange kein Schlüssel hinterlegt ist.</p>
@@ -594,14 +607,58 @@
               <p class="mt-2 text-xs text-amber-600 dark:text-amber-300">Keine Lizenz hinterlegt – der Connector bleibt lokal im Pufferbetrieb.</p>
               {% endif %}
             </div>
-            <div class="flex flex-wrap items-center gap-3 pt-1">
-              <button type="button" id="btnTestBackup" class="btn-secondary">Verbindung testen</button>
-              <button type="button" id="btnExportBackup" class="btn-secondary">Backup exportieren</button>
-              <span id="backupBadge" class="badge">…</span>
+            <div class="grid gap-5 lg:grid-cols-2">
+              <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-5 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200 space-y-4">
+                <div>
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Offline-Puffer</p>
+                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">Event-Puffer exportieren</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-3">
+                  <button type="button" id="btnTestBackup" class="btn-secondary">Verbindung testen</button>
+                  <button type="button" id="btnExportOfflineBuffer" class="btn-secondary">Offline-Puffer exportieren</button>
+                  <span id="offlineBufferBadge" class="badge">…</span>
+                </div>
+                <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                  Exportiert eine <code>.ndjson</code>-Datei mit allen Einträgen aus <code>buffer_events</code>. Das ist der lokale Event-Puffer, kein vollständiger Dump der Mirror-Datenbank.
+                </p>
+              </div>
+              <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-5 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200 space-y-4">
+                <div>
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Mirror-DB Vollbackup</p>
+                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">Täglicher SQL-Dump auf dem Server</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-3">
+                  <button type="button" id="btnRunMirrorBackup" class="btn-secondary">Mirror-DB sichern</button>
+                  <button type="button" id="btnRefreshMirrorBackups" class="btn-secondary">Sicherungen neu laden</button>
+                  <span id="mirrorBackupBadge" class="badge">…</span>
+                </div>
+                <div class="space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  <p id="mirrorBackupSummary">Status wird geladen…</p>
+                  <p id="mirrorBackupPath">Server-Pfad wird geladen…</p>
+                  <p id="mirrorBackupSchedule">Zeitplan wird geladen…</p>
+                </div>
+                <div class="grid gap-3 sm:grid-cols-3">
+                  <div class="rounded-2xl border border-zinc-200/70 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-black/20">
+                    <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Letzter Erfolg</p>
+                    <p id="mirrorBackupLastSuccess" class="mt-1 text-sm font-semibold text-zinc-800 dark:text-zinc-100">–</p>
+                  </div>
+                  <div class="rounded-2xl border border-zinc-200/70 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-black/20">
+                    <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Nächster Lauf</p>
+                    <p id="mirrorBackupNextRun" class="mt-1 text-sm font-semibold text-zinc-800 dark:text-zinc-100">–</p>
+                  </div>
+                  <div class="rounded-2xl border border-zinc-200/70 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-black/20">
+                    <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Letzte Datei</p>
+                    <p id="mirrorBackupLastFile" class="mt-1 text-sm font-semibold text-zinc-800 dark:text-zinc-100">–</p>
+                  </div>
+                </div>
+                <div>
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Gespeicherte Backups</p>
+                  <div id="mirrorBackupList" class="mt-3 space-y-2 text-xs text-zinc-500 dark:text-zinc-400">
+                    <p>Keine Mirror-DB-Backups vorhanden.</p>
+                  </div>
+                </div>
+              </div>
             </div>
-            <p class="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-              Die Club-Plus-Lizenz legt die Vorhaltezeit fest. Ohne aktive Lizenz werden Pufferdaten nur kurz vorgehalten. Der Export liefert eine <code>.ndjson</code>-Datei mit allen Einträgen der Tabelle <code>buffer_events</code>.
-            </p>
           </section>
 
         </div>
@@ -1036,6 +1093,54 @@
       }
       el.textContent = label + (msg ? (' – ' + msg) : '');
     }
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+    function formatIsoDate(value) {
+      if (!value) return '–';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString('de-DE', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+    async function extractErrorMessage(response, fallback) {
+      try {
+        const json = await response.clone().json();
+        return json?.detail || json?.error || fallback;
+      } catch (_) {
+        const text = await response.text();
+        return text || fallback;
+      }
+    }
+    async function downloadResponseFile(response, fallbackName) {
+      const blob = await response.blob();
+      let filename = fallbackName;
+      const disposition = response.headers.get('Content-Disposition');
+      if (disposition) {
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        if (match && match[1]) {
+          filename = match[1];
+        }
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
     document.getElementById('btnWorker').onclick = async () => {
       const r = await fetch('/api/status');
       const j = await r.json();
@@ -1078,59 +1183,127 @@
       const j = await r.json();
       setBadge(document.getElementById('cfltBadge'), j.ok, j.msg);
     };
-    const backupBadgeEl = document.getElementById('backupBadge');
+    const offlineBufferBadgeEl = document.getElementById('offlineBufferBadge');
     const btnTestBackup = document.getElementById('btnTestBackup');
-    if (btnTestBackup && backupBadgeEl) {
+    if (btnTestBackup && offlineBufferBadgeEl) {
       btnTestBackup.onclick = async () => {
-        setBadge(backupBadgeEl, 'pending', 'Prüfe Verbindung…');
+        setBadge(offlineBufferBadgeEl, 'pending', 'Prüfe Verbindung…');
         try {
           const r = await fetch('/api/test/backup-db');
           const j = await r.json();
-          setBadge(backupBadgeEl, j.ok, j.msg);
+          setBadge(offlineBufferBadgeEl, j.ok, j.msg);
         } catch (err) {
-          setBadge(backupBadgeEl, false, err?.message || 'Serverfehler');
+          setBadge(offlineBufferBadgeEl, false, err?.message || 'Serverfehler');
         }
       };
     }
-    const btnExportBackup = document.getElementById('btnExportBackup');
-    if (btnExportBackup && backupBadgeEl) {
-      btnExportBackup.onclick = async () => {
-        setBadge(backupBadgeEl, 'pending', 'Export läuft…');
+    const btnExportOfflineBuffer = document.getElementById('btnExportOfflineBuffer');
+    if (btnExportOfflineBuffer && offlineBufferBadgeEl) {
+      btnExportOfflineBuffer.onclick = async () => {
+        setBadge(offlineBufferBadgeEl, 'pending', 'Export läuft…');
         try {
-          const r = await fetch('/api/backup/export');
+          const r = await fetch('/api/offline-buffer/export');
           if (!r.ok) {
-            let msg = 'Export fehlgeschlagen';
-            try {
-              const err = await r.json();
-              msg = err?.detail || msg;
-            } catch (_) {
-              const text = await r.text();
-              if (text) msg = text;
-            }
-            setBadge(backupBadgeEl, false, msg);
+            const msg = await extractErrorMessage(r, 'Export fehlgeschlagen');
+            setBadge(offlineBufferBadgeEl, false, msg);
             return;
           }
-          const blob = await r.blob();
-          let filename = 'backup.ndjson';
-          const disposition = r.headers.get('Content-Disposition');
-          if (disposition) {
-            const match = disposition.match(/filename="?([^";]+)"?/i);
-            if (match && match[1]) {
-              filename = match[1];
-            }
-          }
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = filename;
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-          URL.revokeObjectURL(url);
-          setBadge(backupBadgeEl, true, 'Export heruntergeladen');
+          await downloadResponseFile(r, 'offline-buffer.ndjson');
+          setBadge(offlineBufferBadgeEl, true, 'Offline-Puffer heruntergeladen');
         } catch (err) {
-          setBadge(backupBadgeEl, false, err?.message || 'Export fehlgeschlagen');
+          setBadge(offlineBufferBadgeEl, false, err?.message || 'Export fehlgeschlagen');
         }
+      };
+    }
+    const mirrorBackupBadgeEl = document.getElementById('mirrorBackupBadge');
+    const mirrorBackupSummaryEl = document.getElementById('mirrorBackupSummary');
+    const mirrorBackupPathEl = document.getElementById('mirrorBackupPath');
+    const mirrorBackupScheduleEl = document.getElementById('mirrorBackupSchedule');
+    const mirrorBackupLastSuccessEl = document.getElementById('mirrorBackupLastSuccess');
+    const mirrorBackupNextRunEl = document.getElementById('mirrorBackupNextRun');
+    const mirrorBackupLastFileEl = document.getElementById('mirrorBackupLastFile');
+    const mirrorBackupListEl = document.getElementById('mirrorBackupList');
+
+    function renderMirrorBackupList(data) {
+      if (!mirrorBackupListEl) return;
+      const backups = Array.isArray(data?.backups) ? data.backups : [];
+      if (!backups.length) {
+        mirrorBackupListEl.innerHTML = '<p>Keine Mirror-DB-Backups vorhanden.</p>';
+        return;
+      }
+      mirrorBackupListEl.innerHTML = backups.map((entry) => {
+        const name = escapeHtml(entry.name || 'mirror-db-backup.sql.gz');
+        const createdAt = escapeHtml(formatIsoDate(entry.created_at));
+        const sizeLabel = escapeHtml(entry.size_label || '–');
+        const downloadUrl = escapeHtml(entry.download_url || '#');
+        return `
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-black/20">
+            <div class="min-w-0">
+              <p class="truncate font-semibold text-zinc-800 dark:text-zinc-100">${name}</p>
+              <p class="text-[0.72rem] text-zinc-500 dark:text-zinc-400">${createdAt} · ${sizeLabel}</p>
+            </div>
+            <a href="${downloadUrl}" class="btn-secondary !px-3 !py-2 !text-xs">Download</a>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function loadMirrorBackupStatus(showPending = false) {
+      if (!mirrorBackupBadgeEl) return;
+      if (showPending) {
+        setBadge(mirrorBackupBadgeEl, 'pending', 'Lade Sicherungen…');
+      }
+      try {
+        const response = await fetch('/api/backup/mirror-db');
+        if (!response.ok) {
+          throw new Error(await extractErrorMessage(response, 'Mirror-DB-Status konnte nicht geladen werden'));
+        }
+        const data = await response.json();
+        const ok = !data.last_error;
+        const summary = data.in_progress
+          ? 'Vollbackup läuft gerade.'
+          : (ok ? 'Tägliche SQL-Dumps werden serverseitig aufbewahrt.' : (data.last_error || 'Mirror-DB-Backup gestört.'));
+        const scheduleTime = `${String(data?.schedule?.hour ?? 0).padStart(2, '0')}:${String(data?.schedule?.minute ?? 0).padStart(2, '0')}`;
+        const timezoneLabel = data?.schedule?.timezone || 'UTC';
+        const lastFileLabel = data.last_file ? `${data.last_file}${data.last_file_size ? ` (${data.last_file_size})` : ''}` : '–';
+
+        setBadge(
+          mirrorBackupBadgeEl,
+          data.in_progress ? 'pending' : ok,
+          data.in_progress ? 'Backup läuft…' : (data.last_error || `${data.backups?.length || 0} Datei(en)`),
+        );
+        if (mirrorBackupSummaryEl) mirrorBackupSummaryEl.textContent = summary;
+        if (mirrorBackupPathEl) mirrorBackupPathEl.textContent = `Server-Pfad: ${data.server_directory || data.directory || '–'}`;
+        if (mirrorBackupScheduleEl) mirrorBackupScheduleEl.textContent = `Automatisch täglich um ${scheduleTime} (${timezoneLabel}), Aufbewahrung ${data.retention_days || 30} Tage`;
+        if (mirrorBackupLastSuccessEl) mirrorBackupLastSuccessEl.textContent = formatIsoDate(data.last_success);
+        if (mirrorBackupNextRunEl) mirrorBackupNextRunEl.textContent = formatIsoDate(data.next_run);
+        if (mirrorBackupLastFileEl) mirrorBackupLastFileEl.textContent = lastFileLabel;
+        renderMirrorBackupList(data);
+      } catch (error) {
+        setBadge(mirrorBackupBadgeEl, false, error instanceof Error ? error.message : 'Mirror-DB-Status fehlgeschlagen');
+      }
+    }
+
+    const btnRunMirrorBackup = document.getElementById('btnRunMirrorBackup');
+    if (btnRunMirrorBackup && mirrorBackupBadgeEl) {
+      btnRunMirrorBackup.onclick = async () => {
+        setBadge(mirrorBackupBadgeEl, 'pending', 'Mirror-DB-Backup läuft…');
+        try {
+          const response = await fetch('/api/backup/mirror-db/run', { method: 'POST' });
+          if (!response.ok) {
+            throw new Error(await extractErrorMessage(response, 'Mirror-DB-Backup fehlgeschlagen'));
+          }
+          await loadMirrorBackupStatus(false);
+          setBadge(mirrorBackupBadgeEl, true, 'Mirror-DB gesichert');
+        } catch (error) {
+          setBadge(mirrorBackupBadgeEl, false, error instanceof Error ? error.message : 'Mirror-DB-Backup fehlgeschlagen');
+        }
+      };
+    }
+    const btnRefreshMirrorBackups = document.getElementById('btnRefreshMirrorBackups');
+    if (btnRefreshMirrorBackups) {
+      btnRefreshMirrorBackups.onclick = async () => {
+        await loadMirrorBackupStatus(true);
       };
     }
     const btnSyncLicense = document.getElementById('btnSyncLicense');
@@ -2211,6 +2384,7 @@
     loadOsUpdateStatus(false).catch(() => {});
     loadUpdateStatus(false).catch(() => {});
     loadHealthSummary(false).catch(() => {});
+    loadMirrorBackupStatus(false).catch(() => {});
     loadSourceReplicationStatus(false).catch(() => {});
     loadUiLog(false).catch(() => {});
   </script>

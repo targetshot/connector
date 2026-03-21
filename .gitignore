@@ -1,5 +1,6 @@
 ui/data/
 ui/logs/
+ui/backups/
 ui/__pycache__/
 connect/__pycache__/
 *.pyc

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -92,3 +93,14 @@ def append_rotating_json_line(path: Path, payload: dict[str, Any], *, max_bytes:
         backup_count=backup_count,
     )
 
+
+def make_operation_id(prefix: str) -> str:
+    trimmed = "".join(ch for ch in (prefix or "").strip().lower() if ch.isalnum()) or "op"
+    return f"{trimmed}-{secrets.token_hex(4)}"
+
+
+def format_operation_message(message: str, *, operation_id: str | None = None) -> str:
+    text = (message or "").strip()
+    if operation_id:
+        return f"[op={operation_id}] {text}"
+    return text

@@ -11,10 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from log_utils import configure_rotating_logger, env_int_first, resolve_log_dir
+from log_utils import configure_rotating_logger, env_int_first, format_operation_message, resolve_log_dir
 from update_state import UpdateStateManager
 
 logger = logging.getLogger("ts-update-runner")
+UPDATE_OPERATION_ID = (os.getenv("TS_CONNECT_UPDATE_OPERATION_ID") or "").strip() or None
 
 
 class CommandError(RuntimeError):
@@ -42,7 +43,7 @@ def _docker_login(registry: str, username: str, password: str, *, cwd: Path, man
         return
     message = f"Docker Login bei {registry}"
     manager.merge(log_append=[message], current_action="Docker Login")
-    logger.info(message)
+    logger.info(format_operation_message(message, operation_id=UPDATE_OPERATION_ID))
     cmd = ["docker", "login", registry, "-u", username, "--password-stdin"]
     result = subprocess.run(
         cmd,
@@ -61,9 +62,9 @@ def _docker_login(registry: str, username: str, password: str, *, cwd: Path, man
     if lines:
         manager.merge(log_append=lines)
         for line in lines:
-            logger.info(line)
+            logger.info(format_operation_message(line, operation_id=UPDATE_OPERATION_ID))
     if result.returncode != 0:
-        logger.error("Docker-Login fehlgeschlagen bei %s", registry)
+        logger.error(format_operation_message(f"Docker-Login fehlgeschlagen bei {registry}", operation_id=UPDATE_OPERATION_ID))
         raise CommandError("Docker-Login fehlgeschlagen")
 
 
@@ -96,7 +97,7 @@ def _command_env() -> dict[str, str]:
 def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> str:
     command_line = f"$ {_cmd_to_str(cmd)}"
     manager.merge(log_append=[command_line])
-    logger.info(command_line)
+    logger.info(format_operation_message(command_line, operation_id=UPDATE_OPERATION_ID))
     process = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -112,10 +113,15 @@ def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> s
         output_lines.append(line)
         if line:
             manager.merge(log_append=[line])
-            logger.info(line)
+            logger.info(format_operation_message(line, operation_id=UPDATE_OPERATION_ID))
     return_code = process.wait()
     if return_code != 0:
-        logger.error("Befehl fehlgeschlagen (%s): %s", return_code, _cmd_to_str(cmd))
+        logger.error(
+            format_operation_message(
+                f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}",
+                operation_id=UPDATE_OPERATION_ID,
+            )
+        )
         raise CommandError(f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}")
     return "\n".join(output_lines)
 
@@ -463,7 +469,7 @@ def run_update() -> int:
     manager = UpdateStateManager(data_dir / "update_state.json")
     manager.ensure()
     start_ts = _now_iso()
-    logger.info("Update-Runner gestartet um %s", start_ts)
+    logger.info(format_operation_message(f"Update-Runner gestartet um {start_ts}", operation_id=UPDATE_OPERATION_ID))
     manager.merge(
         status="running",
         update_in_progress=True,
@@ -561,7 +567,7 @@ def run_update() -> int:
         )
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
-        logger.exception("Update-Runner fehlgeschlagen: %s", message)
+        logger.exception(format_operation_message(f"Update-Runner fehlgeschlagen: {message}", operation_id=UPDATE_OPERATION_ID))
         manager.merge(
             status="error",
             update_in_progress=False,
@@ -571,7 +577,7 @@ def run_update() -> int:
         )
         return 1
     success_ts = _now_iso()
-    logger.info("Update-Runner erfolgreich abgeschlossen um %s", success_ts)
+    logger.info(format_operation_message(f"Update-Runner erfolgreich abgeschlossen um {success_ts}", operation_id=UPDATE_OPERATION_ID))
     manager.merge(
         status="idle",
         update_in_progress=False,

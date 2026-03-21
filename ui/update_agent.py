@@ -13,7 +13,7 @@ from asyncio.subprocess import PIPE
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from log_utils import configure_rotating_logger, env_int_first, resolve_log_dir
+from log_utils import configure_rotating_logger, env_int_first, format_operation_message, resolve_log_dir
 from update_agent_utils import get_update_agent_token
 
 logger = logging.getLogger("ts-update-agent")
@@ -63,6 +63,7 @@ class RunRequest(BaseModel):
     env_file: str | None = None
     compose_env: bool | None = None
     project_name: str | None = None
+    operation_id: str | None = None
 
 
 class MirrorReplicationApplyRequest(BaseModel):
@@ -194,21 +195,37 @@ def _build_runner_env(payload: RunRequest) -> dict[str, str]:
         env.pop("TS_CONNECT_UPDATE_COMPOSE_ENV", None)
     if payload.project_name:
         env["COMPOSE_PROJECT_NAME"] = payload.project_name
+    operation_id = (payload.operation_id or "").strip()
+    if operation_id:
+        env["TS_CONNECT_UPDATE_OPERATION_ID"] = operation_id
+    else:
+        env.pop("TS_CONNECT_UPDATE_OPERATION_ID", None)
     return env
 
 
 async def _run_update_job(job_id: str, payload: RunRequest) -> None:
     global _current_job_id, _job_task
-    logger.info("Starte Update-Runner Job %s", job_id)
+    operation_id = (payload.operation_id or "").strip() or None
+    logger.info(format_operation_message(f"Starte Update-Runner Job {job_id}", operation_id=operation_id))
     env = _build_runner_env(payload)
     try:
         return_code = await _run_subprocess([sys.executable, "-m", "update_runner"], env=env)
         if return_code != 0:
-            logger.error("Update-Runner Job %s endete mit Code %s", job_id, return_code)
+            logger.error(
+                format_operation_message(
+                    f"Update-Runner Job {job_id} endete mit Code {return_code}",
+                    operation_id=operation_id,
+                )
+            )
         else:
-            logger.info("Update-Runner Job %s abgeschlossen", job_id)
+            logger.info(format_operation_message(f"Update-Runner Job {job_id} abgeschlossen", operation_id=operation_id))
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Update-Runner Job %s fehlgeschlagen: %s", job_id, exc)
+        logger.exception(
+            format_operation_message(
+                f"Update-Runner Job {job_id} fehlgeschlagen: {exc}",
+                operation_id=operation_id,
+            )
+        )
     finally:
         async with _job_lock:
             _current_job_id = None
