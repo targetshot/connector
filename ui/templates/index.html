@@ -290,6 +290,7 @@
               <span id="statusBadge" class="badge">…</span>
               <span class="text-xs text-zinc-500 dark:text-zinc-400">Live-Abfrage des aktuellen Sync-Connectors</span>
             </div>
+            <p id="workerRecoveryHint" class="status-detail"></p>
           <div class="mt-4 grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
             <div class="rounded-2xl border border-white/10 bg-white/80 p-4 shadow-sm dark:bg-ink-800/80 dark:border-white/10">
               <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Mirror-MariaDB</p>
@@ -749,6 +750,7 @@
                   <span id="updateStatusBadge" class="badge">…</span>
                   <span id="updateStatusText" class="text-zinc-700 dark:text-zinc-200">Status wird ermittelt…</span>
                 </div>
+                <p id="updateRecoveryHint" class="status-detail"></p>
                 <div id="updateVersionInfo" class="rounded-2xl border border-zinc-200/60 bg-white/70 p-4 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/60 dark:text-zinc-200">
                   <div class="grid gap-4 md:grid-cols-2">
                     <div>
@@ -1113,6 +1115,29 @@
         minute: '2-digit'
       });
     }
+    function formatOperationTrace(operationId) {
+      return operationId ? ('Trace: ' + operationId) : '';
+    }
+    function formatRecoverySummary(recovery) {
+      const category = recovery?.label;
+      const hint = recovery?.hint;
+      const nextStep = recovery?.next_step ? ('Nächster Schritt: ' + recovery.next_step) : '';
+      const trace = formatOperationTrace(recovery?.operation_id);
+      return [category, hint, nextStep, trace].filter(Boolean).join(' · ');
+    }
+    function renderRecoveryHint(el, recovery, tone) {
+      if (!el) return;
+      const text = formatRecoverySummary(recovery);
+      const parts = text ? [text] : [];
+      if (!parts.length) {
+        el.textContent = '';
+        el.className = 'status-detail';
+        return;
+      }
+      const normalizedTone = tone === 'error' ? 'error' : 'warn';
+      el.textContent = parts.join(' · ');
+      el.className = 'status-detail is-visible status-' + normalizedTone;
+    }
     async function extractErrorMessage(response, fallback) {
       try {
         const json = await response.clone().json();
@@ -1146,13 +1171,16 @@
       const j = await r.json();
       loadHealthSummary(false).catch(() => {});
       const badge = document.getElementById('statusBadge');
+      const workerRecoveryHint = document.getElementById('workerRecoveryHint');
       if (j.worker === 'pending') {
         const baseMsg = j.error || j.applyState?.last_error || 'Connector wartet auf Datenbank';
         const retryInfo = j.applyState?.next_retry ? (' Nächster Versuch: ' + j.applyState.next_retry) : '';
         setBadge(badge, 'pending', baseMsg + retryInfo);
+        renderRecoveryHint(workerRecoveryHint, j.recovery, 'warn');
       } else {
         const ok = j.worker === 'ok';
         setBadge(badge, ok, ok ? '' : (j.error || 'Worker down'));
+        renderRecoveryHint(workerRecoveryHint, j.recovery, ok ? null : 'error');
       }
     };
     const btnTestSourceDb = document.getElementById('btnTestSourceDb');
@@ -1431,6 +1459,7 @@
 
     const updateStatusBadge = document.getElementById('updateStatusBadge');
     const updateStatusText = document.getElementById('updateStatusText');
+    const updateRecoveryHint = document.getElementById('updateRecoveryHint');
     const updateVersionInfo = document.getElementById('updateVersionInfo');
     const updateCurrentVersion = document.getElementById('updateCurrentVersion');
     const updateLatestVersion = document.getElementById('updateLatestVersion');
@@ -1609,7 +1638,7 @@
       }
     }
 
-    function setUpdateBadge(state, currentAction, lastError, agentStatus) {
+    function setUpdateBadge(state, currentAction, lastError, agentStatus, recovery) {
       if (!updateStatusBadge) return;
       let cls = 'badge ';
       let label = 'Status';
@@ -1654,6 +1683,7 @@
         }
         updateStatusText.textContent = message;
       }
+      renderRecoveryHint(updateRecoveryHint, recovery, state === 'error' ? 'error' : 'warn');
     }
 
     function renderPrerequisites(prereq) {
@@ -1718,8 +1748,10 @@
       if (!el) return;
       const status = summary && summary.status ? summary.status : 'unknown';
       const message = summary && summary.message ? summary.message : '';
-      updateStatusDetail(detailEl, status, message);
-      const detailAwareMessage = detailEl ? '' : (message || '');
+      const recoverySummary = formatRecoverySummary(summary?.recovery);
+      const detailMessage = [message, recoverySummary].filter(Boolean).join(' · ');
+      updateStatusDetail(detailEl, status, detailMessage);
+      const detailAwareMessage = detailEl ? '' : (detailMessage || '');
       if (status === 'ok') {
         setBadge(el, true, detailAwareMessage);
       } else if (status === 'error') {
@@ -1731,8 +1763,8 @@
       } else {
         setBadge(el, 'pending', detailAwareMessage || 'Unbekannt');
       }
-      if (detailEl && message) {
-        el.setAttribute('title', message);
+      if (detailEl && detailMessage) {
+        el.setAttribute('title', detailMessage);
       } else {
         el.removeAttribute('title');
       }
@@ -2086,7 +2118,7 @@
           const detail = data.detail || response.statusText || response.status;
           throw new Error(String(detail));
         }
-        setUpdateBadge(data.status, data.current_action, data.last_error, data.update_agent);
+        setUpdateBadge(data.status, data.current_action, data.last_error, data.update_agent, data.recovery);
         if (btnCheckUpdate) {
           btnCheckUpdate.textContent = btnCheckDefaultText || 'Nach Update suchen';
         }

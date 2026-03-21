@@ -115,6 +115,7 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
 
 ### Notes
 - UI binds to `${UI_BIND_IP:-0.0.0.0}` by default. Set `UI_BIND_IP=127.0.0.1` in `.env` for localhost-only access.
+- `UI_TRUSTED_CIDRS` is now validated at startup. Invalid CIDR entries are ignored with a warning, and loopback (`127.0.0.0/8`, `::1/128`) stays allowed so local admin access does not lock itself out.
 - Debezium nutzt die lokale Mirror-DB ausschließlich über `.env` (`TS_CONNECT_DEFAULT_DB_HOST`, `TS_CONNECT_DEFAULT_DB_PORT`, `TS_CONNECT_DEFAULT_DB_USER`, `TS_CONNECT_MIRROR_DB_PASSWORD`).
 - Port intern bleibt standardmäßig `3306`, extern `${TS_CONNECT_MIRROR_PORT:-3307}`.
 - On first start the UI now generates a random admin password and stores it inside `ui/data/admin_password.generated` (container path `/app/data/admin_password.generated`). Read the file once, log in, and immediately rotate the password via the Admin section or by setting `TS_CONNECT_UI_ADMIN_PASSWORD` in `.env`. The legacy alias `UI_ADMIN_PASSWORD` is still accepted for compatibility.
@@ -217,6 +218,12 @@ Fehlt die Konfiguration, zeigt die UI einen entsprechenden Hinweis. Der Host-Age
   - `TS_CONNECT_KEYGEN_AUTO_ACTIVATE`: aktiviert die Maschine nach erfolgreicher Prüfung (Standard: `true`).
 - Die Cloud-Replikation (MirrorMaker) startet erst, wenn die Lizenz aktiviert wurde; bis dahin verbleiben alle Events ausschließlich im lokalen Puffer.
 - Ausführlicher Operator-Ablauf für Erstaktivierung, Schlüsseltausch, Maschinenwechsel und Recovery: [docs/keygen-activation-runbook.md](./docs/keygen-activation-runbook.md)
+- Für die Live-Verifikation auf einem laufenden Connector steht zusätzlich ein lokales Prüfsignal bereit:
+  ```bash
+  python3 scripts/verify_club_plus_runtime.py
+  python3 scripts/verify_club_plus_runtime.py --json
+  ```
+  Das Script liest `ui/data/config.db`, `license.key`, `license-meta.json` und `machine_fingerprint` und zeigt, ob der Club-Plus-Key lokal gespeichert, aktiviert und für die Laufzeit wirklich freigeschaltet ist.
 
 ## Folder Structure
 ```

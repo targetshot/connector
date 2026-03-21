@@ -182,6 +182,31 @@ def _configure_logging() -> None:
 _configure_logging()
 logger.info("UI logging enabled at %s", UI_LOG_FILE)
 
+
+def _parse_trusted_networks(cidr_values: list[str]) -> tuple[list[ipaddress._BaseNetwork], list[str]]:
+    networks: list[ipaddress._BaseNetwork] = []
+    invalid: list[str] = []
+    for raw in cidr_values:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            invalid.append(value)
+            continue
+        networks.append(network)
+    for loopback in ("127.0.0.0/8", "::1/128"):
+        network = ipaddress.ip_network(loopback, strict=False)
+        if all(network != existing for existing in networks):
+            networks.append(network)
+    return networks, invalid
+
+
+TRUSTED_NETWORKS, INVALID_TRUSTED_CIDRS = _parse_trusted_networks(TRUSTED_CIDRS)
+if INVALID_TRUSTED_CIDRS:
+    logger.warning("Ignoriere ungültige UI_TRUSTED_CIDRS-Einträge: %s", ", ".join(INVALID_TRUSTED_CIDRS))
+
 def _ensure_private_file_permissions(path: Path) -> None:
     security_bootstrap.ensure_private_file_permissions(path)
 
@@ -718,6 +743,85 @@ def _next_retry_iso() -> str | None:
     return (datetime.utcnow() + timedelta(seconds=APPLY_RETRY_SECONDS)).replace(microsecond=0).isoformat() + "Z"
 
 
+def _classify_recovery_issue(
+    message: str | None,
+    *,
+    operation_id: str | None = None,
+    update_agent: dict[str, Any] | None = None,
+) -> dict[str, str | None]:
+    text = str(message or "").strip()
+    lower = text.lower()
+    agent_unavailable = bool(update_agent and update_agent.get("available") is False)
+    if not text and not agent_unavailable:
+        return {
+            "category": None,
+            "label": None,
+            "hint": None,
+            "next_step": None,
+            "operation_id": operation_id,
+        }
+    if agent_unavailable or ("update-agent" in lower and "nicht erreichbar" in lower):
+        return {
+            "category": "update-agent-unavailable",
+            "label": "Update-Agent offline",
+            "hint": "Update-Agent-Container, Port 9000 und Update-Agent-Token prüfen.",
+            "next_step": "Update-Agent neu starten und danach den Update-Status erneut laden.",
+            "operation_id": operation_id,
+        }
+    if "host-agent" in lower and "nicht erreichbar" in lower:
+        return {
+            "category": "host-agent-unavailable",
+            "label": "Host-Agent offline",
+            "hint": "Host-Agent-Dienst, Bind-Adresse und Host-Agent-Token prüfen.",
+            "next_step": "Host-Agent-Dienst prüfen, Token abgleichen und die Host-Aktion erneut starten.",
+            "operation_id": operation_id,
+        }
+    if (
+        "connector rest" in lower
+        or "/connectors" in lower
+        or "kafka connect" in lower
+        or "connect rest" in lower
+    ):
+        return {
+            "category": "kafka-connect-unavailable",
+            "label": "Kafka Connect offline",
+            "hint": "Container ts-kafka-connect und dessen REST-Endpunkt prüfen.",
+            "next_step": "Kafka Connect wieder gesund starten und danach den Worker-Status neu prüfen.",
+            "operation_id": operation_id,
+        }
+    if "mirrormaker" in lower or "ts-mirror-maker" in lower or "health=unhealthy" in lower or "stabil laufend" in lower:
+        return {
+            "category": "mirror-maker-unhealthy",
+            "label": "MirrorMaker instabil",
+            "hint": "Container ts-mirror-maker, MM2-Logs und mm2.properties prüfen.",
+            "next_step": "MirrorMaker-Logs prüfen, MM2-Konfiguration korrigieren und den Replikationslauf erneut auslösen.",
+            "operation_id": operation_id,
+        }
+    if "keygen" in lower or "lizenz" in lower or "fingerprint scope" in lower or "policy scope" in lower:
+        return {
+            "category": "keygen-validation-failed",
+            "label": "Keygen/Lizenzprüfung fehlgeschlagen",
+            "hint": "Lizenzstatus, Keygen-Erreichbarkeit und lokale Maschinenaktivierung prüfen.",
+            "next_step": "Lizenz in beta prüfen, danach lokal 'Lizenz prüfen' oder 'Installation aktivieren' erneut ausführen.",
+            "operation_id": operation_id,
+        }
+    if "mirror-mariadb" in lower or "mariadb" in lower or "mysql" in lower or "datenbank" in lower:
+        return {
+            "category": "mirror-db-unavailable",
+            "label": "Mirror-MariaDB nicht erreichbar",
+            "hint": "Mirror-MariaDB-Status und Quell-Replikation prüfen.",
+            "next_step": "Mirror-MariaDB wieder erreichbar machen und anschließend den Connector-Apply erneut starten.",
+            "operation_id": operation_id,
+        }
+    return {
+        "category": "unknown-recovery-error",
+        "label": "Unklare Recovery-Störung",
+        "hint": "Update-/Connector-Logs und operation_id gemeinsam prüfen.",
+        "next_step": "Mit operation_id die Logs korrelieren und danach den betroffenen Ablauf gezielt erneut starten.",
+        "operation_id": operation_id,
+    }
+
+
 def _default_os_update_state() -> dict:
     return {
         "check_in_progress": False,
@@ -883,22 +987,70 @@ def _prune_mirror_backups_now() -> list[Path]:
     )
 
 
-def _create_mirror_backup_sync(target_path: Path) -> int:
+def _usable_secret(value: str | None) -> str:
+    candidate = (value or "").strip()
+    if not candidate:
+        return ""
+    if candidate.lower() in {"change-me-root", "change-me-db", "change-me", "no"}:
+        return ""
+    return candidate
+
+
+def _inspect_container_env_sync(container_name: str) -> dict[str, str]:
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", container_name],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "docker inspect fehlgeschlagen").strip()
+        raise RuntimeError(detail)
+    env_map: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env_map[key] = value
+    return env_map
+
+
+def _resolve_mirror_dump_credentials() -> tuple[str, str]:
     workspace_env = _workspace_env_values()
-    dump_user = "root"
-    dump_password = (workspace_env.get("TS_CONNECT_MIRROR_ROOT_PASSWORD") or "").strip()
+    root_password = _usable_secret(os.getenv("TS_CONNECT_MIRROR_ROOT_PASSWORD"))
+    if not root_password:
+        try:
+            env_map = _inspect_container_env_sync(MIRROR_DB_CONTAINER_NAME)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Konnte Mirror-Container-Env nicht lesen: %s", exc)
+            env_map = {}
+        root_password = _usable_secret(env_map.get("MARIADB_ROOT_PASSWORD"))
+    if not root_password:
+        root_password = _usable_secret(workspace_env.get("TS_CONNECT_MIRROR_ROOT_PASSWORD"))
+    if root_password:
+        return "root", root_password
+
+    dump_user = DEFAULT_MIRROR_DB_USER
+    dump_password = _usable_secret(os.getenv("TS_CONNECT_MIRROR_DB_PASSWORD"))
     if not dump_password:
-        dump_user = DEFAULT_MIRROR_DB_USER
-        dump_password = MIRROR_DB_PASSWORD
+        dump_password = _usable_secret(MIRROR_DB_PASSWORD)
     if not dump_password:
-        raise RuntimeError("Kein Mirror-DB-Passwort für den Vollbackup-Dump verfügbar.")
+        dump_password = _usable_secret(workspace_env.get("TS_CONNECT_MIRROR_DB_PASSWORD"))
+    if dump_password:
+        return dump_user, dump_password
+    raise RuntimeError("Kein Mirror-DB-Passwort für den Vollbackup-Dump verfügbar.")
+
+
+def _create_mirror_backup_sync(target_path: Path) -> int:
+    dump_user, dump_password = _resolve_mirror_dump_credentials()
     target_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _tmp_path_for(target_path)
     command = [
         "docker",
         "exec",
         "-e",
-        f"MARIADB_PWD={dump_password}",
+        f"MYSQL_PWD={dump_password}",
         MIRROR_DB_CONTAINER_NAME,
         "mariadb-dump",
         "-h127.0.0.1",
@@ -2204,7 +2356,7 @@ async def _reconcile_stale_update_state() -> dict[str, Any]:
 
 
 async def _build_update_status(force: bool = False) -> dict[str, Any]:
-    return await ops_runtime.build_update_status(
+    status = await ops_runtime.build_update_status(
         reconcile_stale_update_state_fn=_reconcile_stale_update_state,
         read_update_agent_status_fn=_read_update_agent_status,
         ensure_latest_release_fn=_ensure_latest_release,
@@ -2221,6 +2373,12 @@ async def _build_update_status(force: bool = False) -> dict[str, Any]:
         default_update_image=DEFAULT_UPDATE_IMAGE,
         force=force,
     )
+    status["recovery"] = _classify_recovery_issue(
+        status.get("last_error"),
+        operation_id=status.get("operation_id"),
+        update_agent=status.get("update_agent"),
+    )
+    return status
 
 
 def _os_cmd_to_str(cmd: list[str]) -> str:
@@ -2493,10 +2651,14 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax"
 # --------- Middleware: nur Vereinsnetz zulassen ----------
 @app.middleware("http")
 async def ip_allowlist(request: Request, call_next):
-    client_ip = request.client.host
-    ip_obj = ipaddress.ip_address(client_ip)
-    allowed = any(ip_obj in ipaddress.ip_network(cidr) for cidr in TRUSTED_CIDRS)
-    if not allowed and client_ip != "127.0.0.1":
+    client_ip = getattr(request.client, "host", None) or ""
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        logger.warning("Verwerfe Anfrage mit ungültiger Client-IP: %s", client_ip)
+        return JSONResponse({"detail": "Forbidden (invalid client IP)"}, status_code=403)
+    allowed = ip_obj.is_loopback or any(ip_obj in network for network in TRUSTED_NETWORKS)
+    if not allowed:
         return JSONResponse({"detail": "Forbidden (CIDR)"}, status_code=403)
     return await call_next(request)
 
@@ -4475,7 +4637,10 @@ async def connector_resnapshot(pw: str = Form(...)):
 @app.get("/api/status", dependencies=[Depends(require_session)])
 async def status():
     apply_state = await get_apply_state()
-    result: dict[str, object] = {"applyState": apply_state}
+    result: dict[str, object] = {
+        "applyState": apply_state,
+        "operation_id": apply_state.get("operation_id"),
+    }
     preset_worker = "pending" if apply_state.get("pending") else None
     async with httpx.AsyncClient(timeout=5) as client:
         try:
@@ -4483,18 +4648,30 @@ async def status():
             if w.status_code != 200:
                 result["worker"] = preset_worker or "unavailable"
                 result["error"] = _extract_error_message(w)
+                result["recovery"] = _classify_recovery_issue(
+                    str(result.get("error") or ""),
+                    operation_id=apply_state.get("operation_id"),
+                )
                 return result
             s = await client.get(f"{CONNECT_BASE_URL}/connectors/{DEFAULT_CONNECTOR_NAME}/status")
             result["connectorStatus"] = s.json() if s.status_code == 200 else None
             result["worker"] = preset_worker or "ok"
             if preset_worker and apply_state.get("last_error"):
                 result.setdefault("error", apply_state.get("last_error"))
+            result["recovery"] = _classify_recovery_issue(
+                str(result.get("error") or apply_state.get("last_error") or ""),
+                operation_id=apply_state.get("operation_id"),
+            )
             return result
         except Exception as e:
             result["worker"] = preset_worker or "unavailable"
             result["error"] = str(e)
             if preset_worker and apply_state.get("last_error"):
                 result.setdefault("error", apply_state.get("last_error"))
+            result["recovery"] = _classify_recovery_issue(
+                str(result.get("error") or apply_state.get("last_error") or ""),
+                operation_id=apply_state.get("operation_id"),
+            )
             return result
 
 
@@ -4525,13 +4702,30 @@ async def update_status(force: bool = False):
 
 @app.get("/api/health/summary", dependencies=[Depends(require_session)])
 async def health_summary():
-    database, confluent, connector, backup, license = await asyncio.gather(
+    database, confluent, connector, backup, license, apply_state = await asyncio.gather(
         _check_database_health(),
         _check_confluent_health(),
         _check_connector_health(),
         _check_backup_health(),
         _check_license_health(),
+        get_apply_state(),
     )
+    connector_issue_message = connector.get("message") if connector.get("status") != "ok" else None
+    connector_recovery = _classify_recovery_issue(
+        apply_state.get("last_error") or connector_issue_message,
+        operation_id=apply_state.get("operation_id"),
+    )
+    if connector_recovery.get("category"):
+        connector = dict(connector)
+        connector["recovery"] = connector_recovery
+        if connector.get("status") == "ok":
+            connector["status"] = "warn"
+    if apply_state.get("pending"):
+        connector = dict(connector)
+        if connector.get("status") == "ok":
+            connector["status"] = "warn"
+        if not connector.get("message"):
+            connector["message"] = "Connector-Konfiguration wartet auf Wiederholung"
     snapshot = {
         "timestamp": _now_utc_iso(),
         "database": database,

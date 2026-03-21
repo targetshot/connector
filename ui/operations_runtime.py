@@ -478,6 +478,7 @@ async def build_update_status(
     return {
         "ok": True,
         "status": display_status,
+        "operation_id": state.get("operation_id"),
         "current_action": display_action,
         "current_version": connect_version,
         "current_release": connect_release,
