@@ -26,6 +26,7 @@ env:
   REGISTRY: targetshot.azurecr.io
   AZURE_SUBSCRIPTION_ID: e4d628f6-ede4-4af9-8310-b25724a71961
   AZURE_EXTENSION_USE_DYNAMIC_INSTALL: yes_without_prompt
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   promote:

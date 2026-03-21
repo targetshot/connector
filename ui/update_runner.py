@@ -151,12 +151,7 @@ def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> s
             logger.info(format_operation_message(line, operation_id=UPDATE_OPERATION_ID))
     return_code = process.wait()
     if return_code != 0:
-        detail = ""
-        for line in reversed(output_lines):
-            stripped = line.strip()
-            if stripped:
-                detail = stripped
-                break
+        detail = _select_error_detail(output_lines)
         logger.error(
             format_operation_message(
                 f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}",
@@ -167,6 +162,33 @@ def _run_command(cmd: list[str], *, cwd: Path, manager: UpdateStateManager) -> s
             raise CommandError(f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)} | {detail}")
         raise CommandError(f"Befehl fehlgeschlagen ({return_code}): {_cmd_to_str(cmd)}")
     return "\n".join(output_lines)
+
+
+def _select_error_detail(output_lines: list[str]) -> str:
+    priority_markers = (
+        "fatal:",
+        "error:",
+        "denied",
+        "unauthorized",
+        "forbidden",
+        "could not",
+        "failed",
+        "not found",
+        "permission",
+        "authentication",
+    )
+    for line in reversed(output_lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if any(marker in lowered for marker in priority_markers):
+            return stripped
+    for line in reversed(output_lines):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
 
 
 def _inspect_container_details(name: str, *, cwd: Path) -> tuple[str | None, str | None]:
@@ -535,9 +557,9 @@ def run_update() -> int:
         manager.merge(log_append=["Prüfe Git-Status"], current_action="Prüfe Repository")
         _ensure_clean_repo(workspace, manager)
         _ensure_https_remote(workspace, manager)
-        manager.merge(log_append=["Hole Git-Updates"], current_action="Git fetch")
+        manager.merge(log_append=["Hole Git-Updates von origin"], current_action="Git fetch")
         git_cmd = _github_auth_git_prefix(workspace)
-        _run_command(git_cmd + ["fetch", "--all", "--tags", "--prune"], cwd=workspace, manager=manager)
+        _run_command(git_cmd + ["fetch", "origin", "--tags", "--prune"], cwd=workspace, manager=manager)
         target_ref = args.ref
         if target_ref:
             manager.merge(log_append=[f"Wechsle auf {target_ref}"], current_action=f"Checkout {target_ref}")

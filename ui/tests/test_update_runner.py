@@ -63,7 +63,20 @@ class UpdateRunnerHelpersTest(unittest.TestCase):
 
         self.assertEqual(prefix, ["git"])
 
-    def test_run_command_includes_last_output_line_in_error(self):
+    def test_select_error_detail_prefers_error_like_line(self):
+        namespace = {}
+        _load_functions(["_select_error_detail"], namespace)
+
+        detail = namespace["_select_error_detail"](
+            [
+                " * [new tag] v0.5.6 -> v0.5.6",
+                "fatal: Authentication failed for 'https://github.com/targetshot/connector.git/'",
+            ]
+        )
+
+        self.assertIn("Authentication failed", detail)
+
+    def test_run_command_includes_most_relevant_error_line(self):
         class FakeStdout:
             def __init__(self, lines: list[str]) -> None:
                 self._lines = iter(lines)
@@ -96,10 +109,14 @@ class UpdateRunnerHelpersTest(unittest.TestCase):
             "UPDATE_OPERATION_ID": None,
             "_cmd_to_str": lambda cmd: " ".join(cmd),
         }
-        _load_functions(["_command_env", "_run_command"], namespace)
+        _load_functions(["_command_env", "_select_error_detail", "_run_command"], namespace)
 
         with self.assertRaisesRegex(CommandError, "Authentication failed"):
             namespace["_run_command"](["git", "fetch"], cwd=pathlib.Path("/workspace"), manager=_DummyManager())
+
+    def test_update_runner_fetches_origin_instead_of_all_remotes(self):
+        source = RUNNER_SOURCE.read_text(encoding="utf-8")
+        self.assertIn('["fetch", "origin", "--tags", "--prune"]', source)
 
     def test_require_host_workspace_path_requires_absolute_host_override_for_container_runner(self):
         namespace = {"Path": pathlib.Path}
