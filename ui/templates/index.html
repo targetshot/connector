@@ -588,11 +588,21 @@
                 Repariert nur <code>ui/data/backup-db</code> und <code>ui/data/mariadb</code> auf dem Server. Der restliche <code>~/connector</code>-Workspace bleibt unberührt.
               </p>
             </div>
+            <div id="networkExposurePanel" class="hidden rounded-2xl border border-amber-200/70 bg-amber-50/80 p-4 text-xs shadow-inner dark:border-amber-300/40 dark:bg-amber-500/10 dark:text-amber-100">
+              <div>
+                <p class="font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-200">Netzwerk-Exposition</p>
+                <p id="networkExposureSummary" class="mt-1 text-sm font-medium text-amber-900 dark:text-amber-50">Status wird geprüft…</p>
+              </div>
+              <div id="networkExposureList" class="mt-3 space-y-2 text-xs text-amber-900/90 dark:text-amber-100"></div>
+              <p class="mt-3 text-[0.75rem] text-amber-800/90 dark:text-amber-100/80">
+                Empfohlen sind entweder <code>UI_BIND_IP=127.0.0.1</code> mit Reverse-Proxy/VPN oder eine explizite private LAN-IP. `Update-Agent` und `Host-Agent` sollten lokal bleiben.
+              </p>
+            </div>
             <div class="grid gap-5 lg:grid-cols-2">
               <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-5 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200 space-y-4">
                 <div>
-                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Offline-Puffer</p>
-                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">Event-Puffer exportieren</p>
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Offline-Puffer-Export</p>
+                  <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">Event-Puffer als NDJSON</p>
                 </div>
                 <div class="flex flex-wrap items-center gap-3">
                   <button type="button" id="btnTestBackup" class="btn-secondary">Verbindung testen</button>
@@ -605,7 +615,7 @@
               </div>
               <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-5 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200 space-y-4">
                 <div>
-                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Mirror-DB Vollbackup</p>
+                  <p class="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Mirror-DB-Backup</p>
                   <p class="mt-1 text-sm font-medium text-zinc-800 dark:text-white">Täglicher SQL-Dump auf dem Server</p>
                 </div>
                 <div class="flex flex-wrap items-center gap-3">
@@ -834,7 +844,7 @@
               <h2 class="brand-sub text-xl font-semibold text-amber-900 dark:text-amber-100">Host-Agent nicht verbunden</h2>
               <p class="mt-3">Installiere den neuen TargetShot Host Agent auf dem Server, um Betriebssystem-Updates und Neustarts direkt aus der UI zu steuern.</p>
               <ul class="mt-3 list-disc space-y-1 pl-5 text-amber-900/80 dark:text-amber-100/90">
-                <li>Installationsanleitung siehe README Abschnitt „Host-Agent“.</li>
+                <li>Installationsanleitung siehe Operator-Runbook im Abschnitt „Host-Agent“.</li>
                 <li>Setze <code>TS_CONNECT_HOST_AGENT_URL</code> und übermittle das Token an die UI (Datei <code>ui/data/host-agent.token</code>).</li>
                 <li>Starte die Container neu: <code>docker compose up -d</code> sowie <code>cd update-agent &amp;&amp; docker compose --env-file ../.env up -d</code>.</li>
               </ul>
@@ -1235,6 +1245,9 @@
     const storageOwnershipSummary = document.getElementById('storageOwnershipSummary');
     const storageOwnershipList = document.getElementById('storageOwnershipList');
     const btnFixStorageOwnership = document.getElementById('btnFixStorageOwnership');
+    const networkExposurePanel = document.getElementById('networkExposurePanel');
+    const networkExposureSummary = document.getElementById('networkExposureSummary');
+    const networkExposureList = document.getElementById('networkExposureList');
 
     function renderMirrorBackupList(data) {
       if (!mirrorBackupListEl) return;
@@ -1294,6 +1307,32 @@
         btnFixStorageOwnership.classList.toggle('cursor-not-allowed', !fixable);
         btnFixStorageOwnership.title = fixable ? '' : 'Automatische Reparatur ist für diese Störung derzeit nicht verfügbar';
       }
+    }
+
+    function renderNetworkExposureNotice(network) {
+      if (!networkExposurePanel || !networkExposureSummary || !networkExposureList) return;
+      const warnings = Array.isArray(network?.warnings) ? network.warnings : [];
+      if (!warnings.length) {
+        networkExposurePanel.classList.add('hidden');
+        networkExposureSummary.textContent = '';
+        networkExposureList.innerHTML = '';
+        return;
+      }
+      networkExposurePanel.classList.remove('hidden');
+      const bindIp = escapeHtml(network?.bind_ip || 'unbekannt');
+      const summary = escapeHtml(network?.summary || 'Netzwerk-Exposition prüfen.');
+      const hostAgentUrl = escapeHtml(network?.host_agent_url || 'nicht gesetzt');
+      networkExposureSummary.textContent = summary;
+      networkExposureList.innerHTML = `
+        <div class="rounded-2xl border border-amber-200/70 bg-white/70 px-3 py-3 shadow-sm dark:border-amber-300/30 dark:bg-black/20">
+          <p class="font-semibold text-amber-900 dark:text-amber-50">UI_BIND_IP: <code>${bindIp}</code></p>
+          <p class="mt-1 text-[0.74rem] text-amber-800/90 dark:text-amber-100/80">Host-Agent URL: <code>${hostAgentUrl}</code></p>
+        </div>
+      ` + warnings.map((warning) => `
+        <div class="rounded-2xl border border-amber-200/70 bg-white/70 px-3 py-3 shadow-sm dark:border-amber-300/30 dark:bg-black/20">
+          <p class="font-semibold text-amber-900 dark:text-amber-50">${escapeHtml(warning)}</p>
+        </div>
+      `).join('');
     }
 
     async function loadMirrorBackupStatus(showPending = false) {
@@ -1826,6 +1865,7 @@
         setHealthBadge(backupStatusBadge, data.backup, backupStatusMessage);
         setHealthBadge(licenseStatusBadge, data.license, licenseStatusMessage);
         renderStorageOwnershipNotice(data.storage);
+        renderNetworkExposureNotice(data.network);
       } catch (error) {
         if (showError) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1837,6 +1877,7 @@
         setHealthBadge(backupStatusBadge, { status: 'error', message: '' }, backupStatusMessage);
         setHealthBadge(licenseStatusBadge, { status: 'error', message: '' }, licenseStatusMessage);
         renderStorageOwnershipNotice(null);
+        renderNetworkExposureNotice(null);
       }
     }
 

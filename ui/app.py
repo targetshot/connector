@@ -20,7 +20,7 @@ from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import psycopg2
 from psycopg2 import sql
 from dotenv import dotenv_values
@@ -129,6 +129,7 @@ TRUSTED_CIDRS = [c.strip() for c in os.getenv(
     "UI_TRUSTED_CIDRS",
     "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 ).split(",")]
+UI_BIND_IP = (os.getenv("UI_BIND_IP", "0.0.0.0") or "0.0.0.0").strip() or "0.0.0.0"
 WORKSPACE_PATH = Path(os.getenv("TS_CONNECT_WORKSPACE", "/workspace"))
 WORKSPACE_HOST_PATH = (os.getenv("TS_CONNECT_WORKSPACE_HOST") or "").strip()
 LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
@@ -221,6 +222,75 @@ def _parse_trusted_networks(cidr_values: list[str]) -> tuple[list[ipaddress._Bas
 TRUSTED_NETWORKS, INVALID_TRUSTED_CIDRS = _parse_trusted_networks(TRUSTED_CIDRS)
 if INVALID_TRUSTED_CIDRS:
     logger.warning("Ignoriere ungültige UI_TRUSTED_CIDRS-Einträge: %s", ", ".join(INVALID_TRUSTED_CIDRS))
+
+
+def _summarize_network_exposure() -> dict[str, Any]:
+    bind_ip = (UI_BIND_IP or "").strip() or "0.0.0.0"
+    lowered_bind = bind_ip.lower()
+    warnings: list[str] = []
+    mode = "private-network"
+    summary = "UI ist auf ein privates Netz bzw. eine interne Vereinsumgebung ausgerichtet."
+
+    if lowered_bind in {"127.0.0.1", "::1", "localhost"}:
+        mode = "localhost-only"
+        summary = "UI ist auf lokalen Zugriff bzw. einen vorgeschalteten Reverse-Proxy/VPN begrenzt."
+    elif lowered_bind in {"0.0.0.0", "::"}:
+        mode = "all-interfaces"
+        summary = "UI bindet an alle Interfaces und verlässt sich auf CIDR-, Firewall- oder Proxy-Schutz."
+        warnings.append(
+            "UI_BIND_IP ist auf allen Interfaces offen. Das ist nur für Vereinsnetz, VPN oder einen vorgeschalteten Reverse-Proxy gedacht."
+        )
+    else:
+        try:
+            bind_addr = ipaddress.ip_address(bind_ip)
+        except ValueError:
+            mode = "named-interface"
+            summary = f"UI_BIND_IP nutzt einen benannten Host ({bind_ip}). Den effektiven Exposure-Pfad bitte bewusst prüfen."
+        else:
+            if bind_addr.is_loopback:
+                mode = "localhost-only"
+                summary = "UI ist auf lokalen Zugriff bzw. einen vorgeschalteten Reverse-Proxy/VPN begrenzt."
+            elif bind_addr.is_private:
+                mode = "private-network"
+                summary = f"UI bindet explizit an ein privates Interface ({bind_ip})."
+            else:
+                mode = "public-interface"
+                summary = f"UI bindet an eine öffentliche Adresse ({bind_ip})."
+                warnings.append(
+                    f"UI_BIND_IP zeigt auf eine öffentliche Adresse ({bind_ip}). Verwende bevorzugt 127.0.0.1 plus Reverse-Proxy/VPN oder eine explizite private LAN-IP."
+                )
+
+    broad_or_public_trust = [
+        str(network)
+        for network in TRUSTED_NETWORKS
+        if str(network) in {"0.0.0.0/0", "::/0"} or not (network.is_private or network.is_loopback or network.is_link_local)
+    ]
+    if broad_or_public_trust:
+        warnings.append(
+            "UI_TRUSTED_CIDRS enthält öffentliche oder globale Netze: " + ", ".join(broad_or_public_trust[:4])
+        )
+
+    host_agent_url = (HOST_AGENT_URL or "").strip()
+    host_agent_host = ""
+    if host_agent_url:
+        try:
+            host_agent_host = (urlparse(host_agent_url).hostname or "").strip().lower()
+        except ValueError:
+            host_agent_host = ""
+        if host_agent_host and host_agent_host not in {"127.0.0.1", "::1", "localhost", "host.docker.internal"}:
+            warnings.append(
+                f"Host-Agent URL zeigt nicht auf einen lokalen Host ({host_agent_host}). Der Host-Agent sollte nur lokal oder über einen bewusst abgesicherten Tunnel erreichbar sein."
+            )
+
+    return {
+        "mode": mode,
+        "bind_ip": bind_ip,
+        "trusted_cidrs": [value for value in TRUSTED_CIDRS if value],
+        "host_agent_url": host_agent_url or None,
+        "summary": summary,
+        "warnings": warnings,
+        "ok": not warnings,
+    }
 
 def _ensure_private_file_permissions(path: Path) -> None:
     security_bootstrap.ensure_private_file_permissions(path)
@@ -5170,6 +5240,7 @@ async def health_summary():
         get_apply_state(),
         _get_storage_ownership_preflight(),
     )
+    network = _summarize_network_exposure()
     storage_issues = {str(issue.get("key") or ""): issue for issue in storage.get("issues", [])}
     mirror_storage_issue = storage_issues.get("mirror_db")
     if mirror_storage_issue:
@@ -5206,6 +5277,7 @@ async def health_summary():
         "connector": connector,
         "backup": backup,
         "license": license,
+        "network": network,
     }
     try:
         _write_json_log("health.log", snapshot)
@@ -5218,6 +5290,7 @@ async def health_summary():
         "backup": backup,
         "license": license,
         "storage": storage,
+        "network": network,
     }
 
 

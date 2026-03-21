@@ -531,7 +531,7 @@ async def schedule_reboot(payload: dict[str, Any] | None = None):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="TargetShot Host Agent")
-    parser.add_argument("--host", default=os.getenv("TS_HOST_AGENT_LISTEN", "0.0.0.0"))
+    parser.add_argument("--host", default=os.getenv("TS_HOST_AGENT_LISTEN", "127.0.0.1"))
     parser.add_argument("--port", default=int(os.getenv("TS_HOST_AGENT_PORT", "9010")), type=int)
     args = parser.parse_args()
 

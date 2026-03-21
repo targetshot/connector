@@ -74,6 +74,13 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertIn("ui/data/backup-db", template)
         self.assertIn("ui/data/mariadb", template)
 
+    def test_backup_template_contains_network_exposure_notice_panel(self):
+        template = TEMPLATE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("networkExposurePanel", template)
+        self.assertIn("UI_BIND_IP=127.0.0.1", template)
+        self.assertIn("Update-Agent", template)
+
     def test_build_keygen_machine_headers_prefers_bearer_token_when_present(self):
         namespace = {
             "KEYGEN_LICENSE_TOKEN": "token-123",
@@ -110,6 +117,29 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertIn("127.0.0.0/8", rendered)
         self.assertIn("::1/128", rendered)
         self.assertEqual(invalid, ["broken-cidr"])
+
+    def test_summarize_network_exposure_warns_on_all_interfaces_and_remote_host_agent(self):
+        namespace = {
+            "Any": Any,
+            "UI_BIND_IP": "0.0.0.0",
+            "TRUSTED_CIDRS": ["192.168.0.0/16", "0.0.0.0/0"],
+            "TRUSTED_NETWORKS": [
+                __import__("ipaddress").ip_network("192.168.0.0/16"),
+                __import__("ipaddress").ip_network("0.0.0.0/0"),
+            ],
+            "HOST_AGENT_URL": "http://10.20.30.40:9010",
+            "ipaddress": __import__("ipaddress"),
+            "urlparse": __import__("urllib.parse", fromlist=["urlparse"]).urlparse,
+        }
+        _load_items(["_summarize_network_exposure"], namespace)
+
+        result = namespace["_summarize_network_exposure"]()
+
+        self.assertEqual(result["mode"], "all-interfaces")
+        self.assertFalse(result["ok"])
+        self.assertIn("allen Interfaces", result["warnings"][0])
+        self.assertTrue(any("UI_TRUSTED_CIDRS" in warning for warning in result["warnings"]))
+        self.assertTrue(any("Host-Agent URL" in warning for warning in result["warnings"]))
 
     def test_mirror_dump_candidates_prefer_container_root_password_first(self):
         namespace = {
@@ -708,6 +738,7 @@ class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
             "_check_license_health": license_health,
             "get_apply_state": apply_state,
             "_get_storage_ownership_preflight": mock.AsyncMock(return_value={"ok": True, "issues": []}),
+            "_summarize_network_exposure": lambda: {"ok": True, "warnings": [], "summary": "Lokaler Zugriff", "bind_ip": "127.0.0.1"},
             "_classify_recovery_issue": lambda message, operation_id=None: {
                 "category": "kafka-connect-unavailable" if "connection refused" in str(message) else None,
                 "label": "Kafka Connect nicht erreichbar" if "connection refused" in str(message) else None,
@@ -729,6 +760,7 @@ class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["connector"]["recovery"]["category"], "kafka-connect-unavailable")
         self.assertEqual(result["connector"]["recovery"]["operation_id"], "cfg-1234")
         self.assertEqual(result["license"], {"status": "ok", "message": "Lizenz aktiv"})
+        self.assertEqual(result["network"]["summary"], "Lokaler Zugriff")
         self.assertEqual(len(writes), 1)
         self.assertEqual(writes[0]["filename"], "health.log")
         self.assertEqual(writes[0]["snapshot"]["timestamp"], "2026-03-20T12:00:00+00:00")
