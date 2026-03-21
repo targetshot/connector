@@ -575,6 +575,19 @@
               <p class="mt-2 text-xs text-amber-600 dark:text-amber-300">Keine Lizenz hinterlegt – der Connector bleibt lokal im Pufferbetrieb.</p>
               {% endif %}
             </div>
+            <div id="storageOwnershipPanel" class="hidden rounded-2xl border border-amber-200/70 bg-amber-50/80 p-4 text-xs shadow-inner dark:border-amber-300/40 dark:bg-amber-500/10 dark:text-amber-100">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p class="font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-200">Datenordner-Rechte</p>
+                  <p id="storageOwnershipSummary" class="mt-1 text-sm font-medium text-amber-900 dark:text-amber-50">Status wird geprüft…</p>
+                </div>
+                <button type="button" id="btnFixStorageOwnership" class="btn-secondary">Gezielt reparieren</button>
+              </div>
+              <div id="storageOwnershipList" class="mt-3 space-y-2 text-xs text-amber-900/90 dark:text-amber-100"></div>
+              <p class="mt-3 text-[0.75rem] text-amber-800/90 dark:text-amber-100/80">
+                Repariert nur <code>ui/data/backup-db</code> und <code>ui/data/mariadb</code> auf dem Server. Der restliche <code>~/connector</code>-Workspace bleibt unberührt.
+              </p>
+            </div>
             <div class="grid gap-5 lg:grid-cols-2">
               <div class="rounded-2xl border border-zinc-200/60 bg-white/70 p-5 text-xs shadow-inner dark:border-white/10 dark:bg-ink-900/70 dark:text-zinc-200 space-y-4">
                 <div>
@@ -1218,6 +1231,10 @@
     const mirrorBackupNextRunEl = document.getElementById('mirrorBackupNextRun');
     const mirrorBackupLastFileEl = document.getElementById('mirrorBackupLastFile');
     const mirrorBackupListEl = document.getElementById('mirrorBackupList');
+    const storageOwnershipPanel = document.getElementById('storageOwnershipPanel');
+    const storageOwnershipSummary = document.getElementById('storageOwnershipSummary');
+    const storageOwnershipList = document.getElementById('storageOwnershipList');
+    const btnFixStorageOwnership = document.getElementById('btnFixStorageOwnership');
 
     function renderMirrorBackupList(data) {
       if (!mirrorBackupListEl) return;
@@ -1241,6 +1258,42 @@
           </div>
         `;
       }).join('');
+    }
+
+    function renderStorageOwnershipNotice(storage) {
+      if (!storageOwnershipPanel || !storageOwnershipSummary || !storageOwnershipList) return;
+      const issues = Array.isArray(storage?.issues) ? storage.issues : [];
+      if (!issues.length) {
+        storageOwnershipPanel.classList.add('hidden');
+        storageOwnershipSummary.textContent = '';
+        storageOwnershipList.innerHTML = '';
+        if (btnFixStorageOwnership) {
+          btnFixStorageOwnership.disabled = false;
+          btnFixStorageOwnership.classList.remove('opacity-60', 'cursor-not-allowed');
+        }
+        return;
+      }
+      storageOwnershipPanel.classList.remove('hidden');
+      storageOwnershipSummary.textContent = 'Die lokalen DB-Datenordner gehören aktuell nicht den erwarteten Container-Usern.';
+      storageOwnershipList.innerHTML = issues.map((issue) => {
+        const summary = escapeHtml(issue?.summary || 'Unbekannter Rechtefehler');
+        const serverPath = escapeHtml(issue?.server_path || issue?.path || '–');
+        const hint = escapeHtml(issue?.repair_hint || 'Nur diesen Datenordner korrigieren.');
+        return `
+          <div class="rounded-2xl border border-amber-200/70 bg-white/70 px-3 py-3 shadow-sm dark:border-amber-300/30 dark:bg-black/20">
+            <p class="font-semibold text-amber-900 dark:text-amber-50">${summary}</p>
+            <p class="mt-1 text-[0.74rem] text-amber-800/90 dark:text-amber-100/80">Server-Pfad: <code>${serverPath}</code></p>
+            <p class="mt-1 text-[0.74rem] text-amber-800/90 dark:text-amber-100/80">${hint}</p>
+          </div>
+        `;
+      }).join('');
+      if (btnFixStorageOwnership) {
+        const fixable = issues.some((issue) => !!issue?.auto_fix_supported);
+        btnFixStorageOwnership.disabled = !fixable;
+        btnFixStorageOwnership.classList.toggle('opacity-60', !fixable);
+        btnFixStorageOwnership.classList.toggle('cursor-not-allowed', !fixable);
+        btnFixStorageOwnership.title = fixable ? '' : 'Automatische Reparatur ist für diese Störung derzeit nicht verfügbar';
+      }
     }
 
     async function loadMirrorBackupStatus(showPending = false) {
@@ -1299,6 +1352,42 @@
     if (btnRefreshMirrorBackups) {
       btnRefreshMirrorBackups.onclick = async () => {
         await loadMirrorBackupStatus(true);
+      };
+    }
+    if (btnFixStorageOwnership) {
+      btnFixStorageOwnership.onclick = async () => {
+        if (btnFixStorageOwnership.disabled) return;
+        const pw = await askAdminPassword();
+        if (!pw) return;
+        const fd = new FormData();
+        fd.append('pw', pw);
+        let repaired = false;
+        btnFixStorageOwnership.disabled = true;
+        btnFixStorageOwnership.classList.add('opacity-60', 'cursor-not-allowed');
+        const previousText = btnFixStorageOwnership.textContent;
+        btnFixStorageOwnership.textContent = 'Repariere…';
+        try {
+          const response = await fetch('/api/storage/preflight/fix', { method: 'POST', body: fd });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(data.detail || data.error || response.statusText || response.status);
+          }
+          repaired = true;
+          renderStorageOwnershipNotice(data.storage || null);
+          await loadHealthSummary(false);
+          await loadMirrorBackupStatus(true);
+          const fixed = Array.isArray(data.fixed) && data.fixed.length ? data.fixed.join(', ') : 'Datenordner-Rechte';
+          showInfoModal('Datenordner repariert', fixed + ' wurden gezielt korrigiert.', 'success');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          showInfoModal('Reparatur fehlgeschlagen', message, 'error');
+        } finally {
+          btnFixStorageOwnership.textContent = previousText || 'Gezielt reparieren';
+          if (!repaired) {
+            btnFixStorageOwnership.disabled = false;
+            btnFixStorageOwnership.classList.remove('opacity-60', 'cursor-not-allowed');
+          }
+        }
       };
     }
     const btnSyncLicense = document.getElementById('btnSyncLicense');
@@ -1649,6 +1738,7 @@
       if (!prereq.git) missing.push('git');
       if (!prereq.update_agent) missing.push(`Update-Agent${prereq.update_agent_error ? ` (${prereq.update_agent_error})` : ''}`);
       if (!prereq.workspace) missing.push('Workspace-Mount');
+      if (prereq.storage === false) missing.push(`DB-Datenordner-Rechte${prereq.storage_error ? ` (${prereq.storage_error})` : ''}`);
       if (prereq.host_agent === false) missing.push(`Host-Agent${prereq.host_agent_error ? ` (${prereq.host_agent_error})` : ''}`);
       updatePrereqHint.className = 'text-xs text-amber-600 dark:text-amber-300';
       updatePrereqHint.textContent = 'Voraussetzungen fehlen: ' + missing.join(', ');
@@ -1735,6 +1825,7 @@
         setHealthBadge(connectorStatusBadge, data.connector, connectorStatusMessage);
         setHealthBadge(backupStatusBadge, data.backup, backupStatusMessage);
         setHealthBadge(licenseStatusBadge, data.license, licenseStatusMessage);
+        renderStorageOwnershipNotice(data.storage);
       } catch (error) {
         if (showError) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1745,6 +1836,7 @@
         setHealthBadge(connectorStatusBadge, { status: 'error', message: '' }, connectorStatusMessage);
         setHealthBadge(backupStatusBadge, { status: 'error', message: '' }, backupStatusMessage);
         setHealthBadge(licenseStatusBadge, { status: 'error', message: '' }, licenseStatusMessage);
+        renderStorageOwnershipNotice(null);
       }
     }
 

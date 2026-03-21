@@ -319,6 +319,7 @@ DEFAULT_MIRROR_DB_USER = (os.getenv("TS_CONNECT_DEFAULT_DB_USER", "debezium_sync
 DEFAULT_MIRROR_DB_NAME = (os.getenv("TS_CONNECT_MIRROR_DB_NAME", "SMDB") or "SMDB").strip() or "SMDB"
 MIRROR_DB_PASSWORD = (os.getenv("TS_CONNECT_MIRROR_DB_PASSWORD") or os.getenv("MARIADB_PASSWORD") or "").strip()
 MIRROR_DB_CONTAINER_NAME = (os.getenv("TS_CONNECT_MIRROR_DB_CONTAINER_NAME", "ts-mariadb-mirror") or "ts-mariadb-mirror").strip() or "ts-mariadb-mirror"
+BACKUP_DB_CONTAINER_NAME = (os.getenv("TS_CONNECT_BACKUP_CONTAINER_NAME", "ts-backup-db") or "ts-backup-db").strip() or "ts-backup-db"
 MIRROR_BACKUP_ENABLED = (os.getenv("TS_CONNECT_MIRROR_BACKUP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"})
 MIRROR_BACKUP_DIR = resolve_backup_dir(
     os.getenv("TS_CONNECT_MIRROR_BACKUP_DIR"),
@@ -334,6 +335,278 @@ MIRROR_BACKUP_RETENTION_DAYS = max(_env_int("TS_CONNECT_MIRROR_BACKUP_RETENTION_
 MIRROR_BACKUP_HOUR = min(max(_env_int("TS_CONNECT_MIRROR_BACKUP_HOUR", 2) or 2, 0), 23)
 MIRROR_BACKUP_MINUTE = min(max(_env_int("TS_CONNECT_MIRROR_BACKUP_MINUTE", 15) or 15, 0), 59)
 MIRROR_BACKUP_POLL_SECONDS = max(_env_int("TS_CONNECT_MIRROR_BACKUP_POLL_SECONDS", 60) or 60, 15)
+
+
+def _workspace_host_root() -> str:
+    host_root = (WORKSPACE_HOST_PATH or "").strip()
+    if host_root:
+        return host_root
+    workspace_env = _workspace_env_values()
+    host_root = (workspace_env.get("TS_CONNECT_WORKSPACE_HOST") or "").strip()
+    if host_root:
+        return host_root
+    return str(WORKSPACE_PATH)
+
+
+def _storage_target_definitions() -> list[dict[str, Any]]:
+    host_root = Path(_workspace_host_root())
+    return [
+        {
+            "key": "backup_db",
+            "label": "Backup-DB",
+            "runtime_path": WORKSPACE_PATH / "ui/data/backup-db",
+            "server_path": host_root / "ui/data/backup-db",
+            "container_name": BACKUP_DB_CONTAINER_NAME,
+            "container_user": "postgres",
+            "probe_relpaths": [
+                Path("global"),
+                Path("global/pg_filenode.map"),
+            ],
+        },
+        {
+            "key": "mirror_db",
+            "label": "Mirror-MariaDB",
+            "runtime_path": WORKSPACE_PATH / "ui/data/mariadb",
+            "server_path": host_root / "ui/data/mariadb",
+            "container_name": MIRROR_DB_CONTAINER_NAME,
+            "container_user": "mysql",
+            "probe_relpaths": [
+                Path("mysql"),
+                Path("ibdata1"),
+                Path(DEFAULT_MIRROR_DB_NAME),
+            ],
+        },
+    ]
+
+
+def _storage_target_map() -> dict[str, dict[str, Any]]:
+    return {target["key"]: target for target in _storage_target_definitions()}
+
+
+def _storage_probe_paths(target: dict[str, Any]) -> list[Path]:
+    runtime_path = target["runtime_path"]
+    paths = [runtime_path]
+    for relpath in target.get("probe_relpaths", []):
+        candidate = runtime_path / relpath
+        if candidate.exists():
+            paths.append(candidate)
+    return paths
+
+
+def _inspect_container_user_ids_sync(container_name: str, user_name: str) -> tuple[int, int]:
+    uid_result = subprocess.run(
+        ["docker", "exec", container_name, "id", "-u", user_name],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if uid_result.returncode != 0:
+        detail = (uid_result.stderr or uid_result.stdout or "uid lookup fehlgeschlagen").strip()
+        raise RuntimeError(detail)
+    gid_result = subprocess.run(
+        ["docker", "exec", container_name, "id", "-g", user_name],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if gid_result.returncode != 0:
+        detail = (gid_result.stderr or gid_result.stdout or "gid lookup fehlgeschlagen").strip()
+        raise RuntimeError(detail)
+    return int(uid_result.stdout.strip()), int(gid_result.stdout.strip())
+
+
+def _format_owner_pair(uid: int | None, gid: int | None) -> str:
+    if uid is None or gid is None:
+        return "unbekannt"
+    return f"{uid}:{gid}"
+
+
+def _storage_issue_message(issue: dict[str, Any]) -> str:
+    label = issue.get("label") or "Datenordner"
+    server_path = issue.get("server_path") or issue.get("path") or "unbekannt"
+    if issue.get("reason") == "missing-path":
+        return f"{label}-Datenordner fehlt: {server_path}"
+    if issue.get("reason") == "container-user-unresolved":
+        return f"{label}-Besitzer konnte nicht geprüft werden: {issue.get('error') or 'Container-User nicht ermittelbar'}"
+    if issue.get("reason") == "permission-error":
+        return f"{label}-Datenordner ist nicht lesbar: {issue.get('error') or server_path}"
+    expected = issue.get("expected_owner") or "unbekannt"
+    actual = issue.get("actual_owner") or "unbekannt"
+    probe_path = issue.get("probe_path") or server_path
+    return f"{label}-Datenordner gehört {actual} statt {expected} ({probe_path})"
+
+
+def _build_storage_issue(
+    target: dict[str, Any],
+    *,
+    reason: str,
+    expected_uid: int | None = None,
+    expected_gid: int | None = None,
+    actual_uid: int | None = None,
+    actual_gid: int | None = None,
+    probe_path: Path | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    auto_fix_supported = reason in {"ownership-mismatch", "permission-error"} and expected_uid is not None and expected_gid is not None
+    issue = {
+        "key": target["key"],
+        "label": target["label"],
+        "reason": reason,
+        "path": str(target["runtime_path"]),
+        "server_path": str(target["server_path"]),
+        "container_name": target["container_name"],
+        "container_user": target["container_user"],
+        "expected_uid": expected_uid,
+        "expected_gid": expected_gid,
+        "expected_owner": _format_owner_pair(expected_uid, expected_gid),
+        "actual_uid": actual_uid,
+        "actual_gid": actual_gid,
+        "actual_owner": _format_owner_pair(actual_uid, actual_gid),
+        "probe_path": str(probe_path) if probe_path else str(target["server_path"]),
+        "error": error or "",
+        "auto_fix_supported": auto_fix_supported and hasattr(os, "geteuid") and os.geteuid() == 0,
+    }
+    issue["summary"] = _storage_issue_message(issue)
+    issue["repair_hint"] = (
+        "Nur diesen Datenordner reparieren, nicht den gesamten ~/connector-Workspace."
+        if issue["auto_fix_supported"]
+        else "Wenn die Rechte falsch sind, nur diesen Datenordner korrigieren, nicht den gesamten ~/connector-Workspace."
+    )
+    return issue
+
+
+def _check_storage_ownership_sync() -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    for target in _storage_target_definitions():
+        runtime_path: Path = target["runtime_path"]
+        if not runtime_path.exists():
+            issues.append(
+                _build_storage_issue(
+                    target,
+                    reason="missing-path",
+                )
+            )
+            continue
+        try:
+            expected_uid, expected_gid = _inspect_container_user_ids_sync(
+                target["container_name"],
+                target["container_user"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            issues.append(
+                _build_storage_issue(
+                    target,
+                    reason="container-user-unresolved",
+                    error=_short_error_message(str(exc), 180),
+                )
+            )
+            continue
+        for probe_path in _storage_probe_paths(target):
+            try:
+                stat_result = probe_path.stat()
+            except PermissionError as exc:
+                issues.append(
+                    _build_storage_issue(
+                        target,
+                        reason="permission-error",
+                        expected_uid=expected_uid,
+                        expected_gid=expected_gid,
+                        probe_path=probe_path,
+                        error=_short_error_message(str(exc), 180),
+                    )
+                )
+                break
+            except OSError:
+                continue
+            if stat_result.st_uid != expected_uid or stat_result.st_gid != expected_gid:
+                issues.append(
+                    _build_storage_issue(
+                        target,
+                        reason="ownership-mismatch",
+                        expected_uid=expected_uid,
+                        expected_gid=expected_gid,
+                        actual_uid=stat_result.st_uid,
+                        actual_gid=stat_result.st_gid,
+                        probe_path=probe_path,
+                    )
+                )
+                break
+    return {
+        "ok": not issues,
+        "checked_at": _now_utc_iso(),
+        "issues": issues,
+    }
+
+
+def _storage_issue_for_key_sync(key: str) -> dict[str, Any] | None:
+    preflight = _check_storage_ownership_sync()
+    for issue in preflight.get("issues", []):
+        if issue.get("key") == key:
+            return issue
+    return None
+
+
+def _apply_storage_ownership_tree_sync(path: Path, *, uid: int, gid: int) -> None:
+    if not path.exists():
+        return
+    for root, dirnames, filenames in os.walk(path, topdown=False):
+        root_path = Path(root)
+        os.chown(root_path, uid, gid)
+        for name in filenames:
+            os.chown(root_path / name, uid, gid)
+        for name in dirnames:
+            os.chown(root_path / name, uid, gid)
+    os.chown(path, uid, gid)
+
+
+def _fix_storage_ownership_sync() -> dict[str, Any]:
+    preflight = _check_storage_ownership_sync()
+    issues = preflight.get("issues", [])
+    if not issues:
+        return {"ok": True, "fixed": [], "storage": preflight}
+    target_map = _storage_target_map()
+    fixed: list[str] = []
+    for issue in issues:
+        if not issue.get("auto_fix_supported"):
+            raise RuntimeError(issue.get("summary") or "Datenordner-Reparatur nicht unterstützt.")
+        target = target_map.get(issue.get("key") or "")
+        if not target:
+            raise RuntimeError(f"Unbekannter Datenordner-Schlüssel: {issue.get('key')}")
+        expected_uid = issue.get("expected_uid")
+        expected_gid = issue.get("expected_gid")
+        if expected_uid is None or expected_gid is None:
+            raise RuntimeError(issue.get("summary") or "Erwarteter Besitzer unbekannt.")
+        _apply_storage_ownership_tree_sync(
+            target["runtime_path"],
+            uid=int(expected_uid),
+            gid=int(expected_gid),
+        )
+        fixed.append(target["label"])
+    refreshed = _check_storage_ownership_sync()
+    return {"ok": refreshed.get("ok", False), "fixed": fixed, "storage": refreshed}
+
+
+async def _get_storage_ownership_preflight() -> dict[str, Any]:
+    return await asyncio.to_thread(_check_storage_ownership_sync)
+
+
+async def _log_storage_ownership_preflight() -> None:
+    preflight = await _get_storage_ownership_preflight()
+    for issue in preflight.get("issues", []):
+        logger.warning("Storage ownership preflight issue: %s", issue.get("summary"))
+
+
+def _raise_for_storage_issue_sync(key: str) -> None:
+    issue = _storage_issue_for_key_sync(key)
+    if not issue:
+        return
+    raise RuntimeError(f"{issue.get('summary')} {issue.get('repair_hint')}".strip())
+
+
+async def _ensure_storage_issue_free(key: str) -> None:
+    await asyncio.to_thread(_raise_for_storage_issue_sync, key)
 DEFAULT_SERVER_NAME = os.getenv("TS_CONNECT_DEFAULT_SERVER_NAME", "targetshot-mariadb-mirror")
 DEFAULT_SOURCE_DB_HOST = os.getenv("TS_CONNECT_SOURCE_DB_HOST", "").strip()
 DEFAULT_SOURCE_DB_PORT = int(os.getenv("TS_CONNECT_SOURCE_DB_PORT", "3306"))
@@ -1264,6 +1537,7 @@ def _is_mirror_dump_auth_error(detail: str) -> bool:
 
 
 def _create_mirror_backup_sync(target_path: Path) -> int:
+    _raise_for_storage_issue_sync("mirror_db")
     target_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _tmp_path_for(target_path)
     errors: list[str] = []
@@ -2022,7 +2296,14 @@ async def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any
                 await _host_agent_request("GET", "/api/v1/health", timeout=3.0)
             except Exception as exc:  # noqa: BLE001
                 host_agent_error = _short_error_message(str(exc), 160)
-    overall = git_available and workspace_ready and update_agent_ok
+    storage_preflight = await _get_storage_ownership_preflight()
+    storage_ok = bool(storage_preflight.get("ok"))
+    storage_error: str | None = None
+    if not storage_ok:
+        summaries = [str(issue.get("summary") or "").strip() for issue in storage_preflight.get("issues", [])]
+        summaries = [summary for summary in summaries if summary]
+        storage_error = " | ".join(summaries[:2]) if summaries else "DB-Datenordner-Rechte prüfen"
+    overall = git_available and workspace_ready and update_agent_ok and storage_ok
     if host_agent_required:
         overall = overall and host_agent_ok
     return {
@@ -2030,6 +2311,8 @@ async def _detect_prerequisites(workspace_info: dict[str, Any]) -> dict[str, Any
         "update_agent": update_agent_ok,
         "update_agent_error": update_agent_error,
         "workspace": workspace_ready,
+        "storage": storage_ok,
+        "storage_error": storage_error,
         "host_agent": host_agent_ok if host_agent_required else None,
         "host_agent_error": host_agent_error,
         "ok": overall,
@@ -3558,6 +3841,12 @@ async def ensure_offline_buffer_ready() -> None:
     conn.commit()
     conn.close()
 
+    try:
+        await _ensure_storage_issue_free("backup_db")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Offline-Puffer Storage-Preflight fehlgeschlagen: %s", exc)
+        return
+
     settings = fetch_settings()
     secrets_data = read_secrets_file()
     try:
@@ -3612,6 +3901,7 @@ def verify_admin_password(candidate: str) -> bool:
 @app.on_event("startup")
 async def init_admin_password() -> None:
     ensure_admin_password_file()
+    await _log_storage_ownership_preflight()
     await ensure_offline_buffer_ready()
     current_settings = fetch_settings()
     try:
@@ -4020,6 +4310,10 @@ async def test_confluent(bootstrap: str):
 
 @app.get("/api/test/backup-db", dependencies=[Depends(require_session)])
 async def test_backup_db():
+    try:
+        await _ensure_storage_issue_free("backup_db")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "msg": _short_error_message(str(exc), 220)}
     await ensure_offline_buffer_ready()
     settings = fetch_settings()
     secrets_data = read_secrets_file()
@@ -4044,6 +4338,10 @@ async def test_backup_db():
 @app.get("/api/offline-buffer/export", dependencies=[Depends(require_session)])
 @app.get("/api/backup/export", dependencies=[Depends(require_session)])
 async def export_offline_buffer():
+    try:
+        await _ensure_storage_issue_free("backup_db")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_short_error_message(str(exc), 220)) from exc
     await ensure_offline_buffer_ready()
     settings = fetch_settings()
     secrets_data = read_secrets_file()
@@ -4138,6 +4436,21 @@ async def export_offline_buffer():
 @app.get("/api/backup/mirror-db", dependencies=[Depends(require_session)])
 async def mirror_backup_status():
     return await _refresh_mirror_backup_state()
+
+
+@app.get("/api/storage/preflight", dependencies=[Depends(require_session)])
+async def storage_preflight_status():
+    return await _get_storage_ownership_preflight()
+
+
+@app.post("/api/storage/preflight/fix", dependencies=[Depends(require_session)])
+async def storage_preflight_fix(pw: str = Form(...)):
+    require_admin(pw)
+    try:
+        result = await asyncio.to_thread(_fix_storage_ownership_sync)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_short_error_message(str(exc), 220))
+    return result
 
 
 @app.post("/api/backup/mirror-db/run", dependencies=[Depends(require_session)])
@@ -4848,14 +5161,28 @@ async def update_status(force: bool = False):
 
 @app.get("/api/health/summary", dependencies=[Depends(require_session)])
 async def health_summary():
-    database, confluent, connector, backup, license, apply_state = await asyncio.gather(
+    database, confluent, connector, backup, license, apply_state, storage = await asyncio.gather(
         _check_database_health(),
         _check_confluent_health(),
         _check_connector_health(),
         _check_backup_health(),
         _check_license_health(),
         get_apply_state(),
+        _get_storage_ownership_preflight(),
     )
+    storage_issues = {str(issue.get("key") or ""): issue for issue in storage.get("issues", [])}
+    mirror_storage_issue = storage_issues.get("mirror_db")
+    if mirror_storage_issue:
+        database = {
+            "status": "error",
+            "message": str(mirror_storage_issue.get("summary") or "Mirror-MariaDB-Datenordner-Rechte prüfen"),
+        }
+    backup_storage_issue = storage_issues.get("backup_db")
+    if backup_storage_issue:
+        backup = {
+            "status": "error",
+            "message": str(backup_storage_issue.get("summary") or "Backup-DB-Datenordner-Rechte prüfen"),
+        }
     connector_issue_message = connector.get("message") if connector.get("status") != "ok" else None
     connector_recovery = _classify_recovery_issue(
         apply_state.get("last_error") or connector_issue_message,
@@ -4890,6 +5217,7 @@ async def health_summary():
         "connector": connector,
         "backup": backup,
         "license": license,
+        "storage": storage,
     }
 
 

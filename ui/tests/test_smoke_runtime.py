@@ -66,6 +66,14 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertNotIn("Planabdeckung", template)
         self.assertNotIn("Planlimit", template)
 
+    def test_backup_template_contains_storage_ownership_repair_panel(self):
+        template = TEMPLATE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("storageOwnershipPanel", template)
+        self.assertIn("btnFixStorageOwnership", template)
+        self.assertIn("ui/data/backup-db", template)
+        self.assertIn("ui/data/mariadb", template)
+
     def test_build_keygen_machine_headers_prefers_bearer_token_when_present(self):
         namespace = {
             "KEYGEN_LICENSE_TOKEN": "token-123",
@@ -149,6 +157,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "subprocess": subprocess,
             "DEFAULT_MIRROR_DB_NAME": "SMDB",
             "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+            "_raise_for_storage_issue_sync": lambda key: None,
             "_mirror_dump_candidates": lambda: [("root", "root-from-workspace")],
             "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
             "_fsync_directory": lambda path: None,
@@ -186,6 +195,118 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
         self.assertEqual(commands[0][0:4], ["docker", "exec", "-e", "MYSQL_PWD=root-from-workspace"])
         self.assertIn("mariadb-dump", commands[0])
         self.assertIn("-uroot", commands[0])
+
+    def test_create_mirror_backup_sync_aborts_early_on_storage_preflight_issue(self):
+        namespace = {
+            "Path": pathlib.Path,
+            "_raise_for_storage_issue_sync": mock.Mock(side_effect=RuntimeError("Mirror-MariaDB-Datenordner gehört 1000:1000 statt 999:999")),
+        }
+        _load_items(["_create_mirror_backup_sync"], namespace)
+
+        with self.assertRaisesRegex(RuntimeError, "Mirror-MariaDB-Datenordner"):
+            namespace["_create_mirror_backup_sync"](pathlib.Path("/tmp/mirror-db-backup.sql.gz"))
+
+        namespace["_raise_for_storage_issue_sync"].assert_called_once_with("mirror_db")
+
+    def test_fix_storage_ownership_sync_only_repairs_targeted_db_dirs(self):
+        apply_ownership = mock.Mock()
+        namespace = {
+            "Any": Any,
+            "Path": pathlib.Path,
+            "_check_storage_ownership_sync": mock.Mock(
+                side_effect=[
+                    {
+                        "ok": False,
+                        "issues": [
+                            {
+                                "key": "backup_db",
+                                "label": "Backup-DB",
+                                "auto_fix_supported": True,
+                                "expected_uid": 70,
+                                "expected_gid": 70,
+                            },
+                            {
+                                "key": "mirror_db",
+                                "label": "Mirror-MariaDB",
+                                "auto_fix_supported": True,
+                                "expected_uid": 999,
+                                "expected_gid": 999,
+                            },
+                        ],
+                    },
+                    {"ok": True, "issues": []},
+                ]
+            ),
+            "_storage_target_map": lambda: {
+                "backup_db": {"runtime_path": pathlib.Path("/srv/connector/ui/data/backup-db"), "label": "Backup-DB"},
+                "mirror_db": {"runtime_path": pathlib.Path("/srv/connector/ui/data/mariadb"), "label": "Mirror-MariaDB"},
+            },
+            "_apply_storage_ownership_tree_sync": apply_ownership,
+        }
+        _load_items(["_fix_storage_ownership_sync"], namespace)
+
+        result = namespace["_fix_storage_ownership_sync"]()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            apply_ownership.mock_calls,
+            [
+                mock.call(pathlib.Path("/srv/connector/ui/data/backup-db"), uid=70, gid=70),
+                mock.call(pathlib.Path("/srv/connector/ui/data/mariadb"), uid=999, gid=999),
+            ],
+        )
+
+    def test_check_storage_ownership_sync_flags_missing_runtime_paths(self):
+        backup_target = {
+            "key": "backup_db",
+            "label": "Backup-DB",
+            "runtime_path": pathlib.Path("/srv/connector/ui/data/backup-db"),
+            "server_path": pathlib.Path("/home/maxhany/connector/ui/data/backup-db"),
+            "container_name": "ts-backup-db",
+            "container_user": "postgres",
+        }
+        mirror_target = {
+            "key": "mirror_db",
+            "label": "Mirror-MariaDB",
+            "runtime_path": pathlib.Path("/srv/connector/ui/data/mariadb"),
+            "server_path": pathlib.Path("/home/maxhany/connector/ui/data/mariadb"),
+            "container_name": "ts-mariadb-mirror",
+            "container_user": "mysql",
+        }
+        namespace = {
+            "Any": Any,
+            "Path": pathlib.Path,
+            "_storage_target_definitions": lambda: [backup_target, mirror_target],
+            "_inspect_container_user_ids_sync": mock.Mock(),
+            "_storage_probe_paths": lambda target: [target["runtime_path"]],
+            "_build_storage_issue": lambda target, **kwargs: {
+                "key": target["key"],
+                "reason": kwargs.get("reason"),
+                "summary": f'{target["label"]}-Datenordner fehlt: {target["server_path"]}',
+            },
+            "_now_utc_iso": lambda: "2026-03-21T10:00:00+00:00",
+        }
+        _load_items(["_check_storage_ownership_sync"], namespace)
+
+        result = namespace["_check_storage_ownership_sync"]()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["issues"],
+            [
+                {
+                    "key": "backup_db",
+                    "reason": "missing-path",
+                    "summary": "Backup-DB-Datenordner fehlt: /home/maxhany/connector/ui/data/backup-db",
+                },
+                {
+                    "key": "mirror_db",
+                    "reason": "missing-path",
+                    "summary": "Mirror-MariaDB-Datenordner fehlt: /home/maxhany/connector/ui/data/mariadb",
+                },
+            ],
+        )
+        namespace["_inspect_container_user_ids_sync"].assert_not_called()
 
     def test_build_mirror_dump_command_container_root_omits_tcp_password_flags(self):
         namespace = {
@@ -231,6 +352,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "subprocess": subprocess,
             "DEFAULT_MIRROR_DB_NAME": "SMDB",
             "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+            "_raise_for_storage_issue_sync": lambda key: None,
             "_mirror_dump_candidates": lambda: [("root", "wrong-root"), ("debezium_sync", "db-password")],
             "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
             "_fsync_directory": lambda path: None,
@@ -282,6 +404,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "subprocess": subprocess,
             "DEFAULT_MIRROR_DB_NAME": "SSMDB2",
             "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+            "_raise_for_storage_issue_sync": lambda key: None,
             "_mirror_dump_candidates": lambda: [("debezium_sync", "db-password")],
             "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
             "_fsync_directory": lambda path: None,
@@ -332,6 +455,7 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
             "subprocess": subprocess,
             "DEFAULT_MIRROR_DB_NAME": "SSMDB2",
             "MIRROR_DB_CONTAINER_NAME": "ts-mariadb-mirror",
+            "_raise_for_storage_issue_sync": lambda key: None,
             "_mirror_dump_candidates": lambda: [("root", "wrong-root")],
             "_tmp_path_for": lambda path: path.with_name(path.name + ".tmp"),
             "_fsync_directory": lambda path: None,
@@ -478,6 +602,32 @@ class TsConnectRuntimeSmokeTest(unittest.TestCase):
 
 
 class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_detect_prerequisites_flags_storage_ownership_issues(self):
+        namespace = {
+            "Any": Any,
+            "Path": pathlib.Path,
+            "HOST_AGENT_URL": "",
+            "shutil": types.SimpleNamespace(which=lambda name: "/usr/bin/git"),
+            "os": types.SimpleNamespace(access=lambda path, mode: True, X_OK=os.X_OK),
+            "_read_update_agent_status": mock.AsyncMock(return_value={"available": True}),
+            "_get_storage_ownership_preflight": mock.AsyncMock(
+                return_value={
+                    "ok": False,
+                    "issues": [
+                        {"summary": "Backup-DB-Datenordner gehört 1000:1000 statt 70:70"},
+                    ],
+                }
+            ),
+            "_short_error_message": lambda message, max_len=160: str(message)[:max_len],
+        }
+        _load_items(["_detect_prerequisites"], namespace)
+
+        result = await namespace["_detect_prerequisites"]({"exists": True, "git": True})
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["storage"])
+        self.assertIn("Backup-DB-Datenordner", result["storage_error"])
+
     async def test_ip_allowlist_allows_loopback(self):
         class FakeJsonResponse:
             def __init__(self, payload, status_code=200):
@@ -557,6 +707,7 @@ class TsConnectAsyncRuntimeSmokeTest(unittest.IsolatedAsyncioTestCase):
             "_check_backup_health": backup_health,
             "_check_license_health": license_health,
             "get_apply_state": apply_state,
+            "_get_storage_ownership_preflight": mock.AsyncMock(return_value={"ok": True, "issues": []}),
             "_classify_recovery_issue": lambda message, operation_id=None: {
                 "category": "kafka-connect-unavailable" if "connection refused" in str(message) else None,
                 "label": "Kafka Connect nicht erreichbar" if "connection refused" in str(message) else None,

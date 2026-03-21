@@ -259,7 +259,20 @@ async def launch_update_job(
         workspace_info = await collect_workspace_info_fn()
         prereq = await detect_prerequisites_fn(workspace_info)
         if not prereq.get("ok"):
-            missing = [name for name, available in prereq.items() if name != "ok" and not available]
+            missing: list[str] = []
+            if not prereq.get("git"):
+                missing.append("git")
+            if not prereq.get("workspace"):
+                missing.append("Workspace-Mount")
+            if not prereq.get("update_agent"):
+                detail = prereq.get("update_agent_error")
+                missing.append(f"Update-Agent ({detail})" if detail else "Update-Agent")
+            if prereq.get("storage") is False:
+                detail = prereq.get("storage_error")
+                missing.append(f"DB-Datenordner-Rechte ({detail})" if detail else "DB-Datenordner-Rechte")
+            if prereq.get("host_agent") is False:
+                detail = prereq.get("host_agent_error")
+                missing.append(f"Host-Agent ({detail})" if detail else "Host-Agent")
             detail = "Voraussetzungen fehlen: " + ", ".join(missing)
             return {"ok": False, "error": detail, "code": 400}
         release = await ensure_latest_release_fn(force=force_release_refresh)
